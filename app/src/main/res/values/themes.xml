@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.OpenLounge" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/openlounge_accent</item>
+        <item name="colorPrimaryVariant">@color/openlounge_green</item>
+        <item name="colorOnPrimary">@color/openlounge_bg</item>
+        <item name="colorSecondary">@color/openlounge_green</item>
+        <item name="android:statusBarColor">@color/openlounge_bg</item>
+        <item name="android:navigationBarColor">@color/openlounge_bg</item>
+        <item name="android:windowBackground">@color/openlounge_bg</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

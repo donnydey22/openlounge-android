@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="openlounge_bg">#1C1C1E</color>
+    <color name="openlounge_surface">#2C2C2E</color>
+    <color name="openlounge_accent">#F2B366</color>
+    <color name="openlounge_text">#FFFFFF</color>
+    <color name="openlounge_muted">#A1A1A6</color>
+    <color name="openlounge_green">#5B8C5A</color>
+</resources>
