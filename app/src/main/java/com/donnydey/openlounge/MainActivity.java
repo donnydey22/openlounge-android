@@ -131,7 +131,8 @@ public class MainActivity extends AppCompatActivity {
         s.setAllowFileAccess(false);
         s.setAllowContentAccess(true);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
-        s.setCacheMode(WebSettings.LOAD_DEFAULT);
+        // Always fetch fresh HTML/JS so "Let's go" fixes ship to the WebView.
+        s.setCacheMode(WebSettings.LOAD_NO_CACHE);
         s.setUserAgentString(s.getUserAgentString() + " OpenLoungeAndroid/0.1");
 
         if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
@@ -244,6 +245,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void loadConfiguredUrl() {
+        webView.clearCache(true);
+        CookieManager.getInstance().flush();
         String url = Prefs.getServerUrl(this);
         if (!Prefs.isValidUrl(url)) {
             showSetup();
