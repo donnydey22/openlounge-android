@@ -2,7 +2,7 @@
 <resources>
     <string name="app_name">Open Lounge</string>
     <string name="settings_title">Server settings</string>
-    <string name="server_url_hint">https://your-app.up.railway.app</string>
+    <string name="server_url_hint">https://openlounge-production.up.railway.app</string>
     <string name="server_url_label">Open Lounge server URL</string>
     <string name="save_and_open">Save &amp; open</string>
     <string name="open_settings">Server URL</string>
@@ -12,5 +12,5 @@
     <string name="loading">Loading Open Lounge…</string>
     <string name="retry">Retry</string>
     <string name="perm_rationale">Open Lounge needs the microphone for live audio rooms.</string>
-    <string name="default_server_url"></string>
+    <string name="default_server_url">https://openlounge-production.up.railway.app</string>
 </resources>
