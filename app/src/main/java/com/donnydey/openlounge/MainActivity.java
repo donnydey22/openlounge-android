@@ -134,6 +134,8 @@ public class MainActivity extends AppCompatActivity {
 
     @SuppressLint("SetJavaScriptEnabled")
     private void setupWebView() {
+        // no white flash: WebView paints the launch bg until the page draws
+        webView.setBackgroundColor(ContextCompat.getColor(this, R.color.launch_bg));
         CookieManager.getInstance().setAcceptCookie(true);
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, false);
 
