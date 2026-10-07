@@ -557,7 +557,9 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     @Override
     public String contactsPermission() {
         return ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
-                ? "granted" : "prompt";
+                ? "granted"
+                : (getSharedPreferences("ol_perm", MODE_PRIVATE).getBoolean("contactsAsked", false)
+                        && !shouldShowRequestPermissionRationale(Manifest.permission.READ_CONTACTS)) ? "denied" : "prompt";
     }
 
     /** The web app shows its explainer first; only then calls this, which shows the OS prompt if needed. */
@@ -565,7 +567,10 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     public void requestContacts() {
         handler.post(() -> {
             if ("granted".equals(contactsPermission())) readContactsAsync();
-            else contactsPermLauncher.launch(Manifest.permission.READ_CONTACTS);
+            else {
+                getSharedPreferences("ol_perm", MODE_PRIVATE).edit().putBoolean("contactsAsked", true).apply();
+                contactsPermLauncher.launch(Manifest.permission.READ_CONTACTS); // if permanently denied this returns false at once → page shows Open Settings
+            }
         });
     }
 
@@ -576,7 +581,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             try (Cursor c = getContentResolver().query(ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
                     new String[]{ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER},
                     null, null, null)) {
-                while (c != null && c.moveToNext() && byName.size() < 5000) {
+                while (c != null && c.moveToNext()) { // no cap: the page batches matching
                     String name = c.getString(0);
                     String num = c.getString(1);
                     if (num == null) continue;
@@ -591,7 +596,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 JSONArray arr = new JSONArray();
                 for (Map.Entry<String, List<String>> e : byName.entrySet())
                     arr.put(new JSONObject().put("name", e.getKey()).put("numbers", new JSONArray(e.getValue())));
-                deliverContacts(new JSONObject().put("granted", true).put("country", country).put("contacts", arr).toString());
+                deliverContacts(new JSONObject().put("granted", true).put("country", country).put("accessPrivileges", "all").put("contacts", arr).toString());
             } catch (Exception e) {
                 deliverContacts("{\"granted\":false}");
             }
