@@ -31,6 +31,7 @@ public final class SessionBridge {
         void haptic(String type);
         void phoneAuthStart(String reqId, String e164);
         void phoneAuthConfirm(String reqId, String code);
+        void setBadge(int count);
     }
 
     private final SecureSessionStore store;
@@ -46,6 +47,7 @@ public final class SessionBridge {
         public void haptic(String type) {}
         public void phoneAuthStart(String id, String p) {}
         public void phoneAuthConfirm(String id, String c) {}
+        public void setBadge(int n) {}
     };
 
     public SessionBridge(Context ctx) {
@@ -117,6 +119,10 @@ public final class SessionBridge {
 
     @JavascriptInterface
     public void haptic(String type) { if (trusted()) host.haptic(type == null ? "light" : type); }
+
+    // ---- 0.2.7: numeric app-icon badge (total unread); 0 clears ----
+    @JavascriptInterface
+    public void setBadge(int count) { if (trusted()) host.setBadge(Math.max(0, count)); }
 
     // ---- native-side helpers (not exposed to JS) ----
 

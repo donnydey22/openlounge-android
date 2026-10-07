@@ -22,6 +22,8 @@ import java.util.Map;
  * data = { type, title, body, channel: messages|rooms|social, tag, url, clear? }.
  * Same tag replaces the previous notification (per DM thread, "followers", per room); clear=1 removes it
  * (DM read on another device). Tapping opens the deep link inside the WebView.
+ * 0.2.7: optional data.badge (total unread = unread DMs + unread notifications) → NotificationCompat.setNumber
+ * (launchers that read the notification count) and ShortcutBadger (Samsung One UI, etc.) via AppBadge.
  */
 public class OpenLoungeMessagingService extends FirebaseMessagingService {
     public static final String EXTRA_OPEN_PATH = "open_path";
@@ -35,6 +37,8 @@ public class OpenLoungeMessagingService extends FirebaseMessagingService {
     public void onMessageReceived(@NonNull RemoteMessage message) {
         Map<String, String> d = message.getData();
         String tag = d.containsKey("tag") ? d.get("tag") : "openlounge";
+        int badge = AppBadge.parse(d.get("badge"));
+        if (badge >= 0) AppBadge.set(this, badge);
         if ("1".equals(d.get("clear"))) {
             NotificationManagerCompat.from(this).cancel(tag, 0);
             return;
@@ -46,18 +50,25 @@ public class OpenLoungeMessagingService extends FirebaseMessagingService {
             body = message.getNotification().getBody();
         }
         if (title == null) return;
-        show(this, d.get("channel"), tag, title, body == null ? "" : body, d.get("url"));
+        show(this, d.get("channel"), tag, title, body == null ? "" : body, d.get("url"), badge);
     }
 
     public static void ensureChannels(Context ctx) {
         if (Build.VERSION.SDK_INT < 26) return;
         NotificationManager nm = ctx.getSystemService(NotificationManager.class);
-        nm.createNotificationChannel(new NotificationChannel("messages", ctx.getString(R.string.channel_messages), NotificationManager.IMPORTANCE_HIGH));
-        nm.createNotificationChannel(new NotificationChannel("rooms", ctx.getString(R.string.channel_rooms), NotificationManager.IMPORTANCE_HIGH));
-        nm.createNotificationChannel(new NotificationChannel("social", ctx.getString(R.string.channel_social), NotificationManager.IMPORTANCE_DEFAULT));
+        nm.createNotificationChannel(channel("messages", ctx.getString(R.string.channel_messages), NotificationManager.IMPORTANCE_HIGH));
+        nm.createNotificationChannel(channel("rooms", ctx.getString(R.string.channel_rooms), NotificationManager.IMPORTANCE_HIGH));
+        nm.createNotificationChannel(channel("social", ctx.getString(R.string.channel_social), NotificationManager.IMPORTANCE_DEFAULT));
     }
 
-    static void show(Context ctx, String channel, String tag, String title, String body, String path) {
+    @androidx.annotation.RequiresApi(26)
+    private static NotificationChannel channel(String id, String name, int importance) {
+        NotificationChannel c = new NotificationChannel(id, name, importance);
+        c.setShowBadge(true); // default is true; explicit so app icon badges/dots stay on
+        return c;
+    }
+
+    static void show(Context ctx, String channel, String tag, String title, String body, String path, int badge) {
         ensureChannels(ctx);
         if (!"messages".equals(channel) && !"rooms".equals(channel)) channel = "social";
         Intent open = new Intent(ctx, MainActivity.class)
@@ -75,6 +86,7 @@ public class OpenLoungeMessagingService extends FirebaseMessagingService {
                 .setContentIntent(pi)
                 .setCategory("messages".equals(channel) ? NotificationCompat.CATEGORY_MESSAGE : NotificationCompat.CATEGORY_SOCIAL)
                 .setPriority("social".equals(channel) ? NotificationCompat.PRIORITY_DEFAULT : NotificationCompat.PRIORITY_HIGH);
+        if (badge > 0) b.setNumber(badge).setBadgeIconType(NotificationCompat.BADGE_ICON_SMALL);
         try {
             NotificationManagerCompat.from(ctx).notify(tag, 0, b.build());
         } catch (SecurityException ignored) {

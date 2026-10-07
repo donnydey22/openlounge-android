@@ -29,8 +29,8 @@ android {
         applicationId "com.donnydey.openlounge"
         minSdk 24
         targetSdk 34
-        versionCode 8
-        versionName "0.2.6"
+        versionCode 9
+        versionName "0.2.7"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -94,6 +94,8 @@ dependencies {
     // Play Integrity app verification for phone auth (pulled by firebase-auth; pinned for clarity)
     implementation 'com.google.android.play:integrity:1.4.0'
     implementation 'androidx.browser:browser:1.8.0'
+    // numeric launcher badges (Samsung One UI, etc.) — AppBadge
+    implementation 'me.leolin:ShortcutBadger:1.1.22@aar'
 
     androidTestImplementation 'androidx.test:runner:1.6.2'
     androidTestImplementation 'androidx.test.ext:junit:1.2.1'
