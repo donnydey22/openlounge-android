@@ -142,4 +142,25 @@
         android:padding="10dp"
         android:src="@drawable/ic_settings"
         android:visibility="gone" />
+    <!-- Launch wordmark overlay (LaunchOverlay.java); mirrors web header .ol-word: bold, tracking-tight -->
+    <FrameLayout
+        android:id="@+id/launch_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@color/launch_bg"
+        android:clickable="true"
+        android:focusable="true">
+        <TextView
+            android:id="@+id/launch_word"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:text="Open Lounge"
+            android:textColor="@color/launch_text"
+            android:textSize="34sp"
+            android:textStyle="bold"
+            android:fontFamily="sans-serif"
+            android:letterSpacing="-0.025"
+            android:importantForAccessibility="no" />
+    </FrameLayout>
 </FrameLayout>

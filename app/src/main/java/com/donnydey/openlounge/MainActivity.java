@@ -31,6 +31,7 @@ import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
+import androidx.core.splashscreen.SplashScreen;
 import androidx.webkit.WebSettingsCompat;
 import androidx.webkit.WebViewFeature;
 
@@ -136,8 +137,13 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 fileCallback = null;
             });
 
+    private LaunchOverlay launchOverlay;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        // Static native splash = plain brand background (no icon); the wordmark animation is LaunchOverlay.
+        SplashScreen splash = SplashScreen.installSplashScreen(this);
+        splash.setOnExitAnimationListener(v -> v.remove()); // hand off instantly: overlay has the same bg
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
         pendingOpenPath = openPathFrom(getIntent());
@@ -147,6 +153,8 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 webView.evaluateJavascript("window.__olPushToken&&window.__olPushToken(" + JSONObject.quote(token) + ")", null);
         }));
         PushTokens.refresh(this);
+        launchOverlay = new LaunchOverlay(findViewById(R.id.launch_overlay), findViewById(R.id.launch_word));
+        launchOverlay.start();
 
         webView = findViewById(R.id.webview);
         setupPanel = findViewById(R.id.setup_panel);
@@ -227,6 +235,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 }
                 loadRetries = 0;
                 showWeb();
+                launchOverlay.markReady();
             }
 
             @Override
@@ -430,6 +439,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     }
 
     private void showSetup() {
+        if (launchOverlay != null) launchOverlay.markReady();
         setupPanel.setVisibility(View.VISIBLE);
         loadingPanel.setVisibility(View.GONE);
         errorPanel.setVisibility(View.GONE);
@@ -455,6 +465,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     }
 
     private void showError(String msg) {
+        if (launchOverlay != null) launchOverlay.markReady();
         setupPanel.setVisibility(View.GONE);
         loadingPanel.setVisibility(View.GONE);
         errorPanel.setVisibility(View.VISIBLE);
