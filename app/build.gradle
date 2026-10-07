@@ -30,7 +30,7 @@ android {
         minSdk 24
         targetSdk 34
         versionCode 9
-        versionName "0.2.7"
+        versionName "0.2.7-bio"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -96,7 +96,10 @@ dependencies {
     implementation 'androidx.browser:browser:1.8.0'
     // numeric launcher badges (Samsung One UI, etc.) — AppBadge
     implementation 'me.leolin:ShortcutBadger:1.1.22@aar'
+    // opt-in biometric app lock (BiometricLock)
+    implementation 'androidx.biometric:biometric:1.1.0'
 
+    testImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test:runner:1.6.2'
     androidTestImplementation 'androidx.test.ext:junit:1.2.1'
 }

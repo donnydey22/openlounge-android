@@ -18,4 +18,10 @@
     <string name="channel_rooms">Rooms</string>
     <string name="channel_social">People</string>
     <string name="share_title">Share via</string>
+    <string name="lock_locked">Open Lounge is locked</string>
+    <string name="lock_prompt_title">Unlock Open Lounge</string>
+    <string name="lock_prompt_enable">Turn on app lock</string>
+    <string name="lock_retry">Unlock</string>
+    <string name="lock_other_way">Use another way</string>
+    <string name="lock_failed">Couldn’t verify it’s you. Try again, or use your PIN, pattern or password.</string>
 </resources>

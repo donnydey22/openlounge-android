@@ -139,6 +139,15 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
 
     private LaunchOverlay launchOverlay;
 
+    // ---- opt-in biometric app lock (BiometricLock) ----
+    private View lockOverlay;
+    private View lockActions;
+    private TextView lockMessage;
+    private boolean locked = false;
+    private boolean prompting = false;
+    /** elapsedRealtime when the app went to the background; 0 = cold start */
+    private long backgroundedAt = 0;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         // Static native splash = plain brand background (no icon); the wordmark animation is LaunchOverlay.
@@ -169,6 +178,14 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         findViewById(R.id.btn_change_url).setOnClickListener(v -> openSettings());
         gearButton.setOnClickListener(v -> openSettings());
 
+        lockOverlay = findViewById(R.id.lock_overlay);
+        lockActions = findViewById(R.id.lock_actions);
+        lockMessage = findViewById(R.id.lock_message);
+        findViewById(R.id.btn_unlock).setOnClickListener(v -> promptUnlock(false));
+        findViewById(R.id.btn_unlock_other).setOnClickListener(v -> promptUnlock(true));
+        // cold start: lock before anything from the WebView is visible (the page still loads behind the overlay)
+        if (BiometricLock.shouldLock(BiometricLock.isEnabled(this), 0, 0, BiometricLock.LOCK_AFTER_MS)) showLock();
+
         setupWebView();
 
         String url = Prefs.getServerUrl(this);
@@ -191,6 +208,14 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         webView.setBackgroundColor(Color.parseColor(dark ? "#0b0b0d" : "#f4f3ee"));
         webView.setOverScrollMode(View.OVER_SCROLL_NEVER);
         webView.addJavascriptInterface(sessionBridge, SessionBridge.JS_NAME);
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            try {
+                java.util.Set<String> origins = new java.util.HashSet<>(java.util.Arrays.asList(
+                        "https://openlounge.app", "https://www.openlounge.app", Prefs.LEGACY_RAILWAY_URL));
+                androidx.webkit.WebViewCompat.addDocumentStartJavaScript(webView, SessionBridge.BIOMETRICS_SHIM, origins);
+            } catch (Exception ignored) {
+            }
+        }
 
         WebSettings s = webView.getSettings();
         s.setJavaScriptEnabled(true);
@@ -234,6 +259,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                     return;
                 }
                 loadRetries = 0;
+                view.evaluateJavascript(SessionBridge.BIOMETRICS_SHIM, null); // no-op if already defined
                 showWeb();
                 launchOverlay.markReady();
             }
@@ -628,6 +654,97 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         }
     }
 
+    // ---------- biometric app lock ----------
+
+    private void showLock() {
+        locked = true;
+        lockMessage.setText(R.string.lock_locked);
+        lockActions.setVisibility(View.GONE);
+        lockOverlay.setVisibility(View.VISIBLE);
+        if (webView != null) webView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+    }
+
+    private void hideLock() {
+        locked = false;
+        lockOverlay.setVisibility(View.GONE);
+        if (webView != null) webView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_AUTO);
+    }
+
+    private void promptUnlock(boolean otherWay) {
+        if (prompting) return;
+        if (!BiometricLock.isAvailable(this)) { // device security was removed: never lock the user out
+            BiometricLock.setEnabledFlag(this, false);
+            hideLock();
+            return;
+        }
+        prompting = true;
+        lockActions.setVisibility(View.GONE);
+        BiometricLock.prompt(this, getString(R.string.lock_prompt_title), null, otherWay, (status, msg) -> {
+            prompting = false;
+            if ("success".equals(status)) {
+                hideLock();
+            } else if ("unavailable".equals(status) && !BiometricLock.isAvailable(this)) {
+                BiometricLock.setEnabledFlag(this, false);
+                hideLock();
+            } else {
+                // cancelled / failed: stay locked, offer retry and "Use another way" (device PIN / pattern / password)
+                lockMessage.setText("cancelled".equals(status) ? getString(R.string.lock_locked) : getString(R.string.lock_failed));
+                lockActions.setVisibility(View.VISIBLE);
+            }
+        });
+    }
+
+    @Override
+    public boolean biometricsAvailable() {
+        return BiometricLock.isAvailable(this);
+    }
+
+    @Override
+    public boolean biometricsEnabled() {
+        return BiometricLock.isEnabled(this);
+    }
+
+    @Override
+    public void biometricsSetEnabled(String reqId, boolean on) {
+        handler.post(() -> {
+            if (!on) {
+                BiometricLock.setEnabledFlag(this, false);
+                deliverBio(reqId, false);
+                return;
+            }
+            if (prompting) { deliverBio(reqId, BiometricLock.isEnabled(this)); return; }
+            prompting = true;
+            // turning it on requires a successful prompt first
+            BiometricLock.prompt(this, getString(R.string.lock_prompt_enable), null, false, (status, msg) -> {
+                prompting = false;
+                boolean ok = "success".equals(status);
+                if (ok) BiometricLock.setEnabledFlag(this, true);
+                deliverBio(reqId, BiometricLock.isEnabled(this));
+            });
+        });
+    }
+
+    private void deliverBio(String reqId, boolean enabled) {
+        if (webView != null)
+            webView.evaluateJavascript("window.__olBio&&window.__olBio(" + JSONObject.quote(reqId) + ",'" + enabled + "')", null);
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        if (!prompting) backgroundedAt = android.os.SystemClock.elapsedRealtime();
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        if (backgroundedAt > 0 && !locked && BiometricLock.shouldLock(BiometricLock.isEnabled(this), backgroundedAt,
+                android.os.SystemClock.elapsedRealtime(), BiometricLock.LOCK_AFTER_MS)) {
+            showLock();
+        }
+        backgroundedAt = 0;
+    }
+
     @Override
     public void haptic(String type) {
         handler.post(() -> {
@@ -641,6 +758,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
 
     @Override
     public void onBackPressed() {
+        if (locked) { moveTaskToBack(true); return; }
         if (webView.getVisibility() == View.VISIBLE && webView.canGoBack()) {
             webView.goBack();
         } else {
@@ -660,12 +778,19 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         super.onPause();
         CookieManager.getInstance().flush();
         dispatchNativeVisibility(false);
+        // privacy: cover the page in the recents thumbnail while the lock is on (unless our own prompt is up)
+        if (!prompting && !locked && BiometricLock.isEnabled(this)) lockOverlay.setVisibility(View.VISIBLE);
     }
 
     @Override
     protected void onResume() {
         super.onResume();
         dispatchNativeVisibility(true);
+        if (locked) {
+            if (!prompting && lockActions.getVisibility() != View.VISIBLE) handler.post(() -> promptUnlock(false));
+        } else if (lockOverlay != null) {
+            lockOverlay.setVisibility(View.GONE);
+        }
     }
 
     @Override

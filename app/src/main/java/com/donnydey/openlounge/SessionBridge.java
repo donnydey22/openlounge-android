@@ -33,6 +33,9 @@ public final class SessionBridge {
         void phoneAuthConfirm(String reqId, String code);
         void setBadge(int count);
         void openAuth(String url);
+        boolean biometricsAvailable();
+        boolean biometricsEnabled();
+        void biometricsSetEnabled(String reqId, boolean on);
     }
 
     private final SecureSessionStore store;
@@ -50,6 +53,9 @@ public final class SessionBridge {
         public void phoneAuthConfirm(String id, String c) {}
         public void setBadge(int n) {}
         public void openAuth(String u) {}
+        public boolean biometricsAvailable() { return false; }
+        public boolean biometricsEnabled() { return false; }
+        public void biometricsSetEnabled(String id, boolean on) {}
     };
 
     public SessionBridge(Context ctx) {
@@ -166,4 +172,29 @@ public final class SessionBridge {
         if (!trusted() || reqId == null || reqId.length() > 100 || code == null || !code.matches("[0-9]{4,8}")) return;
         host.phoneAuthConfirm(reqId, code);
     }
+
+    // ---- biometric app lock (opt-in). JS sees window.OpenLoungeNative.biometrics = {isAvailable(), getEnabled(),
+    // setEnabled(bool)} via BIOMETRICS_SHIM; these flat methods are its transport. setEnabled(true) only takes
+    // effect after a successful prompt; the result arrives as window.__olBio(reqId, "true"|"false").
+    @JavascriptInterface
+    public String biometricsIsAvailable() { return trusted() && host.biometricsAvailable() ? "true" : "false"; }
+
+    @JavascriptInterface
+    public String biometricsGetEnabled() { return trusted() && host.biometricsEnabled() ? "true" : "false"; }
+
+    @JavascriptInterface
+    public void biometricsSetEnabled(String reqId, boolean on) {
+        if (!trusted() || reqId == null || reqId.length() > 100) return;
+        host.biometricsSetEnabled(reqId, on);
+    }
+
+    /** Promise-based window.OpenLoungeNative.biometrics; also mirrored as window.OpenLoungeBiometrics. */
+    public static final String BIOMETRICS_SHIM = "(function(){try{var N=window.OpenLoungeNative;"
+            + "if(!N||typeof N.biometricsIsAvailable!=='function'||window.OpenLoungeBiometrics)return;"
+            + "var p={},s=0;window.__olBio=function(id,r){var f=p[id];if(f){delete p[id];f(r==='true'||r===true)}};"
+            + "var api={isAvailable:function(){return Promise.resolve(N.biometricsIsAvailable()==='true')},"
+            + "getEnabled:function(){return Promise.resolve(N.biometricsGetEnabled()==='true')},"
+            + "setEnabled:function(on){return new Promise(function(res){var id='b'+Date.now().toString(36)+(++s);"
+            + "p[id]=res;N.biometricsSetEnabled(id,!!on)})}};"
+            + "window.OpenLoungeBiometrics=api;try{N.biometrics=api}catch(e){}}catch(e){}})();";
 }
