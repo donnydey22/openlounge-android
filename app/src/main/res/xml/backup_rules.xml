@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 6–11 auto-backup. The session never leaves the device: its Keystore key can't be backed up, so a
+     restored ciphertext would be undecryptable, and the pre-0.2.4 plaintext file must not be copied anywhere. -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="openlounge_session_secure.xml" />
+    <exclude domain="sharedpref" path="openlounge_session.xml" />
+</full-backup-content>
