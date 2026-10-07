@@ -29,8 +29,8 @@ android {
         applicationId "com.donnydey.openlounge"
         minSdk 24
         targetSdk 34
-        versionCode 9
-        versionName "0.2.7-bio"
+        versionCode 10
+        versionName "0.2.8"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
