@@ -32,6 +32,7 @@ public final class SessionBridge {
         void phoneAuthStart(String reqId, String e164);
         void phoneAuthConfirm(String reqId, String code);
         void setBadge(int count);
+        void openAuth(String url);
     }
 
     private final SecureSessionStore store;
@@ -48,6 +49,7 @@ public final class SessionBridge {
         public void phoneAuthStart(String id, String p) {}
         public void phoneAuthConfirm(String id, String c) {}
         public void setBadge(int n) {}
+        public void openAuth(String u) {}
     };
 
     public SessionBridge(Context ctx) {
@@ -123,6 +125,10 @@ public final class SessionBridge {
     // ---- 0.2.7: numeric app-icon badge (total unread); 0 clears ----
     @JavascriptInterface
     public void setBadge(int count) { if (trusted()) host.setBadge(Math.max(0, count)); }
+
+    // ---- 0.2.7: Google sign-in in a Custom Tab (Google blocks OAuth in embedded WebViews); returns via openlounge://auth ----
+    @JavascriptInterface
+    public void openAuth(String url) { if (trusted() && url != null && url.length() < 2000) host.openAuth(url); }
 
     // ---- native-side helpers (not exposed to JS) ----
 

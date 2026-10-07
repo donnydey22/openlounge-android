@@ -478,6 +478,12 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
 
     private static String openPathFrom(Intent i) {
         if (i == null) return null;
+        Uri data = i.getData();
+        if (data != null && "openlounge".equals(data.getScheme()) && "auth".equals(data.getHost())) {
+            // OAuth return from the Custom Tab → the web app's /auth/complete (it redeems the code with its PKCE verifier)
+            String q = data.getEncodedQuery();
+            return (q == null || q.length() > 2000) ? "/auth/complete" : "/auth/complete?" + q;
+        }
         String p = i.getStringExtra(OpenLoungeMessagingService.EXTRA_OPEN_PATH);
         // relative in-app paths only ("/room/x", "/messages/u_1") — never another origin
         if (p == null || !p.startsWith("/") || p.startsWith("//") || p.contains("\\") || p.length() > 300) return null;
@@ -596,6 +602,20 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                     && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
                 notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS);
             PushTokens.refresh(this);
+        });
+    }
+
+    @Override
+    public void openAuth(String url) {
+        handler.post(() -> {
+            Uri u = Uri.parse(url);
+            if (!"https".equalsIgnoreCase(u.getScheme()) || !(Prefs.isTrustedOrigin(u) || isConfiguredHost(u))
+                    || u.getPath() == null || !u.getPath().matches("/(api/)?auth/(google|apple|link)/.*")) return;
+            try {
+                new androidx.browser.customtabs.CustomTabsIntent.Builder().setShowTitle(true).build().launchUrl(this, u);
+            } catch (Exception e) {
+                try { startActivity(new Intent(Intent.ACTION_VIEW, u)); } catch (Exception ignored) {}
+            }
         });
     }
 
