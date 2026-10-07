@@ -36,6 +36,8 @@ public final class SessionBridge {
         boolean biometricsAvailable();
         boolean biometricsEnabled();
         void biometricsSetEnabled(String reqId, boolean on);
+        /** 0.3.0: one-off prompt (quick sign-in with screen name); result true only on success. */
+        void biometricsAuthenticate(String reqId);
     }
 
     private final SecureSessionStore store;
@@ -56,6 +58,7 @@ public final class SessionBridge {
         public boolean biometricsAvailable() { return false; }
         public boolean biometricsEnabled() { return false; }
         public void biometricsSetEnabled(String id, boolean on) {}
+        public void biometricsAuthenticate(String id) {}
     };
 
     public SessionBridge(Context ctx) {
@@ -188,6 +191,12 @@ public final class SessionBridge {
         host.biometricsSetEnabled(reqId, on);
     }
 
+    @JavascriptInterface
+    public void biometricsAuthenticate(String reqId) {
+        if (!trusted() || reqId == null || reqId.length() > 100) return;
+        host.biometricsAuthenticate(reqId);
+    }
+
     /** Promise-based window.OpenLoungeNative.biometrics; also mirrored as window.OpenLoungeBiometrics. */
     public static final String BIOMETRICS_SHIM = "(function(){try{var N=window.OpenLoungeNative;"
             + "if(!N||typeof N.biometricsIsAvailable!=='function'||window.OpenLoungeBiometrics)return;"
@@ -195,6 +204,8 @@ public final class SessionBridge {
             + "var api={isAvailable:function(){return Promise.resolve(N.biometricsIsAvailable()==='true')},"
             + "getEnabled:function(){return Promise.resolve(N.biometricsGetEnabled()==='true')},"
             + "setEnabled:function(on){return new Promise(function(res){var id='b'+Date.now().toString(36)+(++s);"
-            + "p[id]=res;N.biometricsSetEnabled(id,!!on)})}};"
+            + "p[id]=res;N.biometricsSetEnabled(id,!!on)})},"
+            + "authenticate:function(){return new Promise(function(res){if(typeof N.biometricsAuthenticate!=='function')return res(false);"
+            + "var id='a'+Date.now().toString(36)+(++s);p[id]=res;N.biometricsAuthenticate(id)})}};"
             + "window.OpenLoungeBiometrics=api;try{N.biometrics=api}catch(e){}}catch(e){}})();";
 }

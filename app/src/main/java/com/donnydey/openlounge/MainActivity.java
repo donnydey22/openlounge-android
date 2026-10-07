@@ -729,6 +729,18 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         });
     }
 
+    @Override
+    public void biometricsAuthenticate(String reqId) {
+        handler.post(() -> {
+            if (prompting || !BiometricLock.isAvailable(this) || !BiometricLock.isEnabled(this)) { deliverBio(reqId, false); return; }
+            prompting = true;
+            BiometricLock.prompt(this, getString(R.string.lock_prompt_title), null, false, (status, msg) -> {
+                prompting = false;
+                deliverBio(reqId, "success".equals(status));
+            });
+        });
+    }
+
     private void deliverBio(String reqId, boolean enabled) {
         if (webView != null)
             webView.evaluateJavascript("window.__olBio&&window.__olBio(" + JSONObject.quote(reqId) + ",'" + enabled + "')", null);
