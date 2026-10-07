@@ -10,4 +10,11 @@
         <item name="android:windowBackground">@color/openlounge_bg</item>
         <item name="android:windowLightStatusBar">false</item>
     </style>
+
+    <!-- Launch theme: plain web-app background, no icon (wordmark animates in LaunchOverlay) -->
+    <style name="Theme.OpenLounge.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/launch_bg</item>
+        <item name="windowSplashScreenAnimatedIcon">@android:color/transparent</item>
+        <item name="postSplashScreenTheme">@style/Theme.OpenLounge</item>
+    </style>
 </resources>
