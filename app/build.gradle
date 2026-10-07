@@ -2,14 +2,22 @@ plugins {
     id 'com.android.application'
 }
 
-// Release signing: android/keystore.properties (never committed) → storeFile/storePassword/keyAlias/keyPassword.
-// It points at the key that signed every APK Donny has installed (0.2.1 and earlier), so updates install in place
-// over the existing app — and keep its data, i.e. nobody is signed out by the update.
+// Release signing — two sources, first match wins:
+//   1) Environment (CI / the new upload key):  OPENLOUNGE_RELEASE_STORE_FILE, OPENLOUNGE_RELEASE_STORE_PASSWORD,
+//      OPENLOUNGE_RELEASE_KEY_ALIAS, OPENLOUNGE_RELEASE_KEY_PASSWORD  (e.g. `set -a; . ~/.secrets/openlounge-release.env`).
+//      This is the RSA-4096 release key (~/.secrets/openlounge-release.jks). NOTE: an APK signed with it will NOT install
+//      over builds signed with the old key — switch only for a fresh distribution (Play / new package install).
+//   2) android/keystore.properties (never committed) → storeFile/storePassword/keyAlias/keyPassword. It points at the
+//      key that signed every APK Donny has installed (0.2.1 and earlier), so updates install in place and keep data.
+// Neither present → release builds are unsigned (assembleRelease still works; the APK just can't be installed).
 def keystorePropsFile = rootProject.file('keystore.properties')
 def keystoreProps = new Properties()
 if (keystorePropsFile.exists()) {
     keystorePropsFile.withInputStream { keystoreProps.load(it) }
 }
+def envSigning = ['OPENLOUNGE_RELEASE_STORE_FILE', 'OPENLOUNGE_RELEASE_STORE_PASSWORD', 'OPENLOUNGE_RELEASE_KEY_ALIAS', 'OPENLOUNGE_RELEASE_KEY_PASSWORD']
+        .every { System.getenv(it) }
+def hasSigning = envSigning || keystorePropsFile.exists()
 
 android {
     namespace 'com.donnydey.openlounge'
@@ -26,7 +34,15 @@ android {
 
     signingConfigs {
         release {
-            if (keystorePropsFile.exists()) {
+            if (envSigning) {
+                storeFile file(System.getenv('OPENLOUNGE_RELEASE_STORE_FILE'))
+                storePassword System.getenv('OPENLOUNGE_RELEASE_STORE_PASSWORD')
+                keyAlias System.getenv('OPENLOUNGE_RELEASE_KEY_ALIAS')
+                keyPassword System.getenv('OPENLOUNGE_RELEASE_KEY_PASSWORD')
+                enableV1Signing true
+                enableV2Signing true
+                enableV3Signing true
+            } else if (keystorePropsFile.exists()) {
                 storeFile file(keystoreProps['storeFile'])
                 storePassword keystoreProps['storePassword']
                 keyAlias keystoreProps['keyAlias']
@@ -47,7 +63,7 @@ android {
         release {
             minifyEnabled false
             debuggable false
-            if (keystorePropsFile.exists()) signingConfig signingConfigs.release
+            if (hasSigning) signingConfig signingConfigs.release
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
