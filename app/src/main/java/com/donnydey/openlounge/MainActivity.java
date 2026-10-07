@@ -8,6 +8,8 @@ import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.View;
 import android.webkit.CookieManager;
 import android.webkit.PermissionRequest;
@@ -35,6 +37,8 @@ import androidx.webkit.WebViewFeature;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.textfield.TextInputEditText;
 
+import org.json.JSONArray;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -46,6 +50,13 @@ public class MainActivity extends AppCompatActivity {
     private TextView errorText;
     private ImageButton gearButton;
     private TextInputEditText urlInput;
+
+    private SessionBridge sessionBridge;
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    /** one-time 0.2.1 → 0.2.3 move from the railway.app origin to openlounge.app (see migrateLegacyOrigin) */
+    private boolean migrating = false;
+    private int loadRetries = 0;
+    private final Runnable retryLoad = this::loadConfiguredUrl;
 
     private PermissionRequest pendingWebPerm;
     private ValueCallback<Uri[]> fileCallback;
@@ -116,7 +127,11 @@ public class MainActivity extends AppCompatActivity {
     @SuppressLint("SetJavaScriptEnabled")
     private void setupWebView() {
         CookieManager.getInstance().setAcceptCookie(true);
-        CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
+        CookieManager.getInstance().setAcceptThirdPartyCookies(webView, false);
+
+        // Durable native token store mirrored by src/lib/session.ts (window.OpenLoungeNative)
+        sessionBridge = new SessionBridge(this);
+        webView.addJavascriptInterface(sessionBridge, SessionBridge.JS_NAME);
 
         WebSettings s = webView.getSettings();
         s.setJavaScriptEnabled(true);
@@ -133,7 +148,7 @@ public class MainActivity extends AppCompatActivity {
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
         // Always fetch fresh HTML/JS so "Let's go" fixes ship to the WebView.
         s.setCacheMode(WebSettings.LOAD_NO_CACHE);
-        s.setUserAgentString(s.getUserAgentString() + " OpenLoungeAndroid/0.1");
+        s.setUserAgentString(s.getUserAgentString() + " OpenLoungeAndroid/" + BuildConfig.VERSION_NAME);
 
         if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
             // Let the web app control its own theme via Settings toggle
@@ -143,32 +158,50 @@ public class MainActivity extends AppCompatActivity {
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
-                showLoading();
+                sessionBridge.setCurrentUrl(url);
+                if (!migrating) showLoading();
+            }
+
+            @Override
+            public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
+                sessionBridge.setCurrentUrl(url);
             }
 
             @Override
             public void onPageFinished(WebView view, String url) {
+                CookieManager.getInstance().flush();
+                if (migrating) {
+                    if (url != null && url.startsWith(Prefs.LEGACY_RAILWAY_URL)) readLegacyOriginSession();
+                    return;
+                }
+                loadRetries = 0;
                 showWeb();
             }
 
             @Override
             public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
-                if (request != null && request.isForMainFrame()) {
-                    String msg = "Could not load Open Lounge.\n\n"
-                            + (error != null && error.getDescription() != null
-                            ? error.getDescription() : "Network error")
-                            + "\n\nCheck your server URL and that the host is reachable over HTTPS.";
-                    showError(msg);
+                if (request == null || !request.isForMainFrame()) return;
+                if (migrating) {
+                    // can't reach the old origin right now: carry on, try the migration again next launch
+                    finishMigration(false);
+                    return;
                 }
+                // No raw network errors on screen: a calm message and a quiet automatic retry.
+                showError(getString(R.string.offline_message));
+                handler.removeCallbacks(retryLoad);
+                long delay = Math.min(30_000L, 2_000L << Math.min(loadRetries++, 4));
+                handler.postDelayed(retryLoad, delay);
             }
 
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri uri = request.getUrl();
                 String scheme = uri.getScheme();
-                if ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme)) {
-                    return false;
+                boolean web = "http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme);
+                if (web && (Prefs.isTrustedOrigin(uri) || isConfiguredHost(uri))) {
+                    return false; // stays in the app
                 }
+                // everything else (other sites, tel:, mailto:, intents) opens outside the app
                 try {
                     startActivity(new Intent(Intent.ACTION_VIEW, uri));
                 } catch (Exception ignored) {
@@ -244,16 +277,82 @@ public class MainActivity extends AppCompatActivity {
         loadConfiguredUrl();
     }
 
+    private boolean isConfiguredHost(Uri uri) {
+        Uri conf = Uri.parse(Prefs.getServerUrl(this));
+        return conf.getHost() != null && conf.getHost().equalsIgnoreCase(uri.getHost());
+    }
+
     private void loadConfiguredUrl() {
-        webView.clearCache(true);
+        handler.removeCallbacks(retryLoad);
+        webView.clearCache(true); // HTTP cache only — localStorage, cookies and the token store are kept
         CookieManager.getInstance().flush();
         String url = Prefs.getServerUrl(this);
         if (!Prefs.isValidUrl(url)) {
             showSetup();
             return;
         }
+        if (!Prefs.originMigrated(this) && !sessionBridge.hasStoredSession()
+                && !url.startsWith(Prefs.LEGACY_RAILWAY_URL)) {
+            migrateLegacyOrigin();
+            return;
+        }
         ensureMicPermissionThen(() -> {
             showLoading();
+            sessionBridge.setCurrentUrl(url);
+            webView.loadUrl(url);
+        });
+    }
+
+    /**
+     * 0.2.1 and earlier opened https://openlounge-production.up.railway.app, so a signed-in user's token lives in
+     * THAT origin's localStorage. 0.2.3 opens https://openlounge.app (separate localStorage). Before the first
+     * load, open a tiny same-origin page on the old origin (/api/health, plain JSON), read the stored session
+     * from its localStorage and seed the native token store, which the web app adopts on launch. Nobody is
+     * signed out by the update.
+     */
+    private void migrateLegacyOrigin() {
+        migrating = true;
+        showLoading();
+        String legacy = Prefs.LEGACY_RAILWAY_URL + "/api/health";
+        sessionBridge.setCurrentUrl(legacy);
+        webView.loadUrl(legacy);
+        handler.postDelayed(() -> {
+            if (migrating) finishMigration(false);
+        }, 8_000);
+    }
+
+    private static final String READ_LEGACY_JS =
+            "(function(){try{var g=function(k){try{return localStorage.getItem(k)}catch(e){return null}};"
+                    + "var r=g('openlounge:session')||g('lounge:session')||g('clubroom:session');if(!r)return '';"
+                    + "var a=null;try{a=JSON.parse(g('openlounge:access')||'null')}catch(e){}"
+                    + "return JSON.stringify({v:1,refresh:r,access:(a&&a.t)||null,accessExp:(a&&a.exp)||0,"
+                    + "uid:g('openlounge:uid'),savedAt:Number(g('openlounge:saved'))||0})}catch(e){return ''}})()";
+
+    private void readLegacyOriginSession() {
+        webView.evaluateJavascript(READ_LEGACY_JS, value -> {
+            try {
+                // evaluateJavascript hands back a JSON-encoded JS value
+                String decoded = value == null || "null".equals(value) ? "" : new JSONArray("[" + value + "]").getString(0);
+                if (decoded.length() >= 20) sessionBridge.seedIfEmpty(decoded);
+            } catch (Exception ignored) {
+            }
+            finishMigration(true);
+        });
+    }
+
+    private void finishMigration(boolean done) {
+        if (!migrating) return;
+        migrating = false;
+        if (done) Prefs.setOriginMigrated(this);
+        webView.stopLoading();
+        loadConfiguredUrlAfterMigration();
+    }
+
+    private void loadConfiguredUrlAfterMigration() {
+        String url = Prefs.getServerUrl(this);
+        ensureMicPermissionThen(() -> {
+            showLoading();
+            sessionBridge.setCurrentUrl(url);
             webView.loadUrl(url);
         });
     }
@@ -291,7 +390,7 @@ public class MainActivity extends AppCompatActivity {
         loadingPanel.setVisibility(View.VISIBLE);
         errorPanel.setVisibility(View.GONE);
         webView.setVisibility(View.VISIBLE);
-        gearButton.setVisibility(View.VISIBLE);
+        gearButton.setVisibility(View.GONE);
     }
 
     private void showWeb() {
@@ -299,7 +398,7 @@ public class MainActivity extends AppCompatActivity {
         loadingPanel.setVisibility(View.GONE);
         errorPanel.setVisibility(View.GONE);
         webView.setVisibility(View.VISIBLE);
-        gearButton.setVisibility(View.VISIBLE);
+        gearButton.setVisibility(View.GONE); // no developer chrome over the app
     }
 
     private void showError(String msg) {
@@ -320,8 +419,29 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    /** Tell the page the app went to the background / came back (a WebView often keeps reporting "visible"). */
+    private void dispatchNativeVisibility(boolean visible) {
+        if (webView == null || migrating) return;
+        webView.evaluateJavascript("window.dispatchEvent(new CustomEvent('openlounge:native-visibility',{detail:{visible:"
+                + visible + "}}))", null);
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        CookieManager.getInstance().flush();
+        dispatchNativeVisibility(false);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        dispatchNativeVisibility(true);
+    }
+
     @Override
     protected void onDestroy() {
+        handler.removeCallbacksAndMessages(null);
         if (webView != null) {
             ((FrameLayout) findViewById(R.id.root)).removeView(webView);
             webView.destroy();

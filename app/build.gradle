@@ -2,6 +2,15 @@ plugins {
     id 'com.android.application'
 }
 
+// Release signing: android/keystore.properties (never committed) → storeFile/storePassword/keyAlias/keyPassword.
+// It points at the key that signed every APK Donny has installed (0.2.1 and earlier), so updates install in place
+// over the existing app — and keep its data, i.e. nobody is signed out by the update.
+def keystorePropsFile = rootProject.file('keystore.properties')
+def keystoreProps = new Properties()
+if (keystorePropsFile.exists()) {
+    keystorePropsFile.withInputStream { keystoreProps.load(it) }
+}
+
 android {
     namespace 'com.donnydey.openlounge'
     compileSdk 34
@@ -11,7 +20,22 @@ android {
         minSdk 24
         targetSdk 34
         versionCode 5
-        versionName "0.2.2"
+        versionName "0.2.3"
+    }
+
+    signingConfigs {
+        release {
+            if (keystorePropsFile.exists()) {
+                storeFile file(keystoreProps['storeFile'])
+                storePassword keystoreProps['storePassword']
+                keyAlias keystoreProps['keyAlias']
+                keyPassword keystoreProps['keyPassword']
+            }
+        }
+    }
+
+    buildFeatures {
+        buildConfig true
     }
 
     buildTypes {
@@ -21,6 +45,8 @@ android {
         }
         release {
             minifyEnabled false
+            debuggable false
+            if (keystorePropsFile.exists()) signingConfig signingConfigs.release
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
