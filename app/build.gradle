@@ -21,8 +21,8 @@ android {
         applicationId "com.donnydey.openlounge"
         minSdk 24
         targetSdk 34
-        versionCode 7
-        versionName "0.2.5"
+        versionCode 8
+        versionName "0.2.6"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -73,6 +73,10 @@ dependencies {
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
     implementation platform('com.google.firebase:firebase-bom:33.7.0')
     implementation 'com.google.firebase:firebase-messaging'
+    implementation 'com.google.firebase:firebase-auth'
+    // Play Integrity app verification for phone auth (pulled by firebase-auth; pinned for clarity)
+    implementation 'com.google.android.play:integrity:1.4.0'
+    implementation 'androidx.browser:browser:1.8.0'
 
     androidTestImplementation 'androidx.test:runner:1.6.2'
     androidTestImplementation 'androidx.test.ext:junit:1.2.1'

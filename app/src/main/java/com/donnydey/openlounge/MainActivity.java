@@ -57,6 +57,20 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class MainActivity extends AppCompatActivity implements SessionBridge.Host {
+    private NativePhoneAuth phoneAuth;
+
+    @Override
+    public void phoneAuthStart(String reqId, String e164) {
+        if (phoneAuth == null) phoneAuth = new NativePhoneAuth(this, webView);
+        phoneAuth.start(reqId, e164);
+    }
+
+    @Override
+    public void phoneAuthConfirm(String reqId, String code) {
+        if (phoneAuth == null) phoneAuth = new NativePhoneAuth(this, webView);
+        phoneAuth.confirm(reqId, code);
+    }
+
     private WebView webView;
     private LinearLayout setupPanel;
     private LinearLayout loadingPanel;

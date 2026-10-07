@@ -29,6 +29,8 @@ public final class SessionBridge {
         void openAppSettings();
         void requestNotificationPermission();
         void haptic(String type);
+        void phoneAuthStart(String reqId, String e164);
+        void phoneAuthConfirm(String reqId, String code);
     }
 
     private final SecureSessionStore store;
@@ -42,6 +44,8 @@ public final class SessionBridge {
         public void openAppSettings() {}
         public void requestNotificationPermission() {}
         public void haptic(String type) {}
+        public void phoneAuthStart(String id, String p) {}
+        public void phoneAuthConfirm(String id, String c) {}
     };
 
     public SessionBridge(Context ctx) {
@@ -131,5 +135,23 @@ public final class SessionBridge {
             if (v != null && v.length() >= 20) return;
             store.put(value);
         }
+    }
+
+    // ---- native phone verification (Firebase Auth SDK, no web reCAPTCHA) — see NativePhoneAuth ----
+    @JavascriptInterface
+    public String phoneAuthAvailable() {
+        return trusted() ? "true" : "false";
+    }
+
+    @JavascriptInterface
+    public void phoneAuthStart(String reqId, String e164) {
+        if (!trusted() || reqId == null || reqId.length() > 100 || e164 == null || !e164.matches("\\+[0-9]{6,16}")) return;
+        host.phoneAuthStart(reqId, e164);
+    }
+
+    @JavascriptInterface
+    public void phoneAuthConfirm(String reqId, String code) {
+        if (!trusted() || reqId == null || reqId.length() > 100 || code == null || !code.matches("[0-9]{4,8}")) return;
+        host.phoneAuthConfirm(reqId, code);
     }
 }
