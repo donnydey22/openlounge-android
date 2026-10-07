@@ -14,4 +14,8 @@
     <string name="offline_message">Can\'t reach Open Lounge right now.\n\nWe\'ll keep trying — check your connection.</string>
     <string name="perm_rationale">Open Lounge needs the microphone for live audio rooms.</string>
     <string name="default_server_url">https://openlounge.app</string>
+    <string name="channel_messages">Messages</string>
+    <string name="channel_rooms">Rooms</string>
+    <string name="channel_social">People</string>
+    <string name="share_title">Share via</string>
 </resources>

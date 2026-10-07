@@ -20,11 +20,37 @@ import android.webkit.JavascriptInterface;
 public final class SessionBridge {
     public static final String JS_NAME = "OpenLoungeNative";
 
+    /** Activity-side actions for the extra bridge methods (push, share, contacts, haptics). */
+    public interface Host {
+        String pushToken();
+        void share(String text, String url);
+        void requestContacts();
+        String contactsPermission();
+        void openAppSettings();
+        void requestNotificationPermission();
+        void haptic(String type);
+    }
+
     private final SecureSessionStore store;
     private volatile String currentUrl = "";
+    private final Host host;
+    private static final Host NOOP = new Host() {
+        public String pushToken() { return ""; }
+        public void share(String t, String u) {}
+        public void requestContacts() {}
+        public String contactsPermission() { return "denied"; }
+        public void openAppSettings() {}
+        public void requestNotificationPermission() {}
+        public void haptic(String type) {}
+    };
 
     public SessionBridge(Context ctx) {
+        this(ctx, null);
+    }
+
+    public SessionBridge(Context ctx, Host host) {
         store = new SecureSessionStore(ctx);
+        this.host = host != null ? host : NOOP;
     }
 
     /** Called from the UI thread whenever the WebView navigates. */
@@ -59,6 +85,34 @@ public final class SessionBridge {
             store.clear();
         }
     }
+
+    // ---- 0.2.5: push token, share sheet, contacts (opt-in), haptics ----
+
+    @JavascriptInterface
+    public String getPlatform() { return "android"; }
+
+    @JavascriptInterface
+    public String getPushToken() { return trusted() ? host.pushToken() : ""; }
+
+    @JavascriptInterface
+    public void share(String text, String url) {
+        if (trusted()) host.share(text == null ? "" : text, url == null ? "" : url);
+    }
+
+    @JavascriptInterface
+    public void requestContacts() { if (trusted()) host.requestContacts(); }
+
+    @JavascriptInterface
+    public String contactsPermission() { return trusted() ? host.contactsPermission() : "denied"; }
+
+    @JavascriptInterface
+    public void openAppSettings() { if (trusted()) host.openAppSettings(); }
+
+    @JavascriptInterface
+    public void requestNotificationPermission() { if (trusted()) host.requestNotificationPermission(); }
+
+    @JavascriptInterface
+    public void haptic(String type) { if (trusted()) host.haptic(type == null ? "light" : type); }
 
     // ---- native-side helpers (not exposed to JS) ----
 

@@ -38,11 +38,25 @@ import com.google.android.material.button.MaterialButton;
 import com.google.android.material.textfield.TextInputEditText;
 
 import org.json.JSONArray;
+import org.json.JSONObject;
+
+import android.database.Cursor;
+import android.provider.ContactsContract;
+import android.provider.Settings;
+import android.telephony.PhoneNumberUtils;
+import android.telephony.TelephonyManager;
+import android.view.HapticFeedbackConstants;
+import android.content.res.Configuration;
+import android.graphics.Color;
+
+import java.util.LinkedHashMap;
+import java.util.Locale;
+import java.util.Map;
 
 import java.util.ArrayList;
 import java.util.List;
 
-public class MainActivity extends AppCompatActivity {
+public class MainActivity extends AppCompatActivity implements SessionBridge.Host {
     private WebView webView;
     private LinearLayout setupPanel;
     private LinearLayout loadingPanel;
@@ -80,6 +94,18 @@ public class MainActivity extends AppCompatActivity {
                 }
             });
 
+    /** deep link from a tapped notification, applied once the WebView is ready */
+    private String pendingOpenPath = null;
+
+    private final ActivityResultLauncher<String> contactsPermLauncher =
+            registerForActivityResult(new ActivityResultContracts.RequestPermission(), granted -> {
+                if (granted) readContactsAsync();
+                else deliverContacts("{\"granted\":false}");
+            });
+
+    private final ActivityResultLauncher<String> notifPermLauncher =
+            registerForActivityResult(new ActivityResultContracts.RequestPermission(), granted -> {});
+
     private final ActivityResultLauncher<Intent> settingsLauncher =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
                 if (result.getResultCode() == RESULT_OK) {
@@ -100,6 +126,13 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+        pendingOpenPath = openPathFrom(getIntent());
+        OpenLoungeMessagingService.ensureChannels(this);
+        PushTokens.setListener(token -> handler.post(() -> {
+            if (webView != null && !migrating)
+                webView.evaluateJavascript("window.__olPushToken&&window.__olPushToken(" + JSONObject.quote(token) + ")", null);
+        }));
+        PushTokens.refresh(this);
 
         webView = findViewById(R.id.webview);
         setupPanel = findViewById(R.id.setup_panel);
@@ -130,7 +163,11 @@ public class MainActivity extends AppCompatActivity {
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, false);
 
         // Durable native token store mirrored by src/lib/session.ts (window.OpenLoungeNative)
-        sessionBridge = new SessionBridge(this);
+        sessionBridge = new SessionBridge(this, this);
+        // native feel: theme-colored background (no white flash before the page paints), no overscroll glow
+        boolean dark = (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK) != Configuration.UI_MODE_NIGHT_NO;
+        webView.setBackgroundColor(Color.parseColor(dark ? "#0b0b0d" : "#f4f3ee"));
+        webView.setOverScrollMode(View.OVER_SCROLL_NEVER);
         webView.addJavascriptInterface(sessionBridge, SessionBridge.JS_NAME);
 
         WebSettings s = webView.getSettings();
@@ -298,8 +335,9 @@ public class MainActivity extends AppCompatActivity {
         }
         ensureMicPermissionThen(() -> {
             showLoading();
-            sessionBridge.setCurrentUrl(url);
-            webView.loadUrl(url);
+            String target = withPendingPath(url);
+            sessionBridge.setCurrentUrl(target);
+            webView.loadUrl(target);
         });
     }
 
@@ -352,8 +390,9 @@ public class MainActivity extends AppCompatActivity {
         String url = Prefs.getServerUrl(this);
         ensureMicPermissionThen(() -> {
             showLoading();
-            sessionBridge.setCurrentUrl(url);
-            webView.loadUrl(url);
+            String target = withPendingPath(url);
+            sessionBridge.setCurrentUrl(target);
+            webView.loadUrl(target);
         });
     }
 
@@ -408,6 +447,142 @@ public class MainActivity extends AppCompatActivity {
         webView.setVisibility(View.GONE);
         gearButton.setVisibility(View.VISIBLE);
         errorText.setText(msg);
+    }
+
+    // ---------- 0.2.5: notifications deep link, push token, share, contacts, haptics ----------
+
+    private static String openPathFrom(Intent i) {
+        if (i == null) return null;
+        String p = i.getStringExtra(OpenLoungeMessagingService.EXTRA_OPEN_PATH);
+        // relative in-app paths only ("/room/x", "/messages/u_1") — never another origin
+        if (p == null || !p.startsWith("/") || p.startsWith("//") || p.contains("\\") || p.length() > 300) return null;
+        return p;
+    }
+
+    private String withPendingPath(String base) {
+        String p = pendingOpenPath;
+        pendingOpenPath = null;
+        if (p == null) return base;
+        Uri b = Uri.parse(base);
+        return b.getScheme() + "://" + b.getEncodedAuthority() + p;
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        String p = openPathFrom(intent);
+        if (p == null || webView == null) return;
+        String base = Prefs.getServerUrl(this);
+        if (!Prefs.isValidUrl(base) || migrating) {
+            pendingOpenPath = p;
+            return;
+        }
+        // client-side navigation keeps the socket/session alive; full load as fallback
+        String js = "(function(){try{if(window.next&&window.next.router){window.next.router.push(" + JSONObject.quote(p) + ");return 1}}catch(e){}location.assign("
+                + JSONObject.quote(p) + ");return 1})()";
+        webView.evaluateJavascript(js, null);
+    }
+
+    @Override
+    public String pushToken() {
+        return PushTokens.get(this);
+    }
+
+    @Override
+    public void share(String text, String url) {
+        handler.post(() -> {
+            Intent send = new Intent(Intent.ACTION_SEND).setType("text/plain")
+                    .putExtra(Intent.EXTRA_TEXT, (text + " " + url).trim());
+            startActivity(Intent.createChooser(send, getString(R.string.share_title)));
+        });
+    }
+
+    @Override
+    public String contactsPermission() {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
+                ? "granted" : "prompt";
+    }
+
+    /** The web app shows its explainer first; only then calls this, which shows the OS prompt if needed. */
+    @Override
+    public void requestContacts() {
+        handler.post(() -> {
+            if ("granted".equals(contactsPermission())) readContactsAsync();
+            else contactsPermLauncher.launch(Manifest.permission.READ_CONTACTS);
+        });
+    }
+
+    private void readContactsAsync() {
+        new Thread(() -> {
+            String country = countryIso();
+            Map<String, List<String>> byName = new LinkedHashMap<>();
+            try (Cursor c = getContentResolver().query(ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                    new String[]{ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER},
+                    null, null, null)) {
+                while (c != null && c.moveToNext() && byName.size() < 5000) {
+                    String name = c.getString(0);
+                    String num = c.getString(1);
+                    if (num == null) continue;
+                    String e164 = PhoneNumberUtils.formatNumberToE164(num, country);
+                    List<String> l = byName.get(name == null ? "" : name);
+                    if (l == null) byName.put(name == null ? "" : name, l = new ArrayList<>());
+                    l.add(e164 != null ? e164 : num);
+                }
+            } catch (Exception ignored) {
+            }
+            try {
+                JSONArray arr = new JSONArray();
+                for (Map.Entry<String, List<String>> e : byName.entrySet())
+                    arr.put(new JSONObject().put("name", e.getKey()).put("numbers", new JSONArray(e.getValue())));
+                deliverContacts(new JSONObject().put("granted", true).put("country", country).put("contacts", arr).toString());
+            } catch (Exception e) {
+                deliverContacts("{\"granted\":false}");
+            }
+        }).start();
+    }
+
+    private String countryIso() {
+        try {
+            TelephonyManager tm = (TelephonyManager) getSystemService(TELEPHONY_SERVICE);
+            String iso = tm != null ? tm.getSimCountryIso() : null;
+            if (iso != null && iso.length() == 2) return iso.toUpperCase(Locale.US);
+        } catch (Exception ignored) {
+        }
+        String c = Locale.getDefault().getCountry();
+        return c == null || c.isEmpty() ? "US" : c.toUpperCase(Locale.US);
+    }
+
+    /** Contacts stay on the device side of the bridge; the page hashes numbers before anything is uploaded. */
+    private void deliverContacts(String json) {
+        handler.post(() -> {
+            if (webView != null) webView.evaluateJavascript("window.__olContacts&&window.__olContacts(" + JSONObject.quote(json) + ")", null);
+        });
+    }
+
+    @Override
+    public void openAppSettings() {
+        handler.post(() -> startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName()))));
+    }
+
+    @Override
+    public void requestNotificationPermission() {
+        handler.post(() -> {
+            if (Build.VERSION.SDK_INT >= 33
+                    && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+                notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS);
+            PushTokens.refresh(this);
+        });
+    }
+
+    @Override
+    public void haptic(String type) {
+        handler.post(() -> {
+            if (webView == null) return;
+            int c = "medium".equals(type) ? HapticFeedbackConstants.LONG_PRESS
+                    : "success".equals(type) ? (Build.VERSION.SDK_INT >= 30 ? HapticFeedbackConstants.CONFIRM : HapticFeedbackConstants.LONG_PRESS)
+                    : HapticFeedbackConstants.KEYBOARD_TAP;
+            webView.performHapticFeedback(c);
+        });
     }
 
     @Override

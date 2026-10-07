@@ -7,6 +7,9 @@
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- only requested from "Find friends from contacts", after an in-app explainer -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
 
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
@@ -44,5 +47,16 @@
             android:label="@string/settings_title"
             android:parentActivityName=".MainActivity"
             android:windowSoftInputMode="adjustResize" />
+        <service
+            android:name=".OpenLoungeMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
+        <meta-data android:name="com.google.firebase.messaging.default_notification_icon" android:resource="@drawable/ic_stat_notify" />
+        <meta-data android:name="com.google.firebase.messaging.default_notification_color" android:resource="@color/openlounge_accent" />
+        <meta-data android:name="com.google.firebase.messaging.default_notification_channel_id" android:value="messages" />
     </application>
 </manifest>

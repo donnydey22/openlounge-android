@@ -1,5 +1,7 @@
 plugins {
     id 'com.android.application'
+    // FCM: reads app/google-services.json (Firebase project open-lounge-2aabd)
+    id 'com.google.gms.google-services'
 }
 
 // Release signing: android/keystore.properties (never committed) → storeFile/storePassword/keyAlias/keyPassword.
@@ -19,8 +21,8 @@ android {
         applicationId "com.donnydey.openlounge"
         minSdk 24
         targetSdk 34
-        versionCode 6
-        versionName "0.2.4"
+        versionCode 7
+        versionName "0.2.5"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -69,6 +71,8 @@ dependencies {
     implementation 'com.google.android.material:material:1.12.0'
     implementation 'androidx.webkit:webkit:1.11.0'
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+    implementation platform('com.google.firebase:firebase-bom:33.7.0')
+    implementation 'com.google.firebase:firebase-messaging'
 
     androidTestImplementation 'androidx.test:runner:1.6.2'
     androidTestImplementation 'androidx.test.ext:junit:1.2.1'
