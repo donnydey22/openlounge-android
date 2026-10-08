@@ -42,6 +42,8 @@ public final class SessionBridge {
         void haptics(String type);
         /** 0.3.0: external link → Custom Tab; openlounge.app → in the WebView (BROWSER_BRIDGE.md). */
         void openBrowser(String url);
+        /** 0.3.1: page → native call messages {type:"call:*"} (NATIVE_SPEC.md §5). */
+        void callMessage(String json);
     }
 
     private final SecureSessionStore store;
@@ -65,6 +67,7 @@ public final class SessionBridge {
         public void biometricsAuthenticate(String id) {}
         public void haptics(String type) {}
         public void openBrowser(String url) {}
+        public void callMessage(String json) {}
     };
 
     public SessionBridge(Context ctx) {
@@ -155,11 +158,21 @@ public final class SessionBridge {
     /** Feature list for the page (JSON array string; Android JS interfaces can't return arrays). */
     @JavascriptInterface
     public String capabilities() {
-        return "[\"session\",\"haptic\",\"haptics\",\"browser\",\"camera\",\"openAuth\",\"push\",\"share\",\"contacts\",\"badge\",\"biometrics\",\"phoneAuth\"]";
+        return "[\"session\",\"haptic\",\"haptics\",\"browser\",\"camera\",\"openAuth\",\"push\",\"share\",\"contacts\",\"badge\",\"biometrics\",\"phoneAuth\",\"calls\"]";
     }
 
     @JavascriptInterface
     public String getVersion() { return BuildConfig.VERSION_NAME; }
+
+    // ---- 0.3.1: call messages (engine.ts postNative → OpenLoungeNative.postMessage(JSON string)) ----
+    @JavascriptInterface
+    public void postMessage(String json) {
+        if (!trusted() || json == null || json.length() > 4096) return;
+        host.callMessage(json);
+    }
+
+    /** Document-start flag: the page only posts call:* messages to wrappers that set it (build 18 / 0.3.1). */
+    public static final String CALLS_FLAG = "(function(){try{if(window.OpenLoungeNative&&typeof window.OpenLoungeNative.postMessage==='function')window.__olNativeCalls=1}catch(e){}})();";
 
     // ---- 0.2.7: numeric app-icon badge (total unread); 0 clears ----
     @JavascriptInterface

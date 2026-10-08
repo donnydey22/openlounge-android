@@ -54,7 +54,10 @@ import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 
+import java.lang.ref.WeakReference;
 import java.util.ArrayList;
+import android.media.AudioDeviceInfo;
+import android.media.AudioManager;
 import java.util.List;
 
 public class MainActivity extends AppCompatActivity implements SessionBridge.Host {
@@ -84,6 +87,13 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     private final Handler handler = new Handler(Looper.getMainLooper());
     /** one-time 0.2.1 → 0.2.3 move from the railway.app origin to openlounge.app (see migrateLegacyOrigin) */
     private boolean migrating = false;
+    // 0.3.1 calls: the live activity (for notification Hang up / Decline fallback) + call audio state
+    private static WeakReference<MainActivity> live = new WeakReference<>(null);
+    private boolean pageLoaded = false;
+    private boolean callAudioOn = false;
+    private boolean callSpeaker = true;
+    private String callId = null;
+    private String callName = null;
     private int loadRetries = 0;
     private final Runnable retryLoad = this::loadConfiguredUrl;
 
@@ -154,6 +164,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         SplashScreen splash = SplashScreen.installSplashScreen(this);
         splash.setOnExitAnimationListener(v -> v.remove()); // hand off instantly: overlay has the same bg
         super.onCreate(savedInstanceState);
+        live = new WeakReference<>(this);
         setContentView(R.layout.activity_main);
         EdgeToEdge.apply(this, findViewById(R.id.root)); // 0.3.0: target SDK 36 (edge-to-edge enforced on Android 15+)
         // 0.3.0: predictive back (default on for target 36) never calls onBackPressed(); use the dispatcher
@@ -228,6 +239,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 java.util.Set<String> origins = new java.util.HashSet<>(java.util.Arrays.asList(
                         "https://openlounge.app", "https://www.openlounge.app", Prefs.LEGACY_RAILWAY_URL));
                 androidx.webkit.WebViewCompat.addDocumentStartJavaScript(webView, SessionBridge.BIOMETRICS_SHIM, origins);
+                androidx.webkit.WebViewCompat.addDocumentStartJavaScript(webView, SessionBridge.CALLS_FLAG, origins);
             } catch (Exception ignored) {
             }
         }
@@ -258,6 +270,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
                 sessionBridge.setCurrentUrl(url);
+                pageLoaded = false;
                 if (!migrating) showLoading();
             }
 
@@ -275,6 +288,8 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 }
                 loadRetries = 0;
                 view.evaluateJavascript(SessionBridge.BIOMETRICS_SHIM, null); // no-op if already defined
+                view.evaluateJavascript(SessionBridge.CALLS_FLAG, null);
+                pageLoaded = true;
                 showWeb();
                 launchOverlay.markReady();
             }
@@ -826,8 +841,119 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         }
     }
 
+    // ---------- 0.3.1: native call ringing / in-call (NATIVE_SPEC.md §4, §5) ----------
+
+    /** Native → page: openlounge:native-call {type: call:hangup | call:decline | …}. False if no page is up. */
+    static boolean dispatchNativeCall(String detailJson) {
+        MainActivity a = live.get();
+        if (a == null || a.isFinishing()) return false;
+        a.handler.post(() -> {
+            if (a.webView == null || a.migrating || !a.pageLoaded) return;
+            a.webView.evaluateJavascript("(function(){try{window.dispatchEvent(new CustomEvent('openlounge:native-call',{detail:"
+                    + detailJson + "}))}catch(e){}})()", null);
+        });
+        return a.pageLoaded;
+    }
+
+    @Override
+    public void callMessage(String json) {
+        handler.post(() -> onPageCall(json));
+    }
+
+    private void onPageCall(String json) {
+        JSONObject m;
+        try {
+            m = new JSONObject(json);
+        } catch (Exception e) {
+            return;
+        }
+        String type = m.optString("type", "");
+        String id = m.optString("callId", "");
+        if (!id.isEmpty() && !id.matches(CallApi.CALL_ID_RE)) return;
+        switch (type) {
+            case "call:outgoing":
+                callId = id;
+                callName = m.optString("name", "");
+                if (callName.length() > 80) callName = callName.substring(0, 80);
+                callAudio(true);
+                CallService.start(this, callId, callName, false);
+                break;
+            case "call:connected":
+                if (!id.isEmpty()) {
+                    CallNotifications.cancel(this, id); // answered on the page's own ring screen
+                    callId = id;
+                }
+                callAudio(true);
+                CallService.start(this, callId, callName, true);
+                break;
+            case "call:ended":
+                if (!id.isEmpty()) CallNotifications.cancel(this, id);
+                CallService.stop(this);
+                callAudio(false);
+                callId = null;
+                callName = null;
+                break;
+            case "call:audioRoute":
+                if (m.has("speaker")) {
+                    callSpeaker = m.optBoolean("speaker", true);
+                    if (callAudioOn) applySpeaker();
+                }
+                break;
+            default:
+                break; // call:muted has no system UI on Android
+        }
+    }
+
+    /** MODE_IN_COMMUNICATION + speaker (or the connected headset) during a call, MODE_NORMAL otherwise. */
+    private void callAudio(boolean on) {
+        AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+        if (am == null) return;
+        try {
+            if (on) {
+                am.setMode(AudioManager.MODE_IN_COMMUNICATION);
+                callAudioOn = true;
+                applySpeaker();
+            } else if (callAudioOn) {
+                callAudioOn = false;
+                callSpeaker = true;
+                if (Build.VERSION.SDK_INT >= 31) am.clearCommunicationDevice();
+                else am.setSpeakerphoneOn(false);
+                am.setMode(AudioManager.MODE_NORMAL);
+            }
+        } catch (RuntimeException ignored) {
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private void applySpeaker() {
+        AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+        if (am == null) return;
+        try {
+            if (Build.VERSION.SDK_INT >= 31) {
+                AudioDeviceInfo speaker = null, headset = null;
+                for (AudioDeviceInfo d : am.getAvailableCommunicationDevices()) {
+                    int t = d.getType();
+                    if (t == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) speaker = d;
+                    else if (t == AudioDeviceInfo.TYPE_WIRED_HEADSET || t == AudioDeviceInfo.TYPE_USB_HEADSET
+                            || t == AudioDeviceInfo.TYPE_BLUETOOTH_SCO || t == AudioDeviceInfo.TYPE_BLE_HEADSET) headset = d;
+                }
+                if (callSpeaker && headset != null) am.setCommunicationDevice(headset);
+                else if (callSpeaker && speaker != null) am.setCommunicationDevice(speaker);
+                else am.clearCommunicationDevice();
+            } else {
+                am.setSpeakerphoneOn(callSpeaker && !am.isWiredHeadsetOn() && !am.isBluetoothScoOn());
+            }
+        } catch (RuntimeException ignored) {
+        }
+    }
+
     @Override
     protected void onDestroy() {
+        if (live.get() == this) live = new WeakReference<>(null);
+        if (isFinishing()) {
+            CallService.stop(this);
+            callAudio(false);
+        }
         handler.removeCallbacksAndMessages(null);
         if (webView != null) {
             ((FrameLayout) findViewById(R.id.root)).removeView(webView);

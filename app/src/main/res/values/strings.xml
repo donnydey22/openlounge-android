@@ -24,4 +24,15 @@
     <string name="lock_retry">Unlock</string>
     <string name="lock_other_way">Use another way</string>
     <string name="lock_failed">Couldn’t verify it’s you. Try again, or use your PIN, pattern or password.</string>
+    <!-- 0.3.1 native call ringing -->
+    <string name="channel_calls">Calls</string>
+    <string name="channel_call_ongoing">Ongoing call</string>
+    <string name="call_incoming_audio">Open Lounge audio call</string>
+    <string name="call_incoming_video">Open Lounge video call</string>
+    <string name="call_accept">Accept</string>
+    <string name="call_decline">Decline</string>
+    <string name="call_hang_up">Hang up</string>
+    <string name="call_ongoing_title">Open Lounge call</string>
+    <string name="call_ongoing_text">Tap to return</string>
+    <string name="call_calling_text">Calling… · Tap to return</string>
 </resources>

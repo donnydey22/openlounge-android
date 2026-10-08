@@ -36,6 +36,16 @@ public class OpenLoungeMessagingService extends FirebaseMessagingService {
     @Override
     public void onMessageReceived(@NonNull RemoteMessage message) {
         Map<String, String> d = message.getData();
+        // 0.3.1 native call ringing (NATIVE_SPEC.md §1/§4)
+        String type = d.get("type");
+        if ("call_incoming".equals(type)) {
+            CallNotifications.onIncoming(this, d);
+            return;
+        }
+        if ("call_cancel".equals(type)) {
+            CallNotifications.cancel(this, d.get("callId"));
+            return;
+        }
         String tag = d.containsKey("tag") ? d.get("tag") : "openlounge";
         int badge = AppBadge.parse(d.get("badge"));
         if (badge >= 0) AppBadge.set(this, badge);
@@ -59,6 +69,7 @@ public class OpenLoungeMessagingService extends FirebaseMessagingService {
         nm.createNotificationChannel(channel("messages", ctx.getString(R.string.channel_messages), NotificationManager.IMPORTANCE_HIGH));
         nm.createNotificationChannel(channel("rooms", ctx.getString(R.string.channel_rooms), NotificationManager.IMPORTANCE_HIGH));
         nm.createNotificationChannel(channel("social", ctx.getString(R.string.channel_social), NotificationManager.IMPORTANCE_DEFAULT));
+        CallNotifications.ensureChannels(ctx);
     }
 
     @androidx.annotation.RequiresApi(26)

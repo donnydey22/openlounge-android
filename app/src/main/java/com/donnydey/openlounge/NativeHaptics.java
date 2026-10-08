@@ -67,6 +67,7 @@ final class NativeHaptics {
         return view.performHapticFeedback(c);
     }
 
+    @androidx.annotation.RequiresApi(29)
     private static VibrationEffect effect29(String type) {
         switch (type) {
             case "light":
