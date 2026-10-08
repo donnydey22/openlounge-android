@@ -327,6 +327,11 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     }
 
     private void handleWebPermission(PermissionRequest request) {
+        // only our own site may use the mic/camera
+        if (request.getOrigin() == null || !isConfiguredHost(request.getOrigin())) {
+            request.deny();
+            return;
+        }
         List<String> androidPerms = new ArrayList<>();
         for (String res : request.getResources()) {
             if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(res)) {
@@ -451,12 +456,8 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             next.run();
             return;
         }
-        // Ask early so LiveKit getUserMedia is less likely to fail later
-        permissionLauncher.launch(new String[]{
-                Manifest.permission.RECORD_AUDIO,
-                Manifest.permission.CAMERA
-        });
-        // Still proceed; WebChromeClient will re-request if needed
+        // Store compliance (Play User Data / Apple 5.1.1(iv)): no mic/camera prompt at launch. The OS prompt is shown
+        // in context, when the user first speaks / joins a call (WebChromeClient.onPermissionRequest → handleWebPermission).
         next.run();
     }
 
