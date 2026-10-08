@@ -35,4 +35,9 @@
     <string name="call_ongoing_title">Open Lounge call</string>
     <string name="call_ongoing_text">Tap to return</string>
     <string name="call_calling_text">Calling… · Tap to return</string>
+    <!-- 0.3.2 Android 14+: full-screen incoming calls permission (one-time prompt) -->
+    <string name="fsi_prompt_title">Show calls on your lock screen</string>
+    <string name="fsi_prompt_body">Turn on “Allow full screen notifications” so incoming Open Lounge calls light up your screen with Accept and Decline, even when your phone is locked. Without it, calls still ring as a notification.</string>
+    <string name="fsi_prompt_open">Open settings</string>
+    <string name="fsi_prompt_later">Not now</string>
 </resources>

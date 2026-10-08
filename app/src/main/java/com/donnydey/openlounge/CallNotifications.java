@@ -25,7 +25,8 @@ import java.util.Map;
  * video "0"|"1", expiresAt (epoch ms), url} → a ringing CATEGORY_CALL notification on the "calls" channel
  * (ringtone, insistent, vibration, public on the lock screen, times out at expiresAt) with a full-screen intent
  * (IncomingCallActivity) and Accept / Decline; CallStyle.forIncomingCall on Android 12+. {type:"call_cancel"}
- * removes it. Android 14+: if the full-screen intent permission was revoked it still rings as a heads-up.
+ * removes it. Android 14+: if the full-screen intent permission was revoked it still rings as a heads-up (and
+ * FullScreenIntentPrompt offers the setting once). 0.3.2: data.declineToken → CallApi (Decline without a session).
  */
 final class CallNotifications {
     private static final String TAG = "OLCalls";
@@ -74,6 +75,7 @@ final class CallNotifications {
         if (name.length() > 80) name = name.substring(0, 80);
         String photo = d.get("callerPhoto");
         boolean video = "1".equals(d.get("video")) || "true".equals(d.get("video"));
+        CallApi.rememberDeclineToken(ctx, callId, d.get("declineToken"), expiresAt); // 0.3.2: session-less Decline
         show(ctx, callId, name, photo, video, expiresAt);
         return true;
     }

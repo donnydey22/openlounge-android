@@ -292,6 +292,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 pageLoaded = true;
                 showWeb();
                 launchOverlay.markReady();
+                scheduleFsiPrompt();
             }
 
             @Override
@@ -830,10 +831,25 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         if (!prompting && !locked && BiometricLock.isEnabled(this)) lockOverlay.setVisibility(View.VISIBLE);
     }
 
+    // ---------- 0.3.2: Android 14+ full-screen call permission, one-time prompt (FullScreenIntentPrompt) ----------
+    private androidx.appcompat.app.AlertDialog fsiDialog;
+    private final Runnable fsiCheck = () -> {
+        if (isFinishing() || locked || prompting || !pageLoaded || (fsiDialog != null && fsiDialog.isShowing())) return;
+        if (!hasWindowFocus()) return; // something else (permission sheet, Custom Tab) is in front: next resume
+        fsiDialog = FullScreenIntentPrompt.maybeShow(this);
+    };
+
+    private void scheduleFsiPrompt() {
+        if (Build.VERSION.SDK_INT < 34) return;
+        handler.removeCallbacks(fsiCheck);
+        handler.postDelayed(fsiCheck, 3_000); // after the launch animation / first paint
+    }
+
     @Override
     protected void onResume() {
         super.onResume();
         dispatchNativeVisibility(true);
+        scheduleFsiPrompt();
         if (locked) {
             if (!prompting && lockActions.getVisibility() != View.VISIBLE) handler.post(() -> promptUnlock(false));
         } else if (lockOverlay != null) {
@@ -955,6 +971,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             callAudio(false);
         }
         handler.removeCallbacksAndMessages(null);
+        if (fsiDialog != null && fsiDialog.isShowing()) fsiDialog.dismiss();
         if (webView != null) {
             ((FrameLayout) findViewById(R.id.root)).removeView(webView);
             webView.destroy();
