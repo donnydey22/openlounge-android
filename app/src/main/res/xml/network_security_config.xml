@@ -1,9 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Prefer HTTPS. Cleartext (http) is allowed only for private LAN testing. -->
+<!-- Prefer HTTPS. Cleartext (http) is allowed only for private LAN testing.
+     0.3.0: openlounge.app's Let's Encrypt certificate chains YE1 → Root YE → ISRG Root X2 (ECDSA "Gen Y" hierarchy).
+     Android 7–13 system stores don't have ISRG Root X2 / Root YE (and Android 7.0 lacks X1), so the WebView showed a
+     blank page there. Bundle Let's Encrypt's roots (from letsencrypt.org/certificates) in addition to the system store. -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
+            <certificates src="@raw/isrg_root_x1" />
+            <certificates src="@raw/isrg_root_x2" />
+            <certificates src="@raw/root_ye" />
+            <certificates src="@raw/root_yr" />
         </trust-anchors>
     </base-config>
     <domain-config cleartextTrafficPermitted="true">
@@ -11,5 +18,8 @@
         <domain includeSubdomains="true">10.0.2.2</domain>
         <domain includeSubdomains="true">192.168.0.0</domain>
         <domain includeSubdomains="true">192.168.1.0</domain>
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
     </domain-config>
 </network-security-config>
