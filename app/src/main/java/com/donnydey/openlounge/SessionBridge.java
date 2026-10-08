@@ -38,6 +38,10 @@ public final class SessionBridge {
         void biometricsSetEnabled(String reqId, boolean on);
         /** 0.3.0: one-off prompt (quick sign-in with screen name); result true only on success. */
         void biometricsAuthenticate(String reqId);
+        /** 0.3.0: light|medium|heavy|success|warning|error|selection (HAPTICS_BRIDGE.md). */
+        void haptics(String type);
+        /** 0.3.0: external link → Custom Tab; openlounge.app → in the WebView (BROWSER_BRIDGE.md). */
+        void openBrowser(String url);
     }
 
     private final SecureSessionStore store;
@@ -59,6 +63,8 @@ public final class SessionBridge {
         public boolean biometricsEnabled() { return false; }
         public void biometricsSetEnabled(String id, boolean on) {}
         public void biometricsAuthenticate(String id) {}
+        public void haptics(String type) {}
+        public void openBrowser(String url) {}
     };
 
     public SessionBridge(Context ctx) {
@@ -130,6 +136,30 @@ public final class SessionBridge {
 
     @JavascriptInterface
     public void haptic(String type) { if (trusted()) host.haptic(type == null ? "light" : type); }
+
+    // ---- 0.3.0: haptics + in-app browser contracts (see /workspace/native/*_BRIDGE.md) ----
+    @JavascriptInterface
+    public boolean haptics(String type) {
+        if (!trusted() || !NativeHaptics.isKnown(type)) return false;
+        host.haptics(type);
+        return true;
+    }
+
+    @JavascriptInterface
+    public boolean openBrowser(String url) {
+        if (!trusted() || url == null || url.length() > 4096) return false;
+        host.openBrowser(url);
+        return true;
+    }
+
+    /** Feature list for the page (JSON array string; Android JS interfaces can't return arrays). */
+    @JavascriptInterface
+    public String capabilities() {
+        return "[\"session\",\"haptic\",\"haptics\",\"browser\",\"camera\",\"openAuth\",\"push\",\"share\",\"contacts\",\"badge\",\"biometrics\",\"phoneAuth\"]";
+    }
+
+    @JavascriptInterface
+    public String getVersion() { return BuildConfig.VERSION_NAME; }
 
     // ---- 0.2.7: numeric app-icon badge (total unread); 0 clears ----
     @JavascriptInterface

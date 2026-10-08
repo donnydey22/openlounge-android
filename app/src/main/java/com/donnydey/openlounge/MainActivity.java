@@ -155,6 +155,21 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         splash.setOnExitAnimationListener(v -> v.remove()); // hand off instantly: overlay has the same bg
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+        EdgeToEdge.apply(this, findViewById(R.id.root)); // 0.3.0: target SDK 36 (edge-to-edge enforced on Android 15+)
+        // 0.3.0: predictive back (default on for target 36) never calls onBackPressed(); use the dispatcher
+        getOnBackPressedDispatcher().addCallback(this, new androidx.activity.OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                if (locked) { moveTaskToBack(true); return; }
+                if (webView != null && webView.getVisibility() == View.VISIBLE && webView.canGoBack()) {
+                    webView.goBack();
+                } else {
+                    setEnabled(false);
+                    getOnBackPressedDispatcher().onBackPressed();
+                    setEnabled(true);
+                }
+            }
+        });
         pendingOpenPath = openPathFrom(getIntent());
         OpenLoungeMessagingService.ensureChannels(this);
         PushTokens.setListener(token -> handler.post(() -> {
@@ -287,11 +302,8 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 if (web && (Prefs.isTrustedOrigin(uri) || isConfiguredHost(uri))) {
                     return false; // stays in the app
                 }
-                // everything else (other sites, tel:, mailto:, intents) opens outside the app
-                try {
-                    startActivity(new Intent(Intent.ACTION_VIEW, uri));
-                } catch (Exception ignored) {
-                }
+                // 0.3.0: other sites open in a Chrome Custom Tab over the app; tel:, mailto:, … go to the system
+                InAppBrowser.open(MainActivity.this, uri);
                 return true;
             }
         });
@@ -765,23 +777,26 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
 
     @Override
     public void haptic(String type) {
-        handler.post(() -> {
-            if (webView == null) return;
-            int c = "medium".equals(type) ? HapticFeedbackConstants.LONG_PRESS
-                    : "success".equals(type) ? (Build.VERSION.SDK_INT >= 30 ? HapticFeedbackConstants.CONFIRM : HapticFeedbackConstants.LONG_PRESS)
-                    : HapticFeedbackConstants.KEYBOARD_TAP;
-            webView.performHapticFeedback(c);
-        });
+        // legacy 0.2.x names (raiseHand/joinStage/sendDm) map onto the 0.3.0 vocabulary
+        String t = "joinStage".equals(type) ? "success" : ("raiseHand".equals(type) || "sendDm".equals(type)) ? "light" : type;
+        haptics(t);
     }
 
     @Override
-    public void onBackPressed() {
-        if (locked) { moveTaskToBack(true); return; }
-        if (webView.getVisibility() == View.VISIBLE && webView.canGoBack()) {
-            webView.goBack();
-        } else {
-            super.onBackPressed();
-        }
+    public void haptics(String type) {
+        handler.post(() -> NativeHaptics.play(this, webView, type));
+    }
+
+    @Override
+    public void openBrowser(String url) {
+        handler.post(() -> {
+            Uri u = Uri.parse(url);
+            if (InAppBrowser.isWeb(u) && (Prefs.isTrustedOrigin(u) || isConfiguredHost(u))) {
+                if (webView != null) webView.loadUrl(u.toString()); // openlounge.app stays in the app
+            } else {
+                InAppBrowser.open(this, u);
+            }
+        });
     }
 
     /** Tell the page the app went to the background / came back (a WebView often keeps reporting "visible"). */
