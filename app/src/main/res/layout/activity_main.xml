@@ -142,4 +142,79 @@
         android:padding="10dp"
         android:src="@drawable/ic_settings"
         android:visibility="gone" />
+    <!-- Biometric app lock / privacy overlay (MainActivity.showLock): hides the WebView while locked -->
+    <LinearLayout
+        android:id="@+id/lock_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@color/launch_bg"
+        android:clickable="true"
+        android:focusable="true"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:padding="28dp"
+        android:visibility="gone">
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="🎙️ Open Lounge"
+            android:textColor="@color/launch_text"
+            android:textSize="30sp"
+            android:textStyle="bold"
+            android:fontFamily="sans-serif"
+            android:letterSpacing="-0.025" />
+        <TextView
+            android:id="@+id/lock_message"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:gravity="center"
+            android:text="@string/lock_locked"
+            android:textColor="@color/openlounge_muted"
+            android:textSize="15sp" />
+        <LinearLayout
+            android:id="@+id/lock_actions"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="28dp"
+            android:gravity="center_horizontal"
+            android:orientation="vertical"
+            android:visibility="gone">
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_unlock"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/lock_retry"
+                android:textAllCaps="false" />
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_unlock_other"
+                style="@style/Widget.MaterialComponents.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="@string/lock_other_way"
+                android:textAllCaps="false" />
+        </LinearLayout>
+    </LinearLayout>
+    <!-- Launch wordmark overlay (LaunchOverlay.java); mirrors web header .ol-word: bold, tracking-tight -->
+    <FrameLayout
+        android:id="@+id/launch_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@color/launch_bg"
+        android:clickable="true"
+        android:focusable="true">
+        <TextView
+            android:id="@+id/launch_word"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:text="Open Lounge"
+            android:textColor="@color/launch_text"
+            android:textSize="34sp"
+            android:textStyle="bold"
+            android:fontFamily="sans-serif"
+            android:letterSpacing="-0.025"
+            android:importantForAccessibility="no" />
+    </FrameLayout>
 </FrameLayout>

@@ -31,6 +31,7 @@ import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
+import androidx.core.splashscreen.SplashScreen;
 import androidx.webkit.WebSettingsCompat;
 import androidx.webkit.WebViewFeature;
 
@@ -38,11 +39,39 @@ import com.google.android.material.button.MaterialButton;
 import com.google.android.material.textfield.TextInputEditText;
 
 import org.json.JSONArray;
+import org.json.JSONObject;
+
+import android.database.Cursor;
+import android.provider.ContactsContract;
+import android.provider.Settings;
+import android.telephony.PhoneNumberUtils;
+import android.telephony.TelephonyManager;
+import android.view.HapticFeedbackConstants;
+import android.content.res.Configuration;
+import android.graphics.Color;
+
+import java.util.LinkedHashMap;
+import java.util.Locale;
+import java.util.Map;
 
 import java.util.ArrayList;
 import java.util.List;
 
-public class MainActivity extends AppCompatActivity {
+public class MainActivity extends AppCompatActivity implements SessionBridge.Host {
+    private NativePhoneAuth phoneAuth;
+
+    @Override
+    public void phoneAuthStart(String reqId, String e164) {
+        if (phoneAuth == null) phoneAuth = new NativePhoneAuth(this, webView);
+        phoneAuth.start(reqId, e164);
+    }
+
+    @Override
+    public void phoneAuthConfirm(String reqId, String code) {
+        if (phoneAuth == null) phoneAuth = new NativePhoneAuth(this, webView);
+        phoneAuth.confirm(reqId, code);
+    }
+
     private WebView webView;
     private LinearLayout setupPanel;
     private LinearLayout loadingPanel;
@@ -80,6 +109,18 @@ public class MainActivity extends AppCompatActivity {
                 }
             });
 
+    /** deep link from a tapped notification, applied once the WebView is ready */
+    private String pendingOpenPath = null;
+
+    private final ActivityResultLauncher<String> contactsPermLauncher =
+            registerForActivityResult(new ActivityResultContracts.RequestPermission(), granted -> {
+                if (granted) readContactsAsync();
+                else deliverContacts("{\"granted\":false}");
+            });
+
+    private final ActivityResultLauncher<String> notifPermLauncher =
+            registerForActivityResult(new ActivityResultContracts.RequestPermission(), granted -> {});
+
     private final ActivityResultLauncher<Intent> settingsLauncher =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
                 if (result.getResultCode() == RESULT_OK) {
@@ -96,10 +137,33 @@ public class MainActivity extends AppCompatActivity {
                 fileCallback = null;
             });
 
+    private LaunchOverlay launchOverlay;
+
+    // ---- opt-in biometric app lock (BiometricLock) ----
+    private View lockOverlay;
+    private View lockActions;
+    private TextView lockMessage;
+    private boolean locked = false;
+    private boolean prompting = false;
+    /** elapsedRealtime when the app went to the background; 0 = cold start */
+    private long backgroundedAt = 0;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        // Static native splash = plain brand background (no icon); the wordmark animation is LaunchOverlay.
+        SplashScreen splash = SplashScreen.installSplashScreen(this);
+        splash.setOnExitAnimationListener(v -> v.remove()); // hand off instantly: overlay has the same bg
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+        pendingOpenPath = openPathFrom(getIntent());
+        OpenLoungeMessagingService.ensureChannels(this);
+        PushTokens.setListener(token -> handler.post(() -> {
+            if (webView != null && !migrating)
+                webView.evaluateJavascript("window.__olPushToken&&window.__olPushToken(" + JSONObject.quote(token) + ")", null);
+        }));
+        PushTokens.refresh(this);
+        launchOverlay = new LaunchOverlay(findViewById(R.id.launch_overlay), findViewById(R.id.launch_word));
+        launchOverlay.start();
 
         webView = findViewById(R.id.webview);
         setupPanel = findViewById(R.id.setup_panel);
@@ -113,6 +177,14 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.btn_retry).setOnClickListener(v -> loadConfiguredUrl());
         findViewById(R.id.btn_change_url).setOnClickListener(v -> openSettings());
         gearButton.setOnClickListener(v -> openSettings());
+
+        lockOverlay = findViewById(R.id.lock_overlay);
+        lockActions = findViewById(R.id.lock_actions);
+        lockMessage = findViewById(R.id.lock_message);
+        findViewById(R.id.btn_unlock).setOnClickListener(v -> promptUnlock(false));
+        findViewById(R.id.btn_unlock_other).setOnClickListener(v -> promptUnlock(true));
+        // cold start: lock before anything from the WebView is visible (the page still loads behind the overlay)
+        if (BiometricLock.shouldLock(BiometricLock.isEnabled(this), 0, 0, BiometricLock.LOCK_AFTER_MS)) showLock();
 
         setupWebView();
 
@@ -130,8 +202,20 @@ public class MainActivity extends AppCompatActivity {
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, false);
 
         // Durable native token store mirrored by src/lib/session.ts (window.OpenLoungeNative)
-        sessionBridge = new SessionBridge(this);
+        sessionBridge = new SessionBridge(this, this);
+        // native feel: theme-colored background (no white flash before the page paints), no overscroll glow
+        boolean dark = (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK) != Configuration.UI_MODE_NIGHT_NO;
+        webView.setBackgroundColor(Color.parseColor(dark ? "#0b0b0d" : "#f4f3ee"));
+        webView.setOverScrollMode(View.OVER_SCROLL_NEVER);
         webView.addJavascriptInterface(sessionBridge, SessionBridge.JS_NAME);
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            try {
+                java.util.Set<String> origins = new java.util.HashSet<>(java.util.Arrays.asList(
+                        "https://openlounge.app", "https://www.openlounge.app", Prefs.LEGACY_RAILWAY_URL));
+                androidx.webkit.WebViewCompat.addDocumentStartJavaScript(webView, SessionBridge.BIOMETRICS_SHIM, origins);
+            } catch (Exception ignored) {
+            }
+        }
 
         WebSettings s = webView.getSettings();
         s.setJavaScriptEnabled(true);
@@ -175,7 +259,9 @@ public class MainActivity extends AppCompatActivity {
                     return;
                 }
                 loadRetries = 0;
+                view.evaluateJavascript(SessionBridge.BIOMETRICS_SHIM, null); // no-op if already defined
                 showWeb();
+                launchOverlay.markReady();
             }
 
             @Override
@@ -298,8 +384,9 @@ public class MainActivity extends AppCompatActivity {
         }
         ensureMicPermissionThen(() -> {
             showLoading();
-            sessionBridge.setCurrentUrl(url);
-            webView.loadUrl(url);
+            String target = withPendingPath(url);
+            sessionBridge.setCurrentUrl(target);
+            webView.loadUrl(target);
         });
     }
 
@@ -352,8 +439,9 @@ public class MainActivity extends AppCompatActivity {
         String url = Prefs.getServerUrl(this);
         ensureMicPermissionThen(() -> {
             showLoading();
-            sessionBridge.setCurrentUrl(url);
-            webView.loadUrl(url);
+            String target = withPendingPath(url);
+            sessionBridge.setCurrentUrl(target);
+            webView.loadUrl(target);
         });
     }
 
@@ -377,6 +465,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void showSetup() {
+        if (launchOverlay != null) launchOverlay.markReady();
         setupPanel.setVisibility(View.VISIBLE);
         loadingPanel.setVisibility(View.GONE);
         errorPanel.setVisibility(View.GONE);
@@ -402,6 +491,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void showError(String msg) {
+        if (launchOverlay != null) launchOverlay.markReady();
         setupPanel.setVisibility(View.GONE);
         loadingPanel.setVisibility(View.GONE);
         errorPanel.setVisibility(View.VISIBLE);
@@ -410,8 +500,263 @@ public class MainActivity extends AppCompatActivity {
         errorText.setText(msg);
     }
 
+    // ---------- 0.2.5: notifications deep link, push token, share, contacts, haptics ----------
+
+    private static String openPathFrom(Intent i) {
+        if (i == null) return null;
+        Uri data = i.getData();
+        if (data != null && "openlounge".equals(data.getScheme()) && "auth".equals(data.getHost())) {
+            // OAuth return from the Custom Tab → the web app's /auth/complete (it redeems the code with its PKCE verifier)
+            String q = data.getEncodedQuery();
+            return (q == null || q.length() > 2000) ? "/auth/complete" : "/auth/complete?" + q;
+        }
+        String p = i.getStringExtra(OpenLoungeMessagingService.EXTRA_OPEN_PATH);
+        // relative in-app paths only ("/room/x", "/messages/u_1") — never another origin
+        if (p == null || !p.startsWith("/") || p.startsWith("//") || p.contains("\\") || p.length() > 300) return null;
+        return p;
+    }
+
+    private String withPendingPath(String base) {
+        String p = pendingOpenPath;
+        pendingOpenPath = null;
+        if (p == null) return base;
+        Uri b = Uri.parse(base);
+        return b.getScheme() + "://" + b.getEncodedAuthority() + p;
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        String p = openPathFrom(intent);
+        if (p == null || webView == null) return;
+        String base = Prefs.getServerUrl(this);
+        if (!Prefs.isValidUrl(base) || migrating) {
+            pendingOpenPath = p;
+            return;
+        }
+        // client-side navigation keeps the socket/session alive; full load as fallback
+        String js = "(function(){try{if(window.next&&window.next.router){window.next.router.push(" + JSONObject.quote(p) + ");return 1}}catch(e){}location.assign("
+                + JSONObject.quote(p) + ");return 1})()";
+        webView.evaluateJavascript(js, null);
+    }
+
+    @Override
+    public String pushToken() {
+        return PushTokens.get(this);
+    }
+
+    @Override
+    public void share(String text, String url) {
+        handler.post(() -> {
+            Intent send = new Intent(Intent.ACTION_SEND).setType("text/plain")
+                    .putExtra(Intent.EXTRA_TEXT, (text + " " + url).trim());
+            startActivity(Intent.createChooser(send, getString(R.string.share_title)));
+        });
+    }
+
+    @Override
+    public String contactsPermission() {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
+                ? "granted" : "prompt";
+    }
+
+    /** The web app shows its explainer first; only then calls this, which shows the OS prompt if needed. */
+    @Override
+    public void requestContacts() {
+        handler.post(() -> {
+            if ("granted".equals(contactsPermission())) readContactsAsync();
+            else contactsPermLauncher.launch(Manifest.permission.READ_CONTACTS);
+        });
+    }
+
+    private void readContactsAsync() {
+        new Thread(() -> {
+            String country = countryIso();
+            Map<String, List<String>> byName = new LinkedHashMap<>();
+            try (Cursor c = getContentResolver().query(ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                    new String[]{ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER},
+                    null, null, null)) {
+                while (c != null && c.moveToNext() && byName.size() < 5000) {
+                    String name = c.getString(0);
+                    String num = c.getString(1);
+                    if (num == null) continue;
+                    String e164 = PhoneNumberUtils.formatNumberToE164(num, country);
+                    List<String> l = byName.get(name == null ? "" : name);
+                    if (l == null) byName.put(name == null ? "" : name, l = new ArrayList<>());
+                    l.add(e164 != null ? e164 : num);
+                }
+            } catch (Exception ignored) {
+            }
+            try {
+                JSONArray arr = new JSONArray();
+                for (Map.Entry<String, List<String>> e : byName.entrySet())
+                    arr.put(new JSONObject().put("name", e.getKey()).put("numbers", new JSONArray(e.getValue())));
+                deliverContacts(new JSONObject().put("granted", true).put("country", country).put("contacts", arr).toString());
+            } catch (Exception e) {
+                deliverContacts("{\"granted\":false}");
+            }
+        }).start();
+    }
+
+    private String countryIso() {
+        try {
+            TelephonyManager tm = (TelephonyManager) getSystemService(TELEPHONY_SERVICE);
+            String iso = tm != null ? tm.getSimCountryIso() : null;
+            if (iso != null && iso.length() == 2) return iso.toUpperCase(Locale.US);
+        } catch (Exception ignored) {
+        }
+        String c = Locale.getDefault().getCountry();
+        return c == null || c.isEmpty() ? "US" : c.toUpperCase(Locale.US);
+    }
+
+    /** Contacts stay on the device side of the bridge; the page hashes numbers before anything is uploaded. */
+    private void deliverContacts(String json) {
+        handler.post(() -> {
+            if (webView != null) webView.evaluateJavascript("window.__olContacts&&window.__olContacts(" + JSONObject.quote(json) + ")", null);
+        });
+    }
+
+    @Override
+    public void openAppSettings() {
+        handler.post(() -> startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName()))));
+    }
+
+    @Override
+    public void requestNotificationPermission() {
+        handler.post(() -> {
+            if (Build.VERSION.SDK_INT >= 33
+                    && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+                notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS);
+            PushTokens.refresh(this);
+        });
+    }
+
+    @Override
+    public void openAuth(String url) {
+        handler.post(() -> {
+            Uri u = Uri.parse(url);
+            if (!"https".equalsIgnoreCase(u.getScheme()) || !(Prefs.isTrustedOrigin(u) || isConfiguredHost(u))
+                    || u.getPath() == null || !u.getPath().matches("/(api/)?auth/(google|apple|link)/.*")) return;
+            try {
+                new androidx.browser.customtabs.CustomTabsIntent.Builder().setShowTitle(true).build().launchUrl(this, u);
+            } catch (Exception e) {
+                try { startActivity(new Intent(Intent.ACTION_VIEW, u)); } catch (Exception ignored) {}
+            }
+        });
+    }
+
+    @Override
+    public void setBadge(int count) {
+        AppBadge.set(getApplicationContext(), count);
+        // Do not clear notifications here: the server sends a per-thread `clear` push on dm:read.
+        // A global cancel would also remove unrelated room/social notifications.
+    }
+
+    // ---------- biometric app lock ----------
+
+    private void showLock() {
+        locked = true;
+        lockMessage.setText(R.string.lock_locked);
+        lockActions.setVisibility(View.GONE);
+        lockOverlay.setVisibility(View.VISIBLE);
+        if (webView != null) webView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+    }
+
+    private void hideLock() {
+        locked = false;
+        lockOverlay.setVisibility(View.GONE);
+        if (webView != null) webView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_AUTO);
+    }
+
+    private void promptUnlock(boolean otherWay) {
+        if (prompting) return;
+        if (!BiometricLock.isAvailable(this)) { // device security was removed: never lock the user out
+            BiometricLock.setEnabledFlag(this, false);
+            hideLock();
+            return;
+        }
+        prompting = true;
+        lockActions.setVisibility(View.GONE);
+        BiometricLock.prompt(this, getString(R.string.lock_prompt_title), null, otherWay, (status, msg) -> {
+            prompting = false;
+            if ("success".equals(status)) {
+                hideLock();
+            } else if ("unavailable".equals(status) && !BiometricLock.isAvailable(this)) {
+                BiometricLock.setEnabledFlag(this, false);
+                hideLock();
+            } else {
+                // cancelled / failed: stay locked, offer retry and "Use another way" (device PIN / pattern / password)
+                lockMessage.setText("cancelled".equals(status) ? getString(R.string.lock_locked) : getString(R.string.lock_failed));
+                lockActions.setVisibility(View.VISIBLE);
+            }
+        });
+    }
+
+    @Override
+    public boolean biometricsAvailable() {
+        return BiometricLock.isAvailable(this);
+    }
+
+    @Override
+    public boolean biometricsEnabled() {
+        return BiometricLock.isEnabled(this);
+    }
+
+    @Override
+    public void biometricsSetEnabled(String reqId, boolean on) {
+        handler.post(() -> {
+            if (!on) {
+                BiometricLock.setEnabledFlag(this, false);
+                deliverBio(reqId, false);
+                return;
+            }
+            if (prompting) { deliverBio(reqId, BiometricLock.isEnabled(this)); return; }
+            prompting = true;
+            // turning it on requires a successful prompt first
+            BiometricLock.prompt(this, getString(R.string.lock_prompt_enable), null, false, (status, msg) -> {
+                prompting = false;
+                boolean ok = "success".equals(status);
+                if (ok) BiometricLock.setEnabledFlag(this, true);
+                deliverBio(reqId, BiometricLock.isEnabled(this));
+            });
+        });
+    }
+
+    private void deliverBio(String reqId, boolean enabled) {
+        if (webView != null)
+            webView.evaluateJavascript("window.__olBio&&window.__olBio(" + JSONObject.quote(reqId) + ",'" + enabled + "')", null);
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        if (!prompting) backgroundedAt = android.os.SystemClock.elapsedRealtime();
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        if (backgroundedAt > 0 && !locked && BiometricLock.shouldLock(BiometricLock.isEnabled(this), backgroundedAt,
+                android.os.SystemClock.elapsedRealtime(), BiometricLock.LOCK_AFTER_MS)) {
+            showLock();
+        }
+        backgroundedAt = 0;
+    }
+
+    @Override
+    public void haptic(String type) {
+        handler.post(() -> {
+            if (webView == null) return;
+            int c = "medium".equals(type) ? HapticFeedbackConstants.LONG_PRESS
+                    : "success".equals(type) ? (Build.VERSION.SDK_INT >= 30 ? HapticFeedbackConstants.CONFIRM : HapticFeedbackConstants.LONG_PRESS)
+                    : HapticFeedbackConstants.KEYBOARD_TAP;
+            webView.performHapticFeedback(c);
+        });
+    }
+
     @Override
     public void onBackPressed() {
+        if (locked) { moveTaskToBack(true); return; }
         if (webView.getVisibility() == View.VISIBLE && webView.canGoBack()) {
             webView.goBack();
         } else {
@@ -431,12 +776,19 @@ public class MainActivity extends AppCompatActivity {
         super.onPause();
         CookieManager.getInstance().flush();
         dispatchNativeVisibility(false);
+        // privacy: cover the page in the recents thumbnail while the lock is on (unless our own prompt is up)
+        if (!prompting && !locked && BiometricLock.isEnabled(this)) lockOverlay.setVisibility(View.VISIBLE);
     }
 
     @Override
     protected void onResume() {
         super.onResume();
         dispatchNativeVisibility(true);
+        if (locked) {
+            if (!prompting && lockActions.getVisibility() != View.VISIBLE) handler.post(() -> promptUnlock(false));
+        } else if (lockOverlay != null) {
+            lockOverlay.setVisibility(View.GONE);
+        }
     }
 
     @Override

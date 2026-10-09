@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "166652417209",
+    "project_id": "open-lounge-2aabd",
+    "storage_bucket": "open-lounge-2aabd.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:166652417209:android:5fdbd6f28e43bac69c3768",
+        "android_client_info": {
+          "package_name": "com.donnydey.openlounge"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBNaaebQNWZdGPyDGlIdIgH7W7nM7boBBw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

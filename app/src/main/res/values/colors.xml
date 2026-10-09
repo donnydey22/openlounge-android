@@ -6,4 +6,6 @@
     <color name="openlounge_text">#FFFFFF</color>
     <color name="openlounge_muted">#A1A1A6</color>
     <color name="openlounge_green">#5B8C5A</color>
+    <color name="launch_bg">#0B0B0D</color>
+    <color name="launch_text">#F4F4F5</color>
 </resources>

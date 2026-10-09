@@ -1,15 +1,25 @@
 plugins {
     id 'com.android.application'
+    // FCM: reads app/google-services.json (Firebase project open-lounge-2aabd)
+    id 'com.google.gms.google-services'
 }
 
-// Release signing: android/keystore.properties (never committed) → storeFile/storePassword/keyAlias/keyPassword.
-// It points at the key that signed every APK Donny has installed (0.2.1 and earlier), so updates install in place
-// over the existing app — and keep its data, i.e. nobody is signed out by the update.
+// Release signing — two sources, first match wins:
+//   1) Environment (CI / the new upload key):  OPENLOUNGE_RELEASE_STORE_FILE, OPENLOUNGE_RELEASE_STORE_PASSWORD,
+//      OPENLOUNGE_RELEASE_KEY_ALIAS, OPENLOUNGE_RELEASE_KEY_PASSWORD  (e.g. `set -a; . ~/.secrets/openlounge-release.env`).
+//      This is the RSA-4096 release key (~/.secrets/openlounge-release.jks). NOTE: an APK signed with it will NOT install
+//      over builds signed with the old key — switch only for a fresh distribution (Play / new package install).
+//   2) android/keystore.properties (never committed) → storeFile/storePassword/keyAlias/keyPassword. It points at the
+//      key that signed every APK Donny has installed (0.2.1 and earlier), so updates install in place and keep data.
+// Neither present → release builds are unsigned (assembleRelease still works; the APK just can't be installed).
 def keystorePropsFile = rootProject.file('keystore.properties')
 def keystoreProps = new Properties()
 if (keystorePropsFile.exists()) {
     keystorePropsFile.withInputStream { keystoreProps.load(it) }
 }
+def envSigning = ['OPENLOUNGE_RELEASE_STORE_FILE', 'OPENLOUNGE_RELEASE_STORE_PASSWORD', 'OPENLOUNGE_RELEASE_KEY_ALIAS', 'OPENLOUNGE_RELEASE_KEY_PASSWORD']
+        .every { System.getenv(it) }
+def hasSigning = envSigning || keystorePropsFile.exists()
 
 android {
     namespace 'com.donnydey.openlounge'
@@ -19,14 +29,22 @@ android {
         applicationId "com.donnydey.openlounge"
         minSdk 24
         targetSdk 34
-        versionCode 6
-        versionName "0.2.4"
+        versionCode 10
+        versionName "0.2.8"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
         release {
-            if (keystorePropsFile.exists()) {
+            if (envSigning) {
+                storeFile file(System.getenv('OPENLOUNGE_RELEASE_STORE_FILE'))
+                storePassword System.getenv('OPENLOUNGE_RELEASE_STORE_PASSWORD')
+                keyAlias System.getenv('OPENLOUNGE_RELEASE_KEY_ALIAS')
+                keyPassword System.getenv('OPENLOUNGE_RELEASE_KEY_PASSWORD')
+                enableV1Signing true
+                enableV2Signing true
+                enableV3Signing true
+            } else if (keystorePropsFile.exists()) {
                 storeFile file(keystoreProps['storeFile'])
                 storePassword keystoreProps['storePassword']
                 keyAlias keystoreProps['keyAlias']
@@ -47,7 +65,7 @@ android {
         release {
             minifyEnabled false
             debuggable false
-            if (keystorePropsFile.exists()) signingConfig signingConfigs.release
+            if (hasSigning) signingConfig signingConfigs.release
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
@@ -66,10 +84,22 @@ android {
 
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.core:core-splashscreen:1.0.1'
     implementation 'com.google.android.material:material:1.12.0'
     implementation 'androidx.webkit:webkit:1.11.0'
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+    implementation platform('com.google.firebase:firebase-bom:33.7.0')
+    implementation 'com.google.firebase:firebase-messaging'
+    implementation 'com.google.firebase:firebase-auth'
+    // Play Integrity app verification for phone auth (pulled by firebase-auth; pinned for clarity)
+    implementation 'com.google.android.play:integrity:1.4.0'
+    implementation 'androidx.browser:browser:1.8.0'
+    // numeric launcher badges (Samsung One UI, etc.) — AppBadge
+    implementation 'me.leolin:ShortcutBadger:1.1.22@aar'
+    // opt-in biometric app lock (BiometricLock)
+    implementation 'androidx.biometric:biometric:1.1.0'
 
+    testImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test:runner:1.6.2'
     androidTestImplementation 'androidx.test.ext:junit:1.2.1'
 }
