@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Open Lounge</string>
+    <string name="copyright" translatable="false">Global Network LLC 2026</string>
     <string name="settings_title">Server settings</string>
     <string name="server_url_hint">https://openlounge.app</string>
     <string name="server_url_label">Open Lounge server URL</string>
