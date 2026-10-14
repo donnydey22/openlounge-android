@@ -53,6 +53,8 @@ import android.graphics.Color;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
@@ -89,7 +91,9 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     private boolean migrating = false;
     // 0.3.1 calls: the live activity (for notification Hang up / Decline fallback) + call audio state
     private static WeakReference<MainActivity> live = new WeakReference<>(null);
-    private boolean pageLoaded = false;
+    private volatile boolean pageLoaded = false;
+    /** Main activity is resumed; only then may an FCM payload be exposed to the already-visible WebView. */
+    private volatile boolean activityForeground = false;
     private boolean callAudioOn = false;
     private boolean callSpeaker = true;
     private String callId = null;
@@ -682,10 +686,6 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     @Override
     public void setBadge(int count) {
         AppBadge.set(getApplicationContext(), count);
-        if (count == 0) {
-            // everything read: drop the DM notifications still in the shade
-            try { androidx.core.app.NotificationManagerCompat.from(this).cancelAll(); } catch (Exception ignored) {}
-        }
     }
 
     // ---------- biometric app lock ----------
@@ -824,6 +824,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
 
     @Override
     protected void onPause() {
+        activityForeground = false;
         super.onPause();
         CookieManager.getInstance().flush();
         dispatchNativeVisibility(false);
@@ -848,6 +849,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     @Override
     protected void onResume() {
         super.onResume();
+        activityForeground = true;
         dispatchNativeVisibility(true);
         scheduleFsiPrompt();
         if (locked) {
@@ -858,6 +860,49 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     }
 
     // ---------- 0.3.1: native call ringing / in-call (NATIVE_SPEC.md §4, §5) ----------
+
+    /** Native FCM → page only while the already-loaded WebView is visibly foregrounded. */
+    static boolean dispatchForegroundNotification(ForegroundNotification notice) {
+        MainActivity a = live.get();
+        if (notice == null || a == null || a.isFinishing() || !a.activityForeground || !a.pageLoaded) return false;
+        if (Looper.myLooper() == Looper.getMainLooper()) return a.forwardForegroundNotification(notice);
+        final boolean[] forwarded = {false};
+        CountDownLatch settled = new CountDownLatch(1);
+        a.handler.post(() -> {
+            try {
+                forwarded[0] = a.forwardForegroundNotification(notice);
+            } finally {
+                settled.countDown();
+            }
+        });
+        try {
+            // The FCM callback has only a short budget. Wait briefly for the UI-thread decision so a busy/navigating
+            // WebView falls back to the durable system notification instead of silently dropping the event.
+            return settled.await(150, TimeUnit.MILLISECONDS) && forwarded[0];
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    private boolean forwardForegroundNotification(ForegroundNotification notice) {
+        if (webView == null || migrating || !activityForeground || !pageLoaded) return false;
+        try {
+            JSONObject d = new JSONObject();
+            d.put("type", notice.type).put("title", notice.title).put("body", notice.body).put("tag", notice.tag)
+                    .put("url", notice.url).put("channel", notice.channel).put("clear", notice.clear);
+            if (!notice.badge.isEmpty()) d.put("badge", notice.badge);
+            if (!notice.sentAt.isEmpty()) d.put("sentAt", notice.sentAt);
+            if (!notice.peerId.isEmpty()) d.put("peerId", notice.peerId);
+            if (!notice.groupId.isEmpty()) d.put("groupId", notice.groupId);
+            if (!notice.roomId.isEmpty()) d.put("roomId", notice.roomId);
+            webView.evaluateJavascript("(function(){try{window.dispatchEvent(new CustomEvent('openlounge:native-notification',{detail:"
+                    + d.toString() + "}))}catch(e){}})()", null);
+            return true;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
 
     /** Native → page: openlounge:native-call {type: call:hangup | call:decline | …}. False if no page is up. */
     static boolean dispatchNativeCall(String detailJson) {
@@ -965,6 +1010,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
 
     @Override
     protected void onDestroy() {
+        activityForeground = false;
         if (live.get() == this) live = new WeakReference<>(null);
         if (isFinishing()) {
             CallService.stop(this);
