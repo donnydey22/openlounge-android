@@ -56,7 +56,12 @@ import java.util.Map;
 
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
+import java.util.EnumMap;
+import java.util.EnumSet;
 import android.media.AudioDeviceInfo;
+import android.media.AudioDeviceCallback;
+import android.media.AudioAttributes;
+import android.media.AudioFocusRequest;
 import android.media.AudioManager;
 import java.util.List;
 
@@ -94,6 +99,22 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     private boolean callSpeaker = true;
     private String callId = null;
     private String callName = null;
+    private AudioManager callAudioManager;
+    private int modeBeforeCall = AudioManager.MODE_NORMAL;
+    private Object callAudioFocusRequest;
+    private boolean callAudioFocused = false;
+    private boolean callDeviceCallbackRegistered = false;
+    private final AudioManager.OnAudioFocusChangeListener callFocusListener = change -> {
+        if (change == AudioManager.AUDIOFOCUS_GAIN && callAudioOn) handler.post(this::applyCallRoute);
+    };
+    private final AudioDeviceCallback callDeviceCallback = new AudioDeviceCallback() {
+        @Override public void onAudioDevicesAdded(AudioDeviceInfo[] addedDevices) {
+            handler.post(() -> { if (callAudioOn) applyCallRoute(); });
+        }
+        @Override public void onAudioDevicesRemoved(AudioDeviceInfo[] removedDevices) {
+            handler.post(() -> { if (callAudioOn) applyCallRoute(); });
+        }
+    };
     private int loadRetries = 0;
     private final Runnable retryLoad = this::loadConfiguredUrl;
 
@@ -912,7 +933,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             case "call:audioRoute":
                 if (m.has("speaker")) {
                     callSpeaker = m.optBoolean("speaker", true);
-                    if (callAudioOn) applySpeaker();
+                    if (callAudioOn) applyCallRoute();
                 }
                 break;
             default:
@@ -920,45 +941,148 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         }
     }
 
-    /** MODE_IN_COMMUNICATION + speaker (or the connected headset) during a call, MODE_NORMAL otherwise. */
+    /**
+     * Makes a WebView call behave like a normal phone call: communication mode + transient voice focus, and a live
+     * route policy that follows Bluetooth/wired devices as they appear or disappear. The old audio mode/focus is
+     * restored exactly once when the call ends; this never changes the app-wide route outside a call.
+     */
     private void callAudio(boolean on) {
-        AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+        AudioManager am = callAudioManager;
+        if (am == null) callAudioManager = am = (AudioManager) getSystemService(AUDIO_SERVICE);
         if (am == null) return;
-        try {
-            if (on) {
-                am.setMode(AudioManager.MODE_IN_COMMUNICATION);
+        if (on) {
+            if (!callAudioOn) {
+                modeBeforeCall = am.getMode();
                 callAudioOn = true;
-                applySpeaker();
-            } else if (callAudioOn) {
-                callAudioOn = false;
-                callSpeaker = true;
+                requestCallAudioFocus(am);
+                registerCallDeviceCallback(am);
+                try { am.setMode(AudioManager.MODE_IN_COMMUNICATION); } catch (RuntimeException ignored) {}
+            }
+            applyCallRoute();
+        } else if (callAudioOn) {
+            callAudioOn = false;
+            unregisterCallDeviceCallback(am);
+            try {
                 if (Build.VERSION.SDK_INT >= 31) am.clearCommunicationDevice();
-                else am.setSpeakerphoneOn(false);
-                am.setMode(AudioManager.MODE_NORMAL);
+                else clearLegacySco(am);
+            } catch (RuntimeException ignored) {}
+            try { am.setSpeakerphoneOn(false); } catch (RuntimeException ignored) {}
+            try { am.setMode(modeBeforeCall); } catch (RuntimeException ignored) {}
+            abandonCallAudioFocus(am);
+            callSpeaker = true;
+        }
+    }
+
+    private void requestCallAudioFocus(AudioManager am) {
+        if (callAudioFocused) return;
+        try {
+            int result;
+            if (Build.VERSION.SDK_INT >= 26) {
+                AudioFocusRequest request = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+                        .setAudioAttributes(new AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                .build())
+                        .setOnAudioFocusChangeListener(callFocusListener)
+                        .build();
+                callAudioFocusRequest = request;
+                result = am.requestAudioFocus(request);
+            } else {
+                result = am.requestAudioFocus(callFocusListener, AudioManager.STREAM_VOICE_CALL, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT);
+            }
+            callAudioFocused = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
+        } catch (RuntimeException ignored) {
+            callAudioFocusRequest = null;
+            callAudioFocused = false;
+        }
+    }
+
+    private void abandonCallAudioFocus(AudioManager am) {
+        if (!callAudioFocused) return;
+        try {
+            if (Build.VERSION.SDK_INT >= 26 && callAudioFocusRequest instanceof AudioFocusRequest)
+                am.abandonAudioFocusRequest((AudioFocusRequest) callAudioFocusRequest);
+            else am.abandonAudioFocus(callFocusListener);
+        } catch (RuntimeException ignored) {
+        }
+        callAudioFocusRequest = null;
+        callAudioFocused = false;
+    }
+
+    private void registerCallDeviceCallback(AudioManager am) {
+        if (callDeviceCallbackRegistered) return;
+        try {
+            am.registerAudioDeviceCallback(callDeviceCallback, handler);
+            callDeviceCallbackRegistered = true;
+        } catch (RuntimeException ignored) {
+        }
+    }
+
+    private void unregisterCallDeviceCallback(AudioManager am) {
+        if (!callDeviceCallbackRegistered) return;
+        try {
+            am.unregisterAudioDeviceCallback(callDeviceCallback);
+        } catch (RuntimeException ignored) {
+        }
+        callDeviceCallbackRegistered = false;
+    }
+
+    private static CallAudioRoute.Device routeType(AudioDeviceInfo d) {
+        if (d == null) return null;
+        switch (d.getType()) {
+            case AudioDeviceInfo.TYPE_BUILTIN_SPEAKER: return CallAudioRoute.Device.SPEAKER;
+            case AudioDeviceInfo.TYPE_BUILTIN_EARPIECE: return CallAudioRoute.Device.EARPIECE;
+            case AudioDeviceInfo.TYPE_WIRED_HEADSET:
+            case AudioDeviceInfo.TYPE_WIRED_HEADPHONES: return CallAudioRoute.Device.WIRED;
+            case AudioDeviceInfo.TYPE_USB_HEADSET:
+            case AudioDeviceInfo.TYPE_USB_DEVICE: return CallAudioRoute.Device.USB;
+            case AudioDeviceInfo.TYPE_BLUETOOTH_SCO:
+            case AudioDeviceInfo.TYPE_BLE_HEADSET: return CallAudioRoute.Device.BLUETOOTH;
+            default: return null;
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private void applyCallRoute() {
+        AudioManager am = callAudioManager;
+        if (am == null || !callAudioOn) return;
+        try {
+            if (Build.VERSION.SDK_INT >= 31) {
+                EnumMap<CallAudioRoute.Device, AudioDeviceInfo> devices = new EnumMap<>(CallAudioRoute.Device.class);
+                for (AudioDeviceInfo d : am.getAvailableCommunicationDevices()) {
+                    CallAudioRoute.Device type = routeType(d);
+                    if (type != null) devices.put(type, d);
+                }
+                CallAudioRoute.Device selected = CallAudioRoute.choose(callSpeaker, devices.keySet());
+                AudioDeviceInfo target = selected == null ? null : devices.get(selected);
+                if (target != null) am.setCommunicationDevice(target);
+                else am.clearCommunicationDevice();
+                return;
+            }
+
+            EnumSet<CallAudioRoute.Device> devices = EnumSet.noneOf(CallAudioRoute.Device.class);
+            for (AudioDeviceInfo d : am.getDevices(AudioManager.GET_DEVICES_ALL)) {
+                CallAudioRoute.Device type = routeType(d);
+                if (type != null) devices.add(type);
+            }
+            CallAudioRoute.Device selected = CallAudioRoute.choose(callSpeaker, devices);
+            if (CallAudioRoute.usesLegacyBluetoothSco(selected)) {
+                am.startBluetoothSco();
+                am.setBluetoothScoOn(true);
+                am.setSpeakerphoneOn(false);
+            } else {
+                clearLegacySco(am);
+                am.setSpeakerphoneOn(selected == CallAudioRoute.Device.SPEAKER);
             }
         } catch (RuntimeException ignored) {
         }
     }
 
     @SuppressWarnings("deprecation")
-    private void applySpeaker() {
-        AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
-        if (am == null) return;
+    private void clearLegacySco(AudioManager am) {
         try {
-            if (Build.VERSION.SDK_INT >= 31) {
-                AudioDeviceInfo speaker = null, headset = null;
-                for (AudioDeviceInfo d : am.getAvailableCommunicationDevices()) {
-                    int t = d.getType();
-                    if (t == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) speaker = d;
-                    else if (t == AudioDeviceInfo.TYPE_WIRED_HEADSET || t == AudioDeviceInfo.TYPE_USB_HEADSET
-                            || t == AudioDeviceInfo.TYPE_BLUETOOTH_SCO || t == AudioDeviceInfo.TYPE_BLE_HEADSET) headset = d;
-                }
-                if (callSpeaker && headset != null) am.setCommunicationDevice(headset);
-                else if (callSpeaker && speaker != null) am.setCommunicationDevice(speaker);
-                else am.clearCommunicationDevice();
-            } else {
-                am.setSpeakerphoneOn(callSpeaker && !am.isWiredHeadsetOn() && !am.isBluetoothScoOn());
-            }
+            am.setBluetoothScoOn(false);
+            am.stopBluetoothSco();
         } catch (RuntimeException ignored) {
         }
     }
