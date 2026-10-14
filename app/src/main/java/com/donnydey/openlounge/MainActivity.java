@@ -172,6 +172,8 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     private View lockActions;
     private TextView lockMessage;
     private boolean locked = false;
+    /** Set when opening /call/…?accept=1 so showLock is skipped until the call connects. */
+    private boolean unlockForCall = false;
     private boolean prompting = false;
     /** elapsedRealtime when the app went to the background; 0 = cold start */
     private long backgroundedAt = 0;
@@ -227,8 +229,13 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         lockMessage = findViewById(R.id.lock_message);
         findViewById(R.id.btn_unlock).setOnClickListener(v -> promptUnlock(false));
         findViewById(R.id.btn_unlock_other).setOnClickListener(v -> promptUnlock(true));
-        // cold start: lock before anything from the WebView is visible (the page still loads behind the overlay)
-        if (BiometricLock.shouldLock(BiometricLock.isEnabled(this), 0, 0, BiometricLock.LOCK_AFTER_MS)) showLock();
+        // cold start: lock before anything from the WebView is visible (the page still loads behind the overlay).
+        // Incoming-call Accept deep links bypass the lock so the user can join immediately.
+        if (CallLockPolicy.isCallAcceptPath(pendingOpenPath)) {
+            unlockForCall = true;
+        } else if (BiometricLock.shouldLock(BiometricLock.isEnabled(this), 0, 0, BiometricLock.LOCK_AFTER_MS)) {
+            showLock();
+        }
 
         setupWebView();
 
@@ -569,6 +576,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         String p = pendingOpenPath;
         pendingOpenPath = null;
         if (p == null) return base;
+        bypassLockForCallPath(p);
         Uri b = Uri.parse(base);
         return b.getScheme() + "://" + b.getEncodedAuthority() + p;
     }
@@ -578,6 +586,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         super.onNewIntent(intent);
         String p = openPathFrom(intent);
         if (p == null || webView == null) return;
+        bypassLockForCallPath(p);
         String base = Prefs.getServerUrl(this);
         if (!Prefs.isValidUrl(base) || migrating) {
             pendingOpenPath = p;
@@ -711,17 +720,37 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     // ---------- biometric app lock ----------
 
     private void showLock() {
+        if (unlockForCall) return; // Accept /call/…?accept=1 is in flight — never cover the call UI
         locked = true;
         lockMessage.setText(R.string.lock_locked);
         lockActions.setVisibility(View.GONE);
         lockOverlay.setVisibility(View.VISIBLE);
         if (webView != null) webView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+        dispatchNativeLock(true);
+        dispatchNativeVisibility(false); // presence:visible false → server sends FCM CallStyle ring
     }
 
     private void hideLock() {
         locked = false;
+        unlockForCall = false;
         lockOverlay.setVisibility(View.GONE);
         if (webView != null) webView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_AUTO);
+        dispatchNativeLock(false);
+        if (activityForeground) dispatchNativeVisibility(true);
+    }
+
+    /** Tell the page the App Lock overlay is up/down (openlounge:native-lock). */
+    private void dispatchNativeLock(boolean lockedNow) {
+        if (webView == null || migrating) return;
+        webView.evaluateJavascript("window.dispatchEvent(new CustomEvent('openlounge:native-lock',{detail:{locked:"
+                + lockedNow + "}}))", null);
+    }
+
+    /** Clear App Lock for an incoming-call deep link so Accept can join immediately. */
+    private void bypassLockForCallPath(String path) {
+        if (!CallLockPolicy.isCallAcceptPath(path)) return;
+        unlockForCall = true;
+        if (locked || (lockOverlay != null && lockOverlay.getVisibility() == View.VISIBLE)) hideLock();
     }
 
     private void promptUnlock(boolean otherWay) {
@@ -847,7 +876,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         activityForeground = false;
         super.onPause();
         CookieManager.getInstance().flush();
-        dispatchNativeVisibility(false);
+        dispatchNativeVisibility(CallLockPolicy.shouldReportVisible(false, locked));
         // privacy: cover the page in the recents thumbnail while the lock is on (unless our own prompt is up)
         if (!prompting && !locked && BiometricLock.isEnabled(this)) lockOverlay.setVisibility(View.VISIBLE);
     }
@@ -870,7 +899,8 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     protected void onResume() {
         super.onResume();
         activityForeground = true;
-        dispatchNativeVisibility(true);
+        dispatchNativeVisibility(CallLockPolicy.shouldReportVisible(true, locked));
+        if (locked) dispatchNativeLock(true);
         scheduleFsiPrompt();
         if (locked) {
             if (!prompting && lockActions.getVisibility() != View.VISIBLE) handler.post(() -> promptUnlock(false));
@@ -952,6 +982,19 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         String id = m.optString("callId", "");
         if (!id.isEmpty() && !id.matches(CallApi.CALL_ID_RE)) return;
         switch (type) {
+            case "call:incoming": {
+                // Page got call:incoming over WS while App Lock / backgrounded — surface IncomingCallActivity
+                // over the lock (FCM may still be in flight). Same UI as CallNotifications.onIncoming.
+                if (id.isEmpty()) break;
+                String name = m.optString("name", getString(R.string.app_name));
+                if (name.length() > 80) name = name.substring(0, 80);
+                String photo = m.optString("photo", null);
+                boolean video = m.optBoolean("video", false);
+                long expiresAt = m.optLong("expiresAt", System.currentTimeMillis() + 45_000L);
+                if (expiresAt <= System.currentTimeMillis()) break;
+                CallNotifications.show(this, id, name, photo, video, expiresAt);
+                break;
+            }
             case "call:outgoing":
                 callId = id;
                 callName = m.optString("name", "");
@@ -973,6 +1016,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 callAudio(false);
                 callId = null;
                 callName = null;
+                unlockForCall = false; // re-enable App Lock after the call
                 break;
             case "call:audioRoute":
                 if (m.has("speaker")) {
