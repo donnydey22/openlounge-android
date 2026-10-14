@@ -62,8 +62,6 @@ import java.util.EnumMap;
 import java.util.EnumSet;
 import android.media.AudioDeviceInfo;
 import android.media.AudioDeviceCallback;
-import android.media.AudioAttributes;
-import android.media.AudioFocusRequest;
 import android.media.AudioManager;
 import java.util.List;
 
@@ -105,12 +103,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     private String callName = null;
     private AudioManager callAudioManager;
     private int modeBeforeCall = AudioManager.MODE_NORMAL;
-    private Object callAudioFocusRequest;
-    private boolean callAudioFocused = false;
     private boolean callDeviceCallbackRegistered = false;
-    private final AudioManager.OnAudioFocusChangeListener callFocusListener = change -> {
-        if (change == AudioManager.AUDIOFOCUS_GAIN && callAudioOn) handler.post(this::applyCallRoute);
-    };
     private final AudioDeviceCallback callDeviceCallback = new AudioDeviceCallback() {
         @Override public void onAudioDevicesAdded(AudioDeviceInfo[] addedDevices) {
             handler.post(() -> { if (callAudioOn) applyCallRoute(); });
@@ -991,9 +984,11 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     }
 
     /**
-     * Makes a WebView call behave like a normal phone call: communication mode + transient voice focus, and a live
-     * route policy that follows Bluetooth/wired devices as they appear or disappear. The old audio mode/focus is
-     * restored exactly once when the call ends; this never changes the app-wide route outside a call.
+     * Makes a WebView call behave like a normal phone call: communication mode plus a route policy that follows
+     * Bluetooth/wired devices as they appear or disappear. The WebView/WebRTC media pipeline owns audio focus: it
+     * requests it when remote playback actually begins and handles a loss/re-gain with its live media state. Taking
+     * transient focus here at the outgoing-ring stage could leave an Android 12+ WebView's later remote player faded
+     * or muted, so the wrapper deliberately manages the route but does not compete for playback focus.
      */
     private void callAudio(boolean on) {
         AudioManager am = callAudioManager;
@@ -1003,7 +998,6 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             if (!callAudioOn) {
                 modeBeforeCall = am.getMode();
                 callAudioOn = true;
-                requestCallAudioFocus(am);
                 registerCallDeviceCallback(am);
                 try { am.setMode(AudioManager.MODE_IN_COMMUNICATION); } catch (RuntimeException ignored) {}
             }
@@ -1017,45 +1011,8 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             } catch (RuntimeException ignored) {}
             try { am.setSpeakerphoneOn(false); } catch (RuntimeException ignored) {}
             try { am.setMode(modeBeforeCall); } catch (RuntimeException ignored) {}
-            abandonCallAudioFocus(am);
             callSpeaker = true;
         }
-    }
-
-    private void requestCallAudioFocus(AudioManager am) {
-        if (callAudioFocused) return;
-        try {
-            int result;
-            if (Build.VERSION.SDK_INT >= 26) {
-                AudioFocusRequest request = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
-                        .setAudioAttributes(new AudioAttributes.Builder()
-                                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                                .build())
-                        .setOnAudioFocusChangeListener(callFocusListener)
-                        .build();
-                callAudioFocusRequest = request;
-                result = am.requestAudioFocus(request);
-            } else {
-                result = am.requestAudioFocus(callFocusListener, AudioManager.STREAM_VOICE_CALL, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT);
-            }
-            callAudioFocused = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
-        } catch (RuntimeException ignored) {
-            callAudioFocusRequest = null;
-            callAudioFocused = false;
-        }
-    }
-
-    private void abandonCallAudioFocus(AudioManager am) {
-        if (!callAudioFocused) return;
-        try {
-            if (Build.VERSION.SDK_INT >= 26 && callAudioFocusRequest instanceof AudioFocusRequest)
-                am.abandonAudioFocusRequest((AudioFocusRequest) callAudioFocusRequest);
-            else am.abandonAudioFocus(callFocusListener);
-        } catch (RuntimeException ignored) {
-        }
-        callAudioFocusRequest = null;
-        callAudioFocused = false;
     }
 
     private void registerCallDeviceCallback(AudioManager am) {
