@@ -121,12 +121,16 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     private final ActivityResultLauncher<String[]> permissionLauncher =
             registerForActivityResult(new ActivityResultContracts.RequestMultiplePermissions(), result -> {
                 boolean granted = true;
-                for (Boolean v : result.values()) {
+                for (java.util.Map.Entry<String, Boolean> e : result.entrySet()) {
+                    // Bluetooth is optional: denying it must never block the microphone/camera.
+                    if (Manifest.permission.BLUETOOTH_CONNECT.equals(e.getKey())) continue;
+                    Boolean v = e.getValue();
                     if (v == null || !v) {
                         granted = false;
                         break;
                     }
                 }
+                if (callAudioOn) applyCallRoute();
                 if (pendingWebPerm != null) {
                     if (granted) {
                         pendingWebPerm.grant(pendingWebPerm.getResources());
@@ -388,13 +392,19 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             return;
         }
         List<String> androidPerms = new ArrayList<>();
+        boolean wantsRoomAudio = false;
         for (String res : request.getResources()) {
             if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(res)) {
                 androidPerms.add(Manifest.permission.RECORD_AUDIO);
+                // Headset mics (BT SCO / LE audio) need BLUETOOTH_CONNECT at runtime on Android 12+.
+                if (Build.VERSION.SDK_INT >= 31) androidPerms.add(Manifest.permission.BLUETOOTH_CONNECT);
+                wantsRoomAudio = true;
             } else if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(res)) {
                 androidPerms.add(Manifest.permission.CAMERA);
             }
         }
+        if (wantsRoomAudio && callId == null) roomAudio(true);
+        wantsRoomAudio = false;
         if (androidPerms.isEmpty()) {
             request.grant(request.getResources());
             return;
@@ -1006,6 +1016,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 CallService.start(this, callId, callName, false);
                 break;
             case "call:connected":
+                // a call taking over from a room keeps the same audio session
                 if (!id.isEmpty()) {
                     CallNotifications.cancel(this, id); // answered on the page's own ring screen
                     callId = id;
@@ -1020,6 +1031,12 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 callId = null;
                 callName = null;
                 unlockForCall = false; // re-enable App Lock after the call
+                break;
+            case "room:joined":
+                if (callId == null) roomAudio(true);
+                break;
+            case "room:left":
+                roomAudio(false);
                 break;
             case "call:audioRoute":
                 if (m.has("speaker")) {
@@ -1061,6 +1078,20 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             try { am.setSpeakerphoneOn(false); } catch (RuntimeException ignored) {}
             try { am.setMode(modeBeforeCall); } catch (RuntimeException ignored) {}
             callSpeaker = true;
+        }
+    }
+
+    /**
+     * Rooms get the same headset policy as calls: communication mode so a wired / USB-C / Bluetooth headset's mic
+     * and speaker are used together, falling back to the loudspeaker when the headset is removed.
+     */
+    private void roomAudio(boolean on) {
+        if (on) {
+            if (callAudioOn) return;
+            callSpeaker = true;
+            callAudio(true);
+        } else if (callId == null) {
+            callAudio(false);
         }
     }
 
