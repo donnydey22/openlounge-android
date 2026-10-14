@@ -49,6 +49,9 @@ public class OpenLoungeMessagingService extends FirebaseMessagingService {
         String tag = d.containsKey("tag") ? d.get("tag") : "openlounge";
         int badge = AppBadge.parse(d.get("badge"));
         if (badge >= 0) AppBadge.set(this, badge);
+        // A visible, fully loaded WebView receives the same bounded event as a realtime in-app notice. If it is not
+        // ready (or the app is backgrounded), the normal Android notification remains the durable fallback.
+        boolean forwarded = MainActivity.dispatchForegroundNotification(ForegroundNotification.from(d));
         if ("1".equals(d.get("clear"))) {
             NotificationManagerCompat.from(this).cancel(tag, 0);
             return;
@@ -60,6 +63,7 @@ public class OpenLoungeMessagingService extends FirebaseMessagingService {
             body = message.getNotification().getBody();
         }
         if (title == null) return;
+        if (forwarded) return;
         show(this, d.get("channel"), tag, title, body == null ? "" : body, d.get("url"), badge);
     }
 
