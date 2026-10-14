@@ -164,6 +164,9 @@ public final class SessionBridge {
     @JavascriptInterface
     public String getVersion() { return BuildConfig.VERSION_NAME; }
 
+    @JavascriptInterface
+    public String getBuildNumber() { return String.valueOf(BuildConfig.VERSION_CODE); }
+
     // ---- 0.3.1: call messages (engine.ts postNative → OpenLoungeNative.postMessage(JSON string)) ----
     @JavascriptInterface
     public void postMessage(String json) {

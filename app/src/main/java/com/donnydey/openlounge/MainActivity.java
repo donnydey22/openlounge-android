@@ -277,7 +277,9 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
         // Always fetch fresh HTML/JS so "Let's go" fixes ship to the WebView.
         s.setCacheMode(WebSettings.LOAD_NO_CACHE);
-        s.setUserAgentString(s.getUserAgentString() + " OpenLoungeAndroid/" + BuildConfig.VERSION_NAME);
+        s.setUserAgentString(s.getUserAgentString()
+                + " OpenLounge/android/" + BuildConfig.VERSION_NAME + "(" + BuildConfig.VERSION_CODE + ")"
+                + " OpenLoungeAndroid/" + BuildConfig.VERSION_NAME);
 
         if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
             // Let the web app control its own theme via Settings toggle
