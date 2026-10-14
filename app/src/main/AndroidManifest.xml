@@ -7,9 +7,17 @@
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- 0.3.0 haptics bridge (normal permission, no prompt) -->
+    <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- only requested from "Find friends from contacts", after an in-app explainer -->
     <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <!-- 0.3.1 native call ringing (NATIVE_SPEC.md §4): full-screen incoming call + foreground service during a call -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
 
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
@@ -26,7 +34,8 @@
         android:theme="@style/Theme.OpenLounge"
         android:usesCleartextTraffic="false"
         android:networkSecurityConfig="@xml/network_security_config"
-        android:hardwareAccelerated="true">
+        android:hardwareAccelerated="true"
+        android:enableOnBackInvokedCallback="true">
 
         <activity
             android:name=".MainActivity"
@@ -54,6 +63,22 @@
             android:label="@string/settings_title"
             android:parentActivityName=".MainActivity"
             android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".IncomingCallActivity"
+            android:exported="false"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:launchMode="singleTop"
+            android:taskAffinity="com.donnydey.openlounge.call"
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.OpenLounge.IncomingCall" />
+        <receiver
+            android:name=".CallActionReceiver"
+            android:exported="false" />
+        <service
+            android:name=".CallService"
+            android:exported="false"
+            android:foregroundServiceType="phoneCall|microphone" />
         <service
             android:name=".OpenLoungeMessagingService"
             android:exported="false">

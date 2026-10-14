@@ -54,7 +54,10 @@ import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 
+import java.lang.ref.WeakReference;
 import java.util.ArrayList;
+import android.media.AudioDeviceInfo;
+import android.media.AudioManager;
 import java.util.List;
 
 public class MainActivity extends AppCompatActivity implements SessionBridge.Host {
@@ -84,6 +87,13 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     private final Handler handler = new Handler(Looper.getMainLooper());
     /** one-time 0.2.1 → 0.2.3 move from the railway.app origin to openlounge.app (see migrateLegacyOrigin) */
     private boolean migrating = false;
+    // 0.3.1 calls: the live activity (for notification Hang up / Decline fallback) + call audio state
+    private static WeakReference<MainActivity> live = new WeakReference<>(null);
+    private boolean pageLoaded = false;
+    private boolean callAudioOn = false;
+    private boolean callSpeaker = true;
+    private String callId = null;
+    private String callName = null;
     private int loadRetries = 0;
     private final Runnable retryLoad = this::loadConfiguredUrl;
 
@@ -154,7 +164,23 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         SplashScreen splash = SplashScreen.installSplashScreen(this);
         splash.setOnExitAnimationListener(v -> v.remove()); // hand off instantly: overlay has the same bg
         super.onCreate(savedInstanceState);
+        live = new WeakReference<>(this);
         setContentView(R.layout.activity_main);
+        EdgeToEdge.apply(this, findViewById(R.id.root)); // 0.3.0: target SDK 36 (edge-to-edge enforced on Android 15+)
+        // 0.3.0: predictive back (default on for target 36) never calls onBackPressed(); use the dispatcher
+        getOnBackPressedDispatcher().addCallback(this, new androidx.activity.OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                if (locked) { moveTaskToBack(true); return; }
+                if (webView != null && webView.getVisibility() == View.VISIBLE && webView.canGoBack()) {
+                    webView.goBack();
+                } else {
+                    setEnabled(false);
+                    getOnBackPressedDispatcher().onBackPressed();
+                    setEnabled(true);
+                }
+            }
+        });
         pendingOpenPath = openPathFrom(getIntent());
         OpenLoungeMessagingService.ensureChannels(this);
         PushTokens.setListener(token -> handler.post(() -> {
@@ -213,6 +239,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 java.util.Set<String> origins = new java.util.HashSet<>(java.util.Arrays.asList(
                         "https://openlounge.app", "https://www.openlounge.app", Prefs.LEGACY_RAILWAY_URL));
                 androidx.webkit.WebViewCompat.addDocumentStartJavaScript(webView, SessionBridge.BIOMETRICS_SHIM, origins);
+                androidx.webkit.WebViewCompat.addDocumentStartJavaScript(webView, SessionBridge.CALLS_FLAG, origins);
             } catch (Exception ignored) {
             }
         }
@@ -243,6 +270,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
                 sessionBridge.setCurrentUrl(url);
+                pageLoaded = false;
                 if (!migrating) showLoading();
             }
 
@@ -260,8 +288,11 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 }
                 loadRetries = 0;
                 view.evaluateJavascript(SessionBridge.BIOMETRICS_SHIM, null); // no-op if already defined
+                view.evaluateJavascript(SessionBridge.CALLS_FLAG, null);
+                pageLoaded = true;
                 showWeb();
                 launchOverlay.markReady();
+                scheduleFsiPrompt();
             }
 
             @Override
@@ -287,11 +318,8 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 if (web && (Prefs.isTrustedOrigin(uri) || isConfiguredHost(uri))) {
                     return false; // stays in the app
                 }
-                // everything else (other sites, tel:, mailto:, intents) opens outside the app
-                try {
-                    startActivity(new Intent(Intent.ACTION_VIEW, uri));
-                } catch (Exception ignored) {
-                }
+                // 0.3.0: other sites open in a Chrome Custom Tab over the app; tel:, mailto:, … go to the system
+                InAppBrowser.open(MainActivity.this, uri);
                 return true;
             }
         });
@@ -327,6 +355,11 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     }
 
     private void handleWebPermission(PermissionRequest request) {
+        // only our own site may use the mic/camera
+        if (request.getOrigin() == null || !isConfiguredHost(request.getOrigin())) {
+            request.deny();
+            return;
+        }
         List<String> androidPerms = new ArrayList<>();
         for (String res : request.getResources()) {
             if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(res)) {
@@ -451,12 +484,8 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             next.run();
             return;
         }
-        // Ask early so LiveKit getUserMedia is less likely to fail later
-        permissionLauncher.launch(new String[]{
-                Manifest.permission.RECORD_AUDIO,
-                Manifest.permission.CAMERA
-        });
-        // Still proceed; WebChromeClient will re-request if needed
+        // Store compliance (Play User Data / Apple 5.1.1(iv)): no mic/camera prompt at launch. The OS prompt is shown
+        // in context, when the user first speaks / joins a call (WebChromeClient.onPermissionRequest → handleWebPermission).
         next.run();
     }
 
@@ -557,7 +586,9 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     @Override
     public String contactsPermission() {
         return ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
-                ? "granted" : "prompt";
+                ? "granted"
+                : (getSharedPreferences("ol_perm", MODE_PRIVATE).getBoolean("contactsAsked", false)
+                        && !shouldShowRequestPermissionRationale(Manifest.permission.READ_CONTACTS)) ? "denied" : "prompt";
     }
 
     /** The web app shows its explainer first; only then calls this, which shows the OS prompt if needed. */
@@ -565,7 +596,10 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     public void requestContacts() {
         handler.post(() -> {
             if ("granted".equals(contactsPermission())) readContactsAsync();
-            else contactsPermLauncher.launch(Manifest.permission.READ_CONTACTS);
+            else {
+                getSharedPreferences("ol_perm", MODE_PRIVATE).edit().putBoolean("contactsAsked", true).apply();
+                contactsPermLauncher.launch(Manifest.permission.READ_CONTACTS); // if permanently denied this returns false at once → page shows Open Settings
+            }
         });
     }
 
@@ -576,7 +610,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             try (Cursor c = getContentResolver().query(ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
                     new String[]{ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER},
                     null, null, null)) {
-                while (c != null && c.moveToNext() && byName.size() < 5000) {
+                while (c != null && c.moveToNext()) { // no cap: the page batches matching
                     String name = c.getString(0);
                     String num = c.getString(1);
                     if (num == null) continue;
@@ -591,7 +625,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 JSONArray arr = new JSONArray();
                 for (Map.Entry<String, List<String>> e : byName.entrySet())
                     arr.put(new JSONObject().put("name", e.getKey()).put("numbers", new JSONArray(e.getValue())));
-                deliverContacts(new JSONObject().put("granted", true).put("country", country).put("contacts", arr).toString());
+                deliverContacts(new JSONObject().put("granted", true).put("country", country).put("accessPrivileges", "all").put("contacts", arr).toString());
             } catch (Exception e) {
                 deliverContacts("{\"granted\":false}");
             }
@@ -648,8 +682,10 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     @Override
     public void setBadge(int count) {
         AppBadge.set(getApplicationContext(), count);
-        // Do not clear notifications here: the server sends a per-thread `clear` push on dm:read.
-        // A global cancel would also remove unrelated room/social notifications.
+        if (count == 0) {
+            // everything read: drop the DM notifications still in the shade
+            try { androidx.core.app.NotificationManagerCompat.from(this).cancelAll(); } catch (Exception ignored) {}
+        }
     }
 
     // ---------- biometric app lock ----------
@@ -722,6 +758,18 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         });
     }
 
+    @Override
+    public void biometricsAuthenticate(String reqId) {
+        handler.post(() -> {
+            if (prompting || !BiometricLock.isAvailable(this) || !BiometricLock.isEnabled(this)) { deliverBio(reqId, false); return; }
+            prompting = true;
+            BiometricLock.prompt(this, getString(R.string.lock_prompt_title), null, false, (status, msg) -> {
+                prompting = false;
+                deliverBio(reqId, "success".equals(status));
+            });
+        });
+    }
+
     private void deliverBio(String reqId, boolean enabled) {
         if (webView != null)
             webView.evaluateJavascript("window.__olBio&&window.__olBio(" + JSONObject.quote(reqId) + ",'" + enabled + "')", null);
@@ -745,23 +793,26 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
 
     @Override
     public void haptic(String type) {
-        handler.post(() -> {
-            if (webView == null) return;
-            int c = "medium".equals(type) ? HapticFeedbackConstants.LONG_PRESS
-                    : "success".equals(type) ? (Build.VERSION.SDK_INT >= 30 ? HapticFeedbackConstants.CONFIRM : HapticFeedbackConstants.LONG_PRESS)
-                    : HapticFeedbackConstants.KEYBOARD_TAP;
-            webView.performHapticFeedback(c);
-        });
+        // legacy 0.2.x names (raiseHand/joinStage/sendDm) map onto the 0.3.0 vocabulary
+        String t = "joinStage".equals(type) ? "success" : ("raiseHand".equals(type) || "sendDm".equals(type)) ? "light" : type;
+        haptics(t);
     }
 
     @Override
-    public void onBackPressed() {
-        if (locked) { moveTaskToBack(true); return; }
-        if (webView.getVisibility() == View.VISIBLE && webView.canGoBack()) {
-            webView.goBack();
-        } else {
-            super.onBackPressed();
-        }
+    public void haptics(String type) {
+        handler.post(() -> NativeHaptics.play(this, webView, type));
+    }
+
+    @Override
+    public void openBrowser(String url) {
+        handler.post(() -> {
+            Uri u = Uri.parse(url);
+            if (InAppBrowser.isWeb(u) && (Prefs.isTrustedOrigin(u) || isConfiguredHost(u))) {
+                if (webView != null) webView.loadUrl(u.toString()); // openlounge.app stays in the app
+            } else {
+                InAppBrowser.open(this, u);
+            }
+        });
     }
 
     /** Tell the page the app went to the background / came back (a WebView often keeps reporting "visible"). */
@@ -780,10 +831,25 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         if (!prompting && !locked && BiometricLock.isEnabled(this)) lockOverlay.setVisibility(View.VISIBLE);
     }
 
+    // ---------- 0.3.2: Android 14+ full-screen call permission, one-time prompt (FullScreenIntentPrompt) ----------
+    private androidx.appcompat.app.AlertDialog fsiDialog;
+    private final Runnable fsiCheck = () -> {
+        if (isFinishing() || locked || prompting || !pageLoaded || (fsiDialog != null && fsiDialog.isShowing())) return;
+        if (!hasWindowFocus()) return; // something else (permission sheet, Custom Tab) is in front: next resume
+        fsiDialog = FullScreenIntentPrompt.maybeShow(this);
+    };
+
+    private void scheduleFsiPrompt() {
+        if (Build.VERSION.SDK_INT < 34) return;
+        handler.removeCallbacks(fsiCheck);
+        handler.postDelayed(fsiCheck, 3_000); // after the launch animation / first paint
+    }
+
     @Override
     protected void onResume() {
         super.onResume();
         dispatchNativeVisibility(true);
+        scheduleFsiPrompt();
         if (locked) {
             if (!prompting && lockActions.getVisibility() != View.VISIBLE) handler.post(() -> promptUnlock(false));
         } else if (lockOverlay != null) {
@@ -791,9 +857,121 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         }
     }
 
+    // ---------- 0.3.1: native call ringing / in-call (NATIVE_SPEC.md §4, §5) ----------
+
+    /** Native → page: openlounge:native-call {type: call:hangup | call:decline | …}. False if no page is up. */
+    static boolean dispatchNativeCall(String detailJson) {
+        MainActivity a = live.get();
+        if (a == null || a.isFinishing()) return false;
+        a.handler.post(() -> {
+            if (a.webView == null || a.migrating || !a.pageLoaded) return;
+            a.webView.evaluateJavascript("(function(){try{window.dispatchEvent(new CustomEvent('openlounge:native-call',{detail:"
+                    + detailJson + "}))}catch(e){}})()", null);
+        });
+        return a.pageLoaded;
+    }
+
+    @Override
+    public void callMessage(String json) {
+        handler.post(() -> onPageCall(json));
+    }
+
+    private void onPageCall(String json) {
+        JSONObject m;
+        try {
+            m = new JSONObject(json);
+        } catch (Exception e) {
+            return;
+        }
+        String type = m.optString("type", "");
+        String id = m.optString("callId", "");
+        if (!id.isEmpty() && !id.matches(CallApi.CALL_ID_RE)) return;
+        switch (type) {
+            case "call:outgoing":
+                callId = id;
+                callName = m.optString("name", "");
+                if (callName.length() > 80) callName = callName.substring(0, 80);
+                callAudio(true);
+                CallService.start(this, callId, callName, false);
+                break;
+            case "call:connected":
+                if (!id.isEmpty()) {
+                    CallNotifications.cancel(this, id); // answered on the page's own ring screen
+                    callId = id;
+                }
+                callAudio(true);
+                CallService.start(this, callId, callName, true);
+                break;
+            case "call:ended":
+                if (!id.isEmpty()) CallNotifications.cancel(this, id);
+                CallService.stop(this);
+                callAudio(false);
+                callId = null;
+                callName = null;
+                break;
+            case "call:audioRoute":
+                if (m.has("speaker")) {
+                    callSpeaker = m.optBoolean("speaker", true);
+                    if (callAudioOn) applySpeaker();
+                }
+                break;
+            default:
+                break; // call:muted has no system UI on Android
+        }
+    }
+
+    /** MODE_IN_COMMUNICATION + speaker (or the connected headset) during a call, MODE_NORMAL otherwise. */
+    private void callAudio(boolean on) {
+        AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+        if (am == null) return;
+        try {
+            if (on) {
+                am.setMode(AudioManager.MODE_IN_COMMUNICATION);
+                callAudioOn = true;
+                applySpeaker();
+            } else if (callAudioOn) {
+                callAudioOn = false;
+                callSpeaker = true;
+                if (Build.VERSION.SDK_INT >= 31) am.clearCommunicationDevice();
+                else am.setSpeakerphoneOn(false);
+                am.setMode(AudioManager.MODE_NORMAL);
+            }
+        } catch (RuntimeException ignored) {
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private void applySpeaker() {
+        AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+        if (am == null) return;
+        try {
+            if (Build.VERSION.SDK_INT >= 31) {
+                AudioDeviceInfo speaker = null, headset = null;
+                for (AudioDeviceInfo d : am.getAvailableCommunicationDevices()) {
+                    int t = d.getType();
+                    if (t == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) speaker = d;
+                    else if (t == AudioDeviceInfo.TYPE_WIRED_HEADSET || t == AudioDeviceInfo.TYPE_USB_HEADSET
+                            || t == AudioDeviceInfo.TYPE_BLUETOOTH_SCO || t == AudioDeviceInfo.TYPE_BLE_HEADSET) headset = d;
+                }
+                if (callSpeaker && headset != null) am.setCommunicationDevice(headset);
+                else if (callSpeaker && speaker != null) am.setCommunicationDevice(speaker);
+                else am.clearCommunicationDevice();
+            } else {
+                am.setSpeakerphoneOn(callSpeaker && !am.isWiredHeadsetOn() && !am.isBluetoothScoOn());
+            }
+        } catch (RuntimeException ignored) {
+        }
+    }
+
     @Override
     protected void onDestroy() {
+        if (live.get() == this) live = new WeakReference<>(null);
+        if (isFinishing()) {
+            CallService.stop(this);
+            callAudio(false);
+        }
         handler.removeCallbacksAndMessages(null);
+        if (fsiDialog != null && fsiDialog.isShowing()) fsiDialog.dismiss();
         if (webView != null) {
             ((FrameLayout) findViewById(R.id.root)).removeView(webView);
             webView.destroy();

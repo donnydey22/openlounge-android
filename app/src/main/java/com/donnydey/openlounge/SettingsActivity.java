@@ -17,6 +17,7 @@ public class SettingsActivity extends AppCompatActivity {
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_settings);
+        EdgeToEdge.apply(this, ((android.view.ViewGroup) findViewById(android.R.id.content)).getChildAt(0));
 
         TextInputEditText input = findViewById(R.id.url_input);
         MaterialButton save = findViewById(R.id.btn_save);

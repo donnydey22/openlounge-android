@@ -23,14 +23,14 @@ def hasSigning = envSigning || keystorePropsFile.exists()
 
 android {
     namespace 'com.donnydey.openlounge'
-    compileSdk 34
+    compileSdk 36
 
     defaultConfig {
         applicationId "com.donnydey.openlounge"
         minSdk 24
-        targetSdk 34
-        versionCode 10
-        versionName "0.2.8"
+        targetSdk 36
+        versionCode 14
+        versionName "0.3.2"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 

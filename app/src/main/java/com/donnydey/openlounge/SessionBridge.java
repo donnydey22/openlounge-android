@@ -36,6 +36,14 @@ public final class SessionBridge {
         boolean biometricsAvailable();
         boolean biometricsEnabled();
         void biometricsSetEnabled(String reqId, boolean on);
+        /** 0.3.0: one-off prompt (quick sign-in with screen name); result true only on success. */
+        void biometricsAuthenticate(String reqId);
+        /** 0.3.0: light|medium|heavy|success|warning|error|selection (HAPTICS_BRIDGE.md). */
+        void haptics(String type);
+        /** 0.3.0: external link → Custom Tab; openlounge.app → in the WebView (BROWSER_BRIDGE.md). */
+        void openBrowser(String url);
+        /** 0.3.1: page → native call messages {type:"call:*"} (NATIVE_SPEC.md §5). */
+        void callMessage(String json);
     }
 
     private final SecureSessionStore store;
@@ -56,6 +64,10 @@ public final class SessionBridge {
         public boolean biometricsAvailable() { return false; }
         public boolean biometricsEnabled() { return false; }
         public void biometricsSetEnabled(String id, boolean on) {}
+        public void biometricsAuthenticate(String id) {}
+        public void haptics(String type) {}
+        public void openBrowser(String url) {}
+        public void callMessage(String json) {}
     };
 
     public SessionBridge(Context ctx) {
@@ -128,6 +140,40 @@ public final class SessionBridge {
     @JavascriptInterface
     public void haptic(String type) { if (trusted()) host.haptic(type == null ? "light" : type); }
 
+    // ---- 0.3.0: haptics + in-app browser contracts (see /workspace/native/*_BRIDGE.md) ----
+    @JavascriptInterface
+    public boolean haptics(String type) {
+        if (!trusted() || !NativeHaptics.isKnown(type)) return false;
+        host.haptics(type);
+        return true;
+    }
+
+    @JavascriptInterface
+    public boolean openBrowser(String url) {
+        if (!trusted() || url == null || url.length() > 4096) return false;
+        host.openBrowser(url);
+        return true;
+    }
+
+    /** Feature list for the page (JSON array string; Android JS interfaces can't return arrays). */
+    @JavascriptInterface
+    public String capabilities() {
+        return "[\"session\",\"haptic\",\"haptics\",\"browser\",\"camera\",\"openAuth\",\"push\",\"share\",\"contacts\",\"badge\",\"biometrics\",\"phoneAuth\",\"calls\"]";
+    }
+
+    @JavascriptInterface
+    public String getVersion() { return BuildConfig.VERSION_NAME; }
+
+    // ---- 0.3.1: call messages (engine.ts postNative → OpenLoungeNative.postMessage(JSON string)) ----
+    @JavascriptInterface
+    public void postMessage(String json) {
+        if (!trusted() || json == null || json.length() > 4096) return;
+        host.callMessage(json);
+    }
+
+    /** Document-start flag: the page only posts call:* messages to wrappers that set it (build 18 / 0.3.1). */
+    public static final String CALLS_FLAG = "(function(){try{if(window.OpenLoungeNative&&typeof window.OpenLoungeNative.postMessage==='function')window.__olNativeCalls=1}catch(e){}})();";
+
     // ---- 0.2.7: numeric app-icon badge (total unread); 0 clears ----
     @JavascriptInterface
     public void setBadge(int count) { if (trusted()) host.setBadge(Math.max(0, count)); }
@@ -188,6 +234,12 @@ public final class SessionBridge {
         host.biometricsSetEnabled(reqId, on);
     }
 
+    @JavascriptInterface
+    public void biometricsAuthenticate(String reqId) {
+        if (!trusted() || reqId == null || reqId.length() > 100) return;
+        host.biometricsAuthenticate(reqId);
+    }
+
     /** Promise-based window.OpenLoungeNative.biometrics; also mirrored as window.OpenLoungeBiometrics. */
     public static final String BIOMETRICS_SHIM = "(function(){try{var N=window.OpenLoungeNative;"
             + "if(!N||typeof N.biometricsIsAvailable!=='function'||window.OpenLoungeBiometrics)return;"
@@ -195,6 +247,8 @@ public final class SessionBridge {
             + "var api={isAvailable:function(){return Promise.resolve(N.biometricsIsAvailable()==='true')},"
             + "getEnabled:function(){return Promise.resolve(N.biometricsGetEnabled()==='true')},"
             + "setEnabled:function(on){return new Promise(function(res){var id='b'+Date.now().toString(36)+(++s);"
-            + "p[id]=res;N.biometricsSetEnabled(id,!!on)})}};"
+            + "p[id]=res;N.biometricsSetEnabled(id,!!on)})},"
+            + "authenticate:function(){return new Promise(function(res){if(typeof N.biometricsAuthenticate!=='function')return res(false);"
+            + "var id='a'+Date.now().toString(36)+(++s);p[id]=res;N.biometricsAuthenticate(id)})}};"
             + "window.OpenLoungeBiometrics=api;try{N.biometrics=api}catch(e){}}catch(e){}})();";
 }
