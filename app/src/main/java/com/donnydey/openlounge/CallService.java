@@ -20,7 +20,7 @@ import androidx.core.content.ContextCompat;
 /**
  * Foreground service (type phoneCall, + microphone when RECORD_AUDIO is granted) for the length of a call, so the
  * OS doesn't stop the WebView's audio when the app goes to the background. Ongoing "Open Lounge call · Tap to
- * return" notification with Hang up. Started on the page's call:connected (and call:outgoing), stopped on call:ended.
+ * return" notification with Hang up. Service started on call:outgoing and call:connected; communication audio mode only on call:connected. Stopped on call:ended.
  */
 public class CallService extends Service {
     private static final String TAG = "OLCalls";

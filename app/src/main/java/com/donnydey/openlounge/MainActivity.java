@@ -999,7 +999,10 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 callId = id;
                 callName = m.optString("name", "");
                 if (callName.length() > 80) callName = callName.substring(0, 80);
-                callAudio(true);
+                // Do NOT enter MODE_IN_COMMUNICATION yet: the page's ringback is a normal media <audio> element and
+                // communication mode re-routes/attenuates it (earpiece, voice stream) so the caller hears silence.
+                // Call mode + route are applied on call:connected (CallAudioPolicy).
+                if (CallAudioPolicy.enterCommunicationModeOn(type)) callAudio(true);
                 CallService.start(this, callId, callName, false);
                 break;
             case "call:connected":
@@ -1007,7 +1010,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                     CallNotifications.cancel(this, id); // answered on the page's own ring screen
                     callId = id;
                 }
-                callAudio(true);
+                if (CallAudioPolicy.enterCommunicationModeOn(type)) callAudio(true);
                 CallService.start(this, callId, callName, true);
                 break;
             case "call:ended":
