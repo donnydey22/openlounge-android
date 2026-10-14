@@ -707,6 +707,10 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     @Override
     public void setBadge(int count) {
         AppBadge.set(getApplicationContext(), count);
+        if (count == 0) {
+            // everything read: drop the DM notifications still in the shade
+            try { androidx.core.app.NotificationManagerCompat.from(this).cancelAll(); } catch (Exception ignored) {}
+        }
     }
 
     // ---------- biometric app lock ----------
