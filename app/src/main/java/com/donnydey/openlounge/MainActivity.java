@@ -56,7 +56,9 @@ import java.util.Map;
 
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
+import android.media.AudioAttributes;
 import android.media.AudioDeviceInfo;
+import android.media.AudioFocusRequest;
 import android.media.AudioManager;
 import java.util.List;
 
@@ -90,8 +92,20 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     // 0.3.1 calls: the live activity (for notification Hang up / Decline fallback) + call audio state
     private static WeakReference<MainActivity> live = new WeakReference<>(null);
     private boolean pageLoaded = false;
-    private boolean callAudioOn = false;
     private boolean callSpeaker = true;
+    private AudioFocusRequest callAudioFocusRequest;
+    private final AudioManager.OnAudioFocusChangeListener callAudioFocusChangeListener = focusChange -> {
+        // WebRTC belongs to the WebView. Never gate its microphone track or reset call routing on a
+        // transient focus transition; call:ended remains the only teardown signal.
+    };
+    private final CallAudioController callAudioController = new CallAudioController(new CallAudioController.Platform() {
+        @Override public void enterCommunicationMode() { MainActivity.this.enterCommunicationMode(); }
+        @Override public boolean requestVoiceFocus() { return MainActivity.this.requestVoiceFocus(); }
+        @Override public void applyRoute(boolean speakerRequested) { MainActivity.this.applyCommunicationRoute(speakerRequested); }
+        @Override public void clearRoute() { MainActivity.this.clearCommunicationRoute(); }
+        @Override public void abandonVoiceFocus() { MainActivity.this.abandonVoiceFocus(); }
+        @Override public void restoreNormalMode() { MainActivity.this.restoreNormalMode(); }
+    });
     private String callId = null;
     private String callName = null;
     private int loadRetries = 0;
@@ -912,7 +926,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             case "call:audioRoute":
                 if (m.has("speaker")) {
                     callSpeaker = m.optBoolean("speaker", true);
-                    if (callAudioOn) applySpeaker();
+                    if (callAudioController.isActive()) callAudioController.applyRoute(callSpeaker);
                 }
                 break;
             default:
@@ -920,29 +934,68 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         }
     }
 
-    /** MODE_IN_COMMUNICATION + speaker (or the connected headset) during a call, MODE_NORMAL otherwise. */
+    /** Keeps the WebView's WebRTC call on Android's voice route without ever blocking it on a focus denial. */
     private void callAudio(boolean on) {
-        AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+        callAudioController.setActive(on, callSpeaker);
+    }
+
+    private AudioManager audioManager() {
+        return (AudioManager) getSystemService(AUDIO_SERVICE);
+    }
+
+    private void enterCommunicationMode() {
+        AudioManager am = audioManager();
         if (am == null) return;
         try {
-            if (on) {
-                am.setMode(AudioManager.MODE_IN_COMMUNICATION);
-                callAudioOn = true;
-                applySpeaker();
-            } else if (callAudioOn) {
-                callAudioOn = false;
-                callSpeaker = true;
-                if (Build.VERSION.SDK_INT >= 31) am.clearCommunicationDevice();
-                else am.setSpeakerphoneOn(false);
-                am.setMode(AudioManager.MODE_NORMAL);
+            am.setMode(AudioManager.MODE_IN_COMMUNICATION);
+        } catch (RuntimeException ignored) {
+        }
+    }
+
+    /** Request voice focus for output routing; an unavailable or delayed focus grant never silences WebRTC. */
+    private boolean requestVoiceFocus() {
+        AudioManager am = audioManager();
+        if (am == null) return false;
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                if (callAudioFocusRequest == null) {
+                    AudioAttributes attributes = new AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build();
+                    callAudioFocusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+                            .setAudioAttributes(attributes)
+                            .setAcceptsDelayedFocusGain(true)
+                            .setOnAudioFocusChangeListener(callAudioFocusChangeListener)
+                            .build();
+                }
+                int result = am.requestAudioFocus(callAudioFocusRequest);
+                return result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+                        || result == AudioManager.AUDIOFOCUS_REQUEST_DELAYED;
+            }
+            return am.requestAudioFocus(callAudioFocusChangeListener, AudioManager.STREAM_VOICE_CALL,
+                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+    }
+
+    private void abandonVoiceFocus() {
+        AudioManager am = audioManager();
+        if (am == null) return;
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && callAudioFocusRequest != null) {
+                am.abandonAudioFocusRequest(callAudioFocusRequest);
+            } else {
+                am.abandonAudioFocus(callAudioFocusChangeListener);
             }
         } catch (RuntimeException ignored) {
         }
     }
 
     @SuppressWarnings("deprecation")
-    private void applySpeaker() {
-        AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+    private void applyCommunicationRoute(boolean speakerRequested) {
+        AudioManager am = audioManager();
         if (am == null) return;
         try {
             if (Build.VERSION.SDK_INT >= 31) {
@@ -953,14 +1006,35 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                     else if (t == AudioDeviceInfo.TYPE_WIRED_HEADSET || t == AudioDeviceInfo.TYPE_USB_HEADSET
                             || t == AudioDeviceInfo.TYPE_BLUETOOTH_SCO || t == AudioDeviceInfo.TYPE_BLE_HEADSET) headset = d;
                 }
-                if (callSpeaker && headset != null) am.setCommunicationDevice(headset);
-                else if (callSpeaker && speaker != null) am.setCommunicationDevice(speaker);
+                if (speakerRequested && headset != null) am.setCommunicationDevice(headset);
+                else if (speakerRequested && speaker != null) am.setCommunicationDevice(speaker);
                 else am.clearCommunicationDevice();
             } else {
-                am.setSpeakerphoneOn(callSpeaker && !am.isWiredHeadsetOn() && !am.isBluetoothScoOn());
+                am.setSpeakerphoneOn(speakerRequested && !am.isWiredHeadsetOn() && !am.isBluetoothScoOn());
             }
         } catch (RuntimeException ignored) {
         }
+    }
+
+    @SuppressWarnings("deprecation")
+    private void clearCommunicationRoute() {
+        AudioManager am = audioManager();
+        if (am == null) return;
+        try {
+            if (Build.VERSION.SDK_INT >= 31) am.clearCommunicationDevice();
+            else am.setSpeakerphoneOn(false);
+        } catch (RuntimeException ignored) {
+        }
+    }
+
+    private void restoreNormalMode() {
+        AudioManager am = audioManager();
+        if (am == null) return;
+        try {
+            am.setMode(AudioManager.MODE_NORMAL);
+        } catch (RuntimeException ignored) {
+        }
+        callSpeaker = true;
     }
 
     @Override
