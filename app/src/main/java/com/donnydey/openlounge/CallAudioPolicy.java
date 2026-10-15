@@ -11,4 +11,13 @@ final class CallAudioPolicy {
     static boolean enterCommunicationModeOn(String bridgeEvent) {
         return "call:connected".equals(bridgeEvent);
     }
+
+    /** Native outgoing ringback (the page skips its own when window.__olNativeRingback is set). */
+    static boolean startRingbackOn(String bridgeEvent) {
+        return "call:outgoing".equals(bridgeEvent);
+    }
+
+    static boolean stopRingbackOn(String bridgeEvent) {
+        return "call:connected".equals(bridgeEvent) || "call:ended".equals(bridgeEvent);
+    }
 }

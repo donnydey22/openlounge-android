@@ -175,7 +175,7 @@ public final class SessionBridge {
     }
 
     /** Document-start flag: the page only posts call:* messages to wrappers that set it (build 18 / 0.3.1). */
-    public static final String CALLS_FLAG = "(function(){try{if(window.OpenLoungeNative&&typeof window.OpenLoungeNative.postMessage==='function')window.__olNativeCalls=1}catch(e){}})();";
+    public static final String CALLS_FLAG = "(function(){try{if(window.OpenLoungeNative&&typeof window.OpenLoungeNative.postMessage==='function'){window.__olNativeCalls=1;window.__olNativeRingback=1}}catch(e){}})();";
 
     // ---- 0.2.7: numeric app-icon badge (total unread); 0 clears ----
     @JavascriptInterface

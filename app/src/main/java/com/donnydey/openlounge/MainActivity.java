@@ -1023,8 +1023,10 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 // Call mode + route are applied on call:connected (CallAudioPolicy).
                 if (CallAudioPolicy.enterCommunicationModeOn(type)) callAudio(true);
                 CallService.start(this, callId, callName, false);
+                if (CallAudioPolicy.startRingbackOn(type)) ringback(true);
                 break;
             case "call:connected":
+                if (CallAudioPolicy.stopRingbackOn(type)) ringback(false);
                 // a call taking over from a room keeps the same audio session
                 if (!id.isEmpty()) {
                     CallNotifications.cancel(this, id); // answered on the page's own ring screen
@@ -1034,6 +1036,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 CallService.start(this, callId, callName, true);
                 break;
             case "call:ended":
+                if (CallAudioPolicy.stopRingbackOn(type)) ringback(false);
                 if (!id.isEmpty()) CallNotifications.cancel(this, id);
                 CallService.stop(this);
                 callAudio(false);
@@ -1065,6 +1068,24 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
      * transient focus here at the outgoing-ring stage could leave an Android 12+ WebView's later remote player faded
      * or muted, so the wrapper deliberately manages the route but does not compete for playback focus.
      */
+    private android.media.ToneGenerator ringbackTone;
+
+    /** Outgoing ringback on the media stream (not communication mode, so the loudspeaker plays it at normal level). */
+    private void ringback(boolean on) {
+        if (on) {
+            if (ringbackTone != null) return;
+            try {
+                ringbackTone = new android.media.ToneGenerator(AudioManager.STREAM_MUSIC, 80);
+                ringbackTone.startTone(android.media.ToneGenerator.TONE_SUP_RINGTONE); // loops until stopped
+            } catch (RuntimeException e) {
+                ringbackTone = null;
+            }
+        } else if (ringbackTone != null) {
+            try { ringbackTone.stopTone(); ringbackTone.release(); } catch (RuntimeException ignored) {}
+            ringbackTone = null;
+        }
+    }
+
     private void callAudio(boolean on) {
         AudioManager am = callAudioManager;
         if (am == null) callAudioManager = am = (AudioManager) getSystemService(AUDIO_SERVICE);
@@ -1227,6 +1248,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             ((FrameLayout) findViewById(R.id.root)).removeView(webView);
             webView.destroy();
         }
+        ringback(false);
         super.onDestroy();
     }
 }

@@ -14,4 +14,13 @@ public class CallAudioPolicyTest {
         assertTrue(CallAudioPolicy.enterCommunicationModeOn("call:connected"));
     }
     @Test public void nullSafe() { assertFalse(CallAudioPolicy.enterCommunicationModeOn(null)); }
+
+    @org.junit.Test
+    public void nativeRingbackStartsOnOutgoingStopsOnConnectOrEnd() {
+        assertTrue(CallAudioPolicy.startRingbackOn("call:outgoing"));
+        assertFalse(CallAudioPolicy.startRingbackOn("call:connected"));
+        assertTrue(CallAudioPolicy.stopRingbackOn("call:connected"));
+        assertTrue(CallAudioPolicy.stopRingbackOn("call:ended"));
+        assertFalse(CallAudioPolicy.stopRingbackOn("call:outgoing"));
+    }
 }
