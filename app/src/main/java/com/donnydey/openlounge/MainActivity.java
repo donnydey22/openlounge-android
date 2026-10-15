@@ -607,7 +607,12 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             return;
         }
         // client-side navigation keeps the socket/session alive; full load as fallback
-        String js = "(function(){try{if(window.next&&window.next.router){window.next.router.push(" + JSONObject.quote(p) + ");return 1}}catch(e){}location.assign("
+        // Accept on a warm page: accept in place (no navigation/reboot; same as iOS 0.3.11) — web __olAcceptCall
+        String acceptId = null;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("^/call/([A-Za-z0-9-]{8,64})\\?accept=1").matcher(p);
+        if (m.find()) acceptId = m.group(1);
+        String pre = acceptId == null ? "" : "try{if(window.__olAcceptCall&&window.__olAcceptCall(" + JSONObject.quote(acceptId) + "))return 1}catch(e){}";
+        String js = "(function(){" + pre + "try{if(window.next&&window.next.router){window.next.router.push(" + JSONObject.quote(p) + ");return 1}}catch(e){}location.assign("
                 + JSONObject.quote(p) + ");return 1})()";
         webView.evaluateJavascript(js, null);
     }
