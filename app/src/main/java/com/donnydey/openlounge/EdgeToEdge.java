@@ -22,8 +22,10 @@ final class EdgeToEdge {
         ViewCompat.setOnApplyWindowInsetsListener(root, (v, insets) -> {
             Insets bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
             Insets ime = insets.getInsets(WindowInsetsCompat.Type.ime());
-            v.setPadding(pl + bars.left, pt + bars.top, pr + bars.right, pb + Math.max(bars.bottom, ime.bottom));
-            return WindowInsetsCompat.CONSUMED;
+            // 0.3.8: full-bleed WebView (call video behind status/nav bars); the page pads itself with env(safe-area-inset-*)
+            // (viewport-fit=cover). Only the keyboard still resizes the WebView.
+            v.setPadding(pl, pt, pr, pb + ime.bottom);
+            return insets; // let the WebView see the insets (env(safe-area-inset-*))
         });
         ViewCompat.requestApplyInsets(root);
     }
