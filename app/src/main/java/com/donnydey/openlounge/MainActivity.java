@@ -63,6 +63,9 @@ import java.util.EnumSet;
 import android.media.AudioDeviceInfo;
 import android.media.AudioDeviceCallback;
 import android.media.AudioManager;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import java.util.List;
 
 public class MainActivity extends AppCompatActivity implements SessionBridge.Host {
@@ -190,6 +193,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         super.onCreate(savedInstanceState);
         live = new WeakReference<>(this);
         setContentView(R.layout.activity_main);
+        watchNetworkHandoff();
         EdgeToEdge.apply(this, findViewById(R.id.root)); // 0.3.0: target SDK 36 (edge-to-edge enforced on Android 15+)
         // 0.3.0: predictive back (default on for target 36) never calls onBackPressed(); use the dispatcher
         getOnBackPressedDispatcher().addCallback(this, new androidx.activity.OnBackPressedCallback(true) {
@@ -1173,8 +1177,39 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         }
     }
 
+    // Wi-Fi <-> cellular handoff: tell the page so a live call restarts ICE in place on the new interface
+    // (native-only call adaptation, web netAdapt.ts). WebView's navigator.connection "change" is unreliable here.
+    private ConnectivityManager.NetworkCallback netCallback;
+    private String lastNetType = null;
+    private void watchNetworkHandoff() {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (cm == null || android.os.Build.VERSION.SDK_INT < 24) return;
+            netCallback = new ConnectivityManager.NetworkCallback() {
+                @Override public void onCapabilitiesChanged(Network n, NetworkCapabilities c) {
+                    String t = c.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ? "wifi"
+                        : c.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ? "cellular"
+                        : c.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) ? "ethernet" : "other";
+                    String key = t + ":" + n;
+                    if (key.equals(lastNetType)) return;
+                    boolean first = lastNetType == null;
+                    lastNetType = key;
+                    if (first) return;
+                    handler.post(() -> {
+                        if (webView != null) webView.evaluateJavascript("try{window.__olNetworkChanged&&window.__olNetworkChanged('" + key + "')}catch(e){}", null);
+                    });
+                }
+            };
+            cm.registerDefaultNetworkCallback(netCallback);
+        } catch (RuntimeException ignored) {}
+    }
+
     @Override
     protected void onDestroy() {
+        if (netCallback != null) {
+            try { ((ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE)).unregisterNetworkCallback(netCallback); } catch (RuntimeException ignored) {}
+            netCallback = null;
+        }
         activityForeground = false;
         if (live.get() == this) live = new WeakReference<>(null);
         if (isFinishing()) {
