@@ -68,7 +68,7 @@ import android.net.Network;
 import android.net.NetworkCapabilities;
 import java.util.List;
 
-public class MainActivity extends AppCompatActivity implements SessionBridge.Host {
+public class MainActivity extends AppCompatActivity implements SessionBridge.Host, NativeCallMedia.Host {
     private NativePhoneAuth phoneAuth;
 
     @Override
@@ -262,6 +262,9 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
 
         // Durable native token store mirrored by src/lib/session.ts (window.OpenLoungeNative)
         sessionBridge = new SessionBridge(this, this);
+        // 0.3.16 native call media: process-wide (survives page reloads); this activity is its page relay
+        NativeCallMedia.init(this);
+        NativeCallMedia.setHost(this);
         // native feel: theme-colored background (no white flash before the page paints), no overscroll glow
         boolean dark = (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK) != Configuration.UI_MODE_NIGHT_NO;
         webView.setBackgroundColor(Color.parseColor(dark ? "#0b0b0d" : "#f4f3ee"));
@@ -273,6 +276,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                         "https://openlounge.app", "https://www.openlounge.app", Prefs.LEGACY_RAILWAY_URL));
                 androidx.webkit.WebViewCompat.addDocumentStartJavaScript(webView, SessionBridge.BIOMETRICS_SHIM, origins);
                 androidx.webkit.WebViewCompat.addDocumentStartJavaScript(webView, SessionBridge.CALLS_FLAG, origins);
+                androidx.webkit.WebViewCompat.addDocumentStartJavaScript(webView, SessionBridge.NATIVE_MEDIA_SHIM, origins);
             } catch (Exception ignored) {
             }
         }
@@ -324,6 +328,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 loadRetries = 0;
                 view.evaluateJavascript(SessionBridge.BIOMETRICS_SHIM, null); // no-op if already defined
                 view.evaluateJavascript(SessionBridge.CALLS_FLAG, null);
+                view.evaluateJavascript(SessionBridge.NATIVE_MEDIA_SHIM, null);
                 pageLoaded = true;
                 showWeb();
                 launchOverlay.markReady();
@@ -985,6 +990,36 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         return a.pageLoaded;
     }
 
+    // ---- 0.3.16 native call media host (NativeCallMedia.Host + SessionBridge.Host.nativeMediaResolve) ----
+    @Override
+    public void nativeMediaResolve(String reqId, boolean ok, String resultJson, String error) {
+        String r = resultJson == null || resultJson.isEmpty() ? "null" : resultJson;
+        String js = "(function(){try{window.__olNativeMediaResolve&&window.__olNativeMediaResolve(" + JSONObject.quote(reqId) + ","
+                + ok + "," + r + "," + JSONObject.quote(error == null ? "" : error) + ")}catch(e){}})()";
+        handler.post(() -> { if (webView != null) webView.evaluateJavascript(js, null); });
+    }
+
+    @Override
+    public boolean relay(String id, String event, String dataJson) {
+        if (webView == null || migrating || !pageLoaded) return false;
+        webView.evaluateJavascript("(function(){try{window.__olNativeMsReq(" + JSONObject.quote(id) + "," + JSONObject.quote(event) + ","
+                + dataJson + ")}catch(e){try{window.OpenLoungeNative.nativeMsReply(" + JSONObject.quote(id) + ",false,'null','no relay')}catch(_){}}})()", null);
+        return true;
+    }
+
+    @Override
+    public void emit(String detailJson) {
+        if (webView == null || !pageLoaded) return;
+        webView.evaluateJavascript("(function(){try{window.dispatchEvent(new CustomEvent('openlounge:native-media',{detail:"
+                + detailJson + "}))}catch(e){}})()", null);
+    }
+
+    @Override
+    public void nativeCallAudio(boolean on) {
+        // media is live → communication mode + route policy now (call:ended / onDestroy still switch it off)
+        if (on) callAudio(true);
+    }
+
     @Override
     public void callMessage(String json) {
         handler.post(() -> onPageCall(json));
@@ -1037,6 +1072,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 break;
             case "call:ended":
                 if (CallAudioPolicy.stopRingbackOn(type)) ringback(false);
+                NativeCallMedia.closeAll(); // the only native-media teardown besides the page's op 'close'
                 if (!id.isEmpty()) CallNotifications.cancel(this, id);
                 CallService.stop(this);
                 callAudio(false);
@@ -1222,6 +1258,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                     lastNetType = key;
                     if (first) return;
                     handler.post(() -> {
+                        NativeCallMedia.onNetworkChange(); // app-owned media: fresh ICE now, even mid page reload
                         if (webView != null) webView.evaluateJavascript("try{window.__olNetworkChanged&&window.__olNetworkChanged('" + key + "')}catch(e){}", null);
                     });
                 }
@@ -1237,6 +1274,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             netCallback = null;
         }
         activityForeground = false;
+        if (NativeCallMedia.getHost() == this) NativeCallMedia.setHost(null);
         if (live.get() == this) live = new WeakReference<>(null);
         if (isFinishing()) {
             CallService.stop(this);

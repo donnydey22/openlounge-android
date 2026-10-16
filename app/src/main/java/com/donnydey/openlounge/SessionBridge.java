@@ -44,6 +44,8 @@ public final class SessionBridge {
         void openBrowser(String url);
         /** 0.3.1: page → native call messages {type:"call:*"} (NATIVE_SPEC.md §5). */
         void callMessage(String json);
+        /** 0.3.16: answer a page nativeMedia(cmd) promise (resultJson is a JSON literal) */
+        void nativeMediaResolve(String reqId, boolean ok, String resultJson, String error);
     }
 
     private final SecureSessionStore store;
@@ -68,6 +70,7 @@ public final class SessionBridge {
         public void haptics(String type) {}
         public void openBrowser(String url) {}
         public void callMessage(String json) {}
+        public void nativeMediaResolve(String id, boolean ok, String r, String e) {}
     };
 
     public SessionBridge(Context ctx) {
@@ -158,7 +161,7 @@ public final class SessionBridge {
     /** Feature list for the page (JSON array string; Android JS interfaces can't return arrays). */
     @JavascriptInterface
     public String capabilities() {
-        return "[\"session\",\"haptic\",\"haptics\",\"browser\",\"camera\",\"openAuth\",\"push\",\"share\",\"contacts\",\"badge\",\"biometrics\",\"phoneAuth\",\"calls\"]";
+        return "[\"session\",\"haptic\",\"haptics\",\"browser\",\"camera\",\"openAuth\",\"push\",\"share\",\"contacts\",\"badge\",\"biometrics\",\"phoneAuth\",\"calls\",\"nativeMedia\"]";
     }
 
     @JavascriptInterface
@@ -173,6 +176,38 @@ public final class SessionBridge {
         if (!trusted() || json == null || json.length() > 4096) return;
         host.callMessage(json);
     }
+
+    // ---- 0.3.16: native call media (NativeCallMedia.kt). The page talks to it through window.OpenLoungeNativeMedia
+    // (NATIVE_MEDIA_SHIM: Promise-based nativeMedia(cmd) + msReply(id, ok, result, error), capabilities ["nativeMedia"]),
+    // the same contract as the iOS app's window.OpenLoungeNative; these flat string methods are its transport.
+    @JavascriptInterface
+    public void nativeMediaCmd(String reqId, String cmdJson) {
+        if (reqId == null || reqId.length() > 100) return;
+        if (!trusted() || cmdJson == null || cmdJson.length() > 65536) {
+            host.nativeMediaResolve(reqId, false, "null", "nativeMedia unavailable");
+            return;
+        }
+        NativeCallMedia.handle(cmdJson, (ok, result, error) -> {
+            host.nativeMediaResolve(reqId, ok, result, error);
+            return kotlin.Unit.INSTANCE;
+        });
+    }
+
+    @JavascriptInterface
+    public void nativeMsReply(String id, boolean ok, String resultJson, String error) {
+        if (!trusted() || id == null || id.length() > 100 || (resultJson != null && resultJson.length() > 262144)) return;
+        NativeCallMedia.onMsReply(id, ok, resultJson, error);
+    }
+
+    public static final String NATIVE_MEDIA_SHIM = "(function(){try{var N=window.OpenLoungeNative;"
+            + "if(!N||typeof N.nativeMediaCmd!=='function'||window.OpenLoungeNativeMedia)return;"
+            + "var p={},s=0;window.__olNativeMediaResolve=function(id,ok,r,e){var f=p[id];if(!f)return;delete p[id];"
+            + "ok?f[0](r):f[1](new Error(e||'native media error'))};"
+            + "window.OpenLoungeNativeMedia=Object.freeze({capabilities:Object.freeze(['nativeMedia']),platform:'android',"
+            + "nativeMedia:function(cmd){return new Promise(function(res,rej){var id='nm'+Date.now().toString(36)+(++s);"
+            + "p[id]=[res,rej];try{N.nativeMediaCmd(id,JSON.stringify(cmd||{}))}catch(e){delete p[id];rej(e)}})},"
+            + "msReply:function(id,ok,result,error){try{N.nativeMsReply(String(id),ok===true,JSON.stringify(result===undefined?null:result),"
+            + "error==null?'':String(error).slice(0,200))}catch(e){}}})}catch(e){}})();";
 
     /** Document-start flag: the page only posts call:* messages to wrappers that set it (build 18 / 0.3.1). */
     public static final String CALLS_FLAG = "(function(){try{if(window.OpenLoungeNative&&typeof window.OpenLoungeNative.postMessage==='function'){window.__olNativeCalls=1;window.__olNativeRingback=1}}catch(e){}})();";

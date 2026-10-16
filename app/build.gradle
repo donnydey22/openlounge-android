@@ -2,6 +2,8 @@ plugins {
     id 'com.android.application'
     // FCM: reads app/google-services.json (Firebase project open-lounge-2aabd)
     id 'com.google.gms.google-services'
+    // 0.3.16 native call media (NativeCallMedia.kt / NativeLiveKit.kt)
+    id 'org.jetbrains.kotlin.android'
 }
 
 // Release signing — two sources, first match wins:
@@ -29,8 +31,8 @@ android {
         applicationId "com.donnydey.openlounge"
         minSdk 24
         targetSdk 36
-        versionCode 26
-        versionName "0.3.15"
+        versionCode 28
+        versionName "0.3.16"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -75,7 +77,14 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
 
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
     packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
         resources {
             excludes += '/META-INF/{AL2.0,LGPL2.1}'
         }
@@ -98,6 +107,13 @@ dependencies {
     implementation 'me.leolin:ShortcutBadger:1.1.22@aar'
     // opt-in biometric app lock (BiometricLock)
     implementation 'androidx.biometric:biometric:1.1.0'
+
+    // 0.3.16 native call media: the app owns mic + mediasoup transports (libmediasoupclient + its org.webrtc build);
+    // the emergency LiveKit path uses LiveKit's own prefixed WebRTC (livekit.org.webrtc), so the two never clash.
+    implementation 'io.github.crow-misia.libmediasoup-android:libmediasoup-android:0.21.0'
+    implementation 'io.github.crow-misia.libwebrtc:libwebrtc-ktx:1.12.0' // LogHandler / initializePeerConnectionFactory (runtime-scoped in the mediasoup POM)
+    implementation 'io.livekit:livekit-android:2.29.0'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'
 
     testImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test:runner:1.6.2'
