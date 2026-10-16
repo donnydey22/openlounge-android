@@ -347,7 +347,7 @@ object NativeCallMedia {
             mic!!.setEnabled(!muted)
             val enc = RtpParameters.Encoding(null, true, null).apply { maxBitrateBps = 48_000 }
             producer = send!!.produce(object : Producer.Listener { override fun onTransportClose(producer: Producer) {} }, mic!!, listOf(enc),
-                JSONObject().put("opusStereo", false).put("opusDtx", true).put("opusFec", true).put("opusMaxPlaybackRate", 48000).toString(),
+                JSONObject().put("opusStereo", false).put("opusDtx", false).put("opusFec", true).put("opusMaxPlaybackRate", 48000).toString(),
                 null, JSONObject().put("source", "mic").put("native", true).put("platform", "android").toString())
             check()
             syncConsumers()

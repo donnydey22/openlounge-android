@@ -1142,6 +1142,11 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 callAudioOn = true;
                 registerCallDeviceCallback(am);
                 try { am.setMode(AudioManager.MODE_IN_COMMUNICATION); } catch (RuntimeException ignored) {}
+                try {
+                    int target = CallAudioPolicy.voiceCallVolumeFloor(am.getStreamVolume(AudioManager.STREAM_VOICE_CALL), am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL));
+                    if (target >= 0) am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, target, 0);
+                } catch (RuntimeException ignored) {}
+                setVolumeControlStream(AudioManager.STREAM_VOICE_CALL); // hardware keys adjust the call level
             }
             applyCallRoute();
         } else if (callAudioOn) {
@@ -1153,6 +1158,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             } catch (RuntimeException ignored) {}
             try { am.setSpeakerphoneOn(false); } catch (RuntimeException ignored) {}
             try { am.setMode(modeBeforeCall); } catch (RuntimeException ignored) {}
+            setVolumeControlStream(AudioManager.USE_DEFAULT_STREAM_TYPE);
             callSpeaker = true;
         }
     }

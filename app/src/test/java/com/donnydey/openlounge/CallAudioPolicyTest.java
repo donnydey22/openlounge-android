@@ -30,4 +30,12 @@ public class CallAudioPolicyTest {
         assertFalse(CallAudioPolicy.prepareRingtoneOn("call:incoming", false));
         assertFalse(CallAudioPolicy.prepareRingtoneOn(null, false));
     }
+
+    @Test public void voiceCallVolumeRaisedToEightyPercentNeverLowered() {
+        org.junit.Assert.assertEquals(4, CallAudioPolicy.voiceCallVolumeFloor(1, 5));
+        org.junit.Assert.assertEquals(-1, CallAudioPolicy.voiceCallVolumeFloor(4, 5));
+        org.junit.Assert.assertEquals(-1, CallAudioPolicy.voiceCallVolumeFloor(5, 5));
+        org.junit.Assert.assertEquals(6, CallAudioPolicy.voiceCallVolumeFloor(2, 7));
+        org.junit.Assert.assertEquals(-1, CallAudioPolicy.voiceCallVolumeFloor(0, 0));
+    }
 }
