@@ -47,14 +47,21 @@ public final class Prefs {
     }
 
     /** Open Lounge's own origins (the token bridge only answers these; other links open in the browser). */
+    public static final String STAGING_HOST = "openlounge-staging-native-media-staging.up.railway.app";
+
     public static boolean isTrustedOrigin(Uri uri) {
-        if (uri == null || uri.getHost() == null) return false;
-        String host = uri.getHost().toLowerCase();
-        String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase();
-        if (!"https".equals(scheme)) return false;
-        return host.equals("openlounge.app")
-                || host.equals("www.openlounge.app")
-                || host.equals("openlounge-production.up.railway.app");
+        if (uri == null) return false;
+        return isTrustedOrigin(uri.getScheme(), uri.getHost(), BuildConfig.STAGING);
+    }
+
+    /** pure check (unit-tested): prod hosts always; the staging host only in the staging flavor */
+    static boolean isTrustedOrigin(String scheme, String host, boolean staging) {
+        if (host == null || scheme == null || !"https".equals(scheme.toLowerCase())) return false;
+        String h = host.toLowerCase();
+        return h.equals("openlounge.app")
+                || h.equals("www.openlounge.app")
+                || h.equals("openlounge-production.up.railway.app")
+                || (staging && h.equals(STAGING_HOST));
     }
 
     public static String normalizeUrl(String raw) {

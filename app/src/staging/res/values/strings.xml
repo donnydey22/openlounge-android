@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- staging flavor only: the app opens the native-media staging service -->
+<resources>
+    <string name="default_server_url">https://openlounge-staging-native-media-staging.up.railway.app</string>
+</resources>

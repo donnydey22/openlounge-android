@@ -41,7 +41,7 @@ import java.util.concurrent.atomic.AtomicLong
  * The page is UI + signaling only: every ms:* request is relayed over its authenticated socket
  * (window.__olNativeMsReq → OpenLoungeNative.nativeMsReply).
  *
- * Page → app ops (OpenLoungeNativeMedia.nativeMedia(cmd) → Promise): prewarm | connect{callId,iceServers,tcpOnly} |
+ * Page → app ops (OpenLoungeNativeMedia.nativeMedia(cmd) → Promise): prewarm | connect{callId,iceServers,tcpOnly,rebuild?} |
  * connectLiveKit{callId,url,token,iceServers} | status | consumerAvailable | mute | restartIce | ladder | stats | close.
  * App → page: CustomEvent 'openlounge:native-media' {state:'connected'|'disconnected'|'failed', reconnecting?, attempt?}.
  *
@@ -55,7 +55,6 @@ object NativeCallMedia {
     private const val TAG = "OLNativeMedia"
     private const val RELAY_TIMEOUT_MS = 9_000L
     private const val CONNECT_TIMEOUT_MS = 12_000L
-    private val BACKOFF_MS = longArrayOf(500, 1_000, 2_000, 4_000, 8_000, 15_000)
 
     /** UI-thread hooks implemented by MainActivity (relay + events + audio route). */
     interface Host {
@@ -118,11 +117,20 @@ object NativeCallMedia {
                 val tcpOnly = cmd.optBoolean("tcpOnly", false)
                 val ice = cmd.optJSONArray("iceServers") ?: JSONArray()
                 val cur = session
-                if (cur != null && cur.callId == callId && cur.tcpOnly == tcpOnly && !cur.closed) {
-                    // page reload on the same call + path: re-attach, nothing is rebuilt
-                    cur.iceServers = ice
-                    if (!cur.connected) cur.awaitConnected(CONNECT_TIMEOUT_MS)
-                    return JSONObject().put("attached", true)
+                when (NativeMediaPolicy.connectAction(cur != null && !cur.closed, cur?.callId, cur?.tcpOnly ?: false, callId, tcpOnly, cmd.optBoolean("rebuild", false))) {
+                    NativeMediaPolicy.ConnectAction.ATTACH -> {
+                        // page reload on the same call + path: re-attach, nothing is rebuilt
+                        cur!!.iceServers = ice
+                        if (!cur.connected) cur.awaitConnected(CONNECT_TIMEOUT_MS)
+                        return JSONObject().put("attached", true)
+                    }
+                    NativeMediaPolicy.ConnectAction.REBUILD_IN_PLACE -> {
+                        // outage recovery asked by the page: fresh transports now (iOS 071d489 parity), same nativeConn + mic
+                        cur!!.iceServers = ice
+                        cur.rebuildNow()
+                        return JSONObject().put("attached", false)
+                    }
+                    NativeMediaPolicy.ConnectAction.NEW_SESSION -> {}
                 }
                 cur?.close(); session = null
                 lk?.close(); lk = null
@@ -364,19 +372,23 @@ object NativeCallMedia {
             override fun onProduceData(transport: Transport, sctpStreamParameters: String, label: String, protocol: String, appData: String?): String =
                 throw UnsupportedOperationException()
             override fun onConnectionStateChange(transport: Transport, newState: String) {
+                // complete a pending connect right here: connect()/rebuildNow() block the media thread while they
+                // wait, so a waiter that only completed on that thread would sit until the timeout
+                if (NativeMediaPolicy.isUp(newState) && g == gen && !closed) {
+                    if (NativeMediaPolicy.transportsUp(send?.connectionState?.toState(), recv?.connectionState?.toState(), consumers.isNotEmpty()))
+                        connectedWaiter.let { if (!it.isDone) it.complete(true) }
+                }
                 exec.execute { onTransportState(g, newState) }
             }
         }
 
         private fun onTransportState(g: Int, state: String) {
             if (closed || g != gen) return
-            val s = send?.connectionState; val rv = recv?.connectionState
-            val ok = { x: PeerConnection.IceConnectionState? -> x == PeerConnection.IceConnectionState.CONNECTED || x == PeerConnection.IceConnectionState.COMPLETED }
-            if (state == "connected" || state == "completed") {
-                if (ok(s) && (ok(rv) || consumers.isEmpty())) onConnected()
+            if (NativeMediaPolicy.isUp(state)) {
+                if (NativeMediaPolicy.transportsUp(send?.connectionState?.toState(), recv?.connectionState?.toState(), consumers.isEmpty().not())) onConnected()
                 return
             }
-            if (state == "disconnected" || state == "failed" || state == "closed") {
+            if (NativeMediaPolicy.isLoss(state)) {
                 // 'failed' never ends the call — it only makes recovery skip straight to a rebuild
                 startRecovery(rebuildNow = state != "disconnected")
             }
@@ -398,13 +410,33 @@ object NativeCallMedia {
             connected = false
             connectedWaiter = CompletableFuture()
             emitState(JSONObject().put("state", "disconnected").put("reconnecting", true).put("attempt", 0))
-            if (rebuildNow) attempt = 2
+            if (rebuildNow) attempt = NativeMediaPolicy.ICE_RESTARTS_BEFORE_REBUILD
             scheduleRecovery()
+        }
+
+        /** page-driven rebuild: drop any queued attempt, fresh transports now, wait for them (bounded) */
+        fun rebuildNow() {
+            check()
+            recovery?.cancel(false); recovery = null
+            if (connected) {
+                connected = false
+                emitState(JSONObject().put("state", "disconnected").put("reconnecting", true).put("attempt", 0))
+            }
+            if (connectedWaiter.isDone) connectedWaiter = CompletableFuture()
+            attempt = NativeMediaPolicy.ICE_RESTARTS_BEFORE_REBUILD + 1
+            try {
+                build(firstTime = false)
+                awaitConnected(CONNECT_TIMEOUT_MS)
+            } catch (e: Throwable) {
+                // keep the persistent loop going: the session stays and keeps rebuilding with backoff
+                if (!closed && !connected && recovery == null) scheduleRecovery()
+                throw e
+            }
         }
 
         private fun scheduleRecovery() {
             if (closed) return
-            val delay = BACKOFF_MS[minOf(attempt, BACKOFF_MS.size - 1)]
+            val delay = NativeMediaPolicy.backoffMs(attempt)
             recovery = exec.schedule({ recover() }, delay, TimeUnit.MILLISECONDS)
         }
 
@@ -415,14 +447,14 @@ object NativeCallMedia {
             attempt++
             emitState(JSONObject().put("state", "disconnected").put("reconnecting", true).put("attempt", attempt))
             try {
-                if (attempt <= 2) restartIceAll("recovery")
+                if (NativeMediaPolicy.recoveryStep(attempt) == NativeMediaPolicy.RecoveryStep.ICE_RESTART) restartIceAll("recovery")
                 else { build(firstTime = false); }
             } catch (e: Throwable) {
                 Log.w(TAG, "recovery attempt $attempt failed: ${e.message}")
             }
             if (!closed && !connected) {
                 // re-arm: the next attempt only runs if this one hasn't produced 'connected' by then
-                recovery = exec.schedule({ recover() }, BACKOFF_MS[minOf(attempt, BACKOFF_MS.size - 1)], TimeUnit.MILLISECONDS)
+                recovery = exec.schedule({ recover() }, NativeMediaPolicy.backoffMs(attempt), TimeUnit.MILLISECONDS)
             }
         }
 
@@ -490,3 +522,5 @@ object NativeCallMedia {
         }
     }
 }
+
+private fun PeerConnection.IceConnectionState.toState(): String = name.lowercase()

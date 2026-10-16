@@ -34,6 +34,20 @@ android {
         versionCode 28
         versionName "0.3.16"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField "boolean", "STAGING", "false"
+    }
+
+    // prod = the store/website app (openlounge.app). staging = test builds pointed at the native-media staging
+    // service (default URL + trusted origin); never shipped as the production APK.
+    flavorDimensions "env"
+    productFlavors {
+        prod { dimension "env" }
+        staging {
+            dimension "env"
+            versionNameSuffix "-staging"
+            buildConfigField "boolean", "STAGING", "true"
+            ndk { abiFilters "arm64-v8a", "armeabi-v7a" } // keeps the test APK under hosting size limits
+        }
     }
 
     signingConfigs {

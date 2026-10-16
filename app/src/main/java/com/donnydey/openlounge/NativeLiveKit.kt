@@ -35,7 +35,7 @@ class NativeLiveKit(private val ctx: Context, val callId: String, private val em
     private var muted = false
 
     fun connectBlocking(url: String, token: String, ice: JSONArray, timeoutMs: Long) {
-        require(url.startsWith("wss://") || url.startsWith("https://")) { "bad LiveKit url" }
+        require(NativeMediaPolicy.validLiveKitUrl(url)) { "bad LiveKit url" }
         val servers = parseIce(ice)
         runBlocking { withTimeout(timeoutMs) { join(url, token, servers) } }
         connected = true
