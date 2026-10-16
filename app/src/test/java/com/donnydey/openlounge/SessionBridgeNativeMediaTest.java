@@ -8,23 +8,24 @@ import org.junit.Test;
 /** SessionBridge: the origin gate every bridge call (incl. nativeMediaCmd / nativeMsReply) goes through, and the
  *  OpenLoungeNativeMedia shim contract the web page relies on (same shape as iOS window.OpenLoungeNative). */
 public class SessionBridgeNativeMediaTest {
+    private static final String STG = "openlounge-staging-native-media-staging.up.railway.app";
     @Test public void prodOriginsTrustedInEveryFlavor() {
         for (boolean staging : new boolean[]{false, true}) {
-            assertTrue(Prefs.isTrustedOrigin("https", "openlounge.app", staging));
-            assertTrue(Prefs.isTrustedOrigin("HTTPS", "WWW.OpenLounge.app", staging));
-            assertTrue(Prefs.isTrustedOrigin("https", "openlounge-production.up.railway.app", staging));
+            assertTrue(Prefs.isTrustedOrigin("https", "openlounge.app", staging, STG));
+            assertTrue(Prefs.isTrustedOrigin("HTTPS", "WWW.OpenLounge.app", staging, STG));
+            assertTrue(Prefs.isTrustedOrigin("https", "openlounge-production.up.railway.app", staging, STG));
         }
     }
     @Test public void stagingHostOnlyInStagingFlavor() {
-        assertFalse(Prefs.isTrustedOrigin("https", Prefs.STAGING_HOST, false));
-        assertTrue(Prefs.isTrustedOrigin("https", Prefs.STAGING_HOST, true));
+        assertFalse(Prefs.isTrustedOrigin("https", STG, false, STG));
+        assertTrue(Prefs.isTrustedOrigin("https", STG, true, STG));
     }
     @Test public void untrustedOriginsRejected() {
-        assertFalse(Prefs.isTrustedOrigin("http", "openlounge.app", true));
-        assertFalse(Prefs.isTrustedOrigin("https", "openlounge.app.evil.com", true));
-        assertFalse(Prefs.isTrustedOrigin("https", "evil.up.railway.app", true));
-        assertFalse(Prefs.isTrustedOrigin("https", null, true));
-        assertFalse(Prefs.isTrustedOrigin(null, "openlounge.app", true));
+        assertFalse(Prefs.isTrustedOrigin("http", "openlounge.app", true, STG));
+        assertFalse(Prefs.isTrustedOrigin("https", "openlounge.app.evil.com", true, STG));
+        assertFalse(Prefs.isTrustedOrigin("https", "evil.up.railway.app", true, STG));
+        assertFalse(Prefs.isTrustedOrigin("https", null, true, STG));
+        assertFalse(Prefs.isTrustedOrigin(null, "openlounge.app", true, STG));
     }
     @Test public void nativeMediaShimContract() {
         String s = SessionBridge.NATIVE_MEDIA_SHIM;
