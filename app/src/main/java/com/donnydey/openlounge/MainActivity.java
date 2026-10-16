@@ -1080,6 +1080,16 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 callName = null;
                 unlockForCall = false; // re-enable App Lock after the call
                 break;
+            case "call:ringtonePrepare":
+                // the page is about to play the incoming ringtone: no live call → no left-over call-mode session
+                // (communication mode / voice stream made the ring thin and quiet) and the native engine stopped
+                if (CallAudioPolicy.prepareRingtoneOn(type, callId != null || roomAudioLive)) {
+                    NativeCallMedia.releaseIdle();
+                    callAudio(false);
+                    AudioManager ram = (AudioManager) getSystemService(AUDIO_SERVICE);
+                    if (ram != null) try { ram.setMode(AudioManager.MODE_NORMAL); } catch (RuntimeException ignored) {}
+                }
+                break;
             case "room:joined":
                 if (callId == null) roomAudio(true);
                 break;
@@ -1151,7 +1161,11 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
      * Rooms get the same headset policy as calls: communication mode so a wired / USB-C / Bluetooth headset's mic
      * and speaker are used together, falling back to the loudspeaker when the headset is removed.
      */
+    /** a live room owns communication mode; the ringtone prep must not reset it */
+    private boolean roomAudioLive;
+
     private void roomAudio(boolean on) {
+        roomAudioLive = on;
         if (on) {
             if (callAudioOn) return;
             callSpeaker = true;

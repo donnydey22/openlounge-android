@@ -20,4 +20,9 @@ final class CallAudioPolicy {
     static boolean stopRingbackOn(String bridgeEvent) {
         return "call:connected".equals(bridgeEvent) || "call:ended".equals(bridgeEvent);
     }
+
+    /** incoming ringtone: reset the session to ring shape only when no call is live (ringtone only, never mid-call) */
+    public static boolean prepareRingtoneOn(String bridgeEvent, boolean callLive) {
+        return "call:ringtonePrepare".equals(bridgeEvent) && !callLive;
+    }
 }

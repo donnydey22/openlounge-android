@@ -107,6 +107,18 @@ object NativeCallMedia {
 
     @JvmStatic fun isActive(): Boolean = session != null || lk != null
 
+    /** idle (no call media): fully stop the native audio engine — ADM, mic source and factory released, so nothing
+     *  keeps the device in voice-call audio shape when the next ringtone plays. Rebuilt on the next prewarm/connect. */
+    @JvmStatic fun releaseIdle() = exec.execute { releaseIdleInner() }
+
+    private fun releaseIdleInner() {
+        if (session != null || lk != null) return
+        runCatching { preTrack?.dispose() }; preTrack = null
+        runCatching { audioSource?.dispose() }; audioSource = null
+        runCatching { factory?.dispose() }; factory = null
+        runCatching { adm?.release() }; adm = null
+    }
+
     // ---------------------------------------------------------------- ops (media thread)
     private fun run(cmd: JSONObject): Any? {
         when (cmd.optString("op")) {
@@ -246,6 +258,7 @@ object NativeCallMedia {
         audioOn(false)
         pending.values.forEach { it.completeExceptionally(RuntimeException("native media closed")) }
         pending.clear()
+        if (dropPrewarm) releaseIdleInner()
     }
 
     private fun emitState(detail: JSONObject) {
