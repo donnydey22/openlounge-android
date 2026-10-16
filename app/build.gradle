@@ -31,7 +31,7 @@ android {
         applicationId "com.donnydey.openlounge"
         minSdk 24
         targetSdk 36
-        versionCode 28
+        versionCode 31
         versionName "0.3.16"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField "boolean", "STAGING", "false"

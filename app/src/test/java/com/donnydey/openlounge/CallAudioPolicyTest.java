@@ -23,4 +23,11 @@ public class CallAudioPolicyTest {
         assertTrue(CallAudioPolicy.stopRingbackOn("call:ended"));
         assertFalse(CallAudioPolicy.stopRingbackOn("call:outgoing"));
     }
+
+    @Test public void ringtonePrepareOnlyWhenIdle() {
+        assertTrue(CallAudioPolicy.prepareRingtoneOn("call:ringtonePrepare", false));
+        assertFalse(CallAudioPolicy.prepareRingtoneOn("call:ringtonePrepare", true));
+        assertFalse(CallAudioPolicy.prepareRingtoneOn("call:incoming", false));
+        assertFalse(CallAudioPolicy.prepareRingtoneOn(null, false));
+    }
 }
