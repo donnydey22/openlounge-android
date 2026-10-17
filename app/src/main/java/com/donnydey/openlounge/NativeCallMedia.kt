@@ -150,6 +150,7 @@ object NativeCallMedia {
                 session = s
                 try { s.connect(); } catch (e: Throwable) {
                     if (session === s) { s.close(); session = null }
+                    if (MsJson.isDeterministic(e)) emitState(JSONObject().put("state", "failed").put("fallback", "livekit").put("reason", e.message ?: ""))
                     throw e
                 }
                 return JSONObject().put("attached", false)
@@ -309,6 +310,13 @@ object NativeCallMedia {
 
         private fun check() { if (closed) throw IllegalStateException("native media closed") }
 
+        /** tag libmediasoupclient failures with the step that threw, so call:diag shows where (e.g. "consume: [json…]") */
+        private inline fun <T> stage(name: String, block: () -> T): T =
+            try { block() } catch (e: MsStageException) { throw e } catch (e: Throwable) {
+                if (e is IllegalStateException && closed) throw e
+                throw MsStageException(name, e)
+            }
+
         fun connect() {
             build(firstTime = true)
             awaitConnected(CONNECT_TIMEOUT_MS)
@@ -330,7 +338,9 @@ object NativeCallMedia {
             val joined = r("ms:join")
             if (!joined.optBoolean("ok") || !joined.has("routerRtpCapabilities")) throw RuntimeException("Mediasoup admission failed")
             check()
-            val d = device ?: f.let { Device(it).also { dev -> dev.load(joined.getJSONObject("routerRtpCapabilities").toString(), null); device = dev } }
+            val d = device ?: stage("device-load") {
+                Device(f).also { dev -> dev.load(MsJson.rtpCapabilities(joined.opt("routerRtpCapabilities")).toString(), null); device = dev }
+            }
             val extra = { dir: String -> JSONObject().put("direction", dir).apply { if (tcpOnly) put("tcpOnly", true) } }
             val so = r("ms:transport:create", extra("send"))
             val ro = r("ms:transport:create", extra("recv"))
@@ -339,18 +349,24 @@ object NativeCallMedia {
             check()
             val cfg = rtcConfig()
             val listener = TransportListener(myGen)
-            send = d.createSendTransport(listener, st.getString("id"), st.get("iceParameters").toString(), st.get("iceCandidates").toString(),
-                st.get("dtlsParameters").toString(), null, cfg, null)
-            recv = d.createRecvTransport(listener, rt.getString("id"), rt.get("iceParameters").toString(), rt.get("iceCandidates").toString(),
-                rt.get("dtlsParameters").toString(), null, cfg, null)
+            send = stage("send-transport") {
+                d.createSendTransport(listener, st.getString("id"), MsJson.obj(st.opt("iceParameters"), "iceParameters").toString(),
+                    MsJson.objArray(st.opt("iceCandidates"), "iceCandidates").toString(), MsJson.obj(st.opt("dtlsParameters"), "dtlsParameters").toString(),
+                    null, cfg, JSONObject().toString())
+            }
+            recv = stage("recv-transport") {
+                d.createRecvTransport(listener, rt.getString("id"), MsJson.obj(rt.opt("iceParameters"), "iceParameters").toString(),
+                    MsJson.objArray(rt.opt("iceCandidates"), "iceCandidates").toString(), MsJson.obj(rt.opt("dtlsParameters"), "dtlsParameters").toString(),
+                    null, cfg, JSONObject().toString())
+            }
             if (mic == null || firstTime) mic = takeMic(f)
             mic!!.setEnabled(!muted)
             val enc = RtpParameters.Encoding(null, true, null).apply { maxBitrateBps = 48_000 }
-            producer = send!!.produce(object : Producer.Listener { override fun onTransportClose(producer: Producer) {} }, mic!!, listOf(enc),
+            producer = stage("produce") { send!!.produce(object : Producer.Listener { override fun onTransportClose(producer: Producer) {} }, mic!!, listOf(enc),
                 JSONObject().put("opusStereo", false).put("opusDtx", false).put("opusFec", true).put("opusMaxPlaybackRate", 48000).toString(),
-                null, JSONObject().put("source", "mic").put("native", true).put("platform", "android").toString())
+                null, JSONObject().put("source", "mic").put("native", true).put("platform", "android").toString()) }
             check()
-            syncConsumers()
+            stage("consume") { syncConsumers() }
         }
 
         private fun rtcConfig(): PeerConnection.RTCConfiguration {
@@ -441,8 +457,11 @@ object NativeCallMedia {
                 build(firstTime = false)
                 awaitConnected(CONNECT_TIMEOUT_MS)
             } catch (e: Throwable) {
-                // keep the persistent loop going: the session stays and keeps rebuilding with backoff
-                if (!closed && !connected && recovery == null) scheduleRecovery()
+                // keep the persistent loop going: the session stays and keeps rebuilding with backoff — unless
+                // libmediasoupclient rejected our parameters (same input → same error): then stop and let the page
+                // hand over to the LiveKit backup
+                if (MsJson.isDeterministic(e)) emitState(JSONObject().put("state", "failed").put("fallback", "livekit").put("reason", e.message ?: ""))
+                else if (!closed && !connected && recovery == null) scheduleRecovery()
                 throw e
             }
         }
@@ -464,6 +483,10 @@ object NativeCallMedia {
                 else { build(firstTime = false); }
             } catch (e: Throwable) {
                 Log.w(TAG, "recovery attempt $attempt failed: ${e.message}")
+                if (MsJson.isDeterministic(e)) {
+                    emitState(JSONObject().put("state", "failed").put("fallback", "livekit").put("reason", e.message ?: ""))
+                    return
+                }
             }
             if (!closed && !connected) {
                 // re-arm: the next attempt only runs if this one hasn't produced 'connected' by then
@@ -493,8 +516,10 @@ object NativeCallMedia {
                 val id = p.optString("id")
                 // audio-only native mode: remote video stays off (the page shows the avatar)
                 if (closed || consumers.containsKey(id) || p.optString("kind") != "audio") continue
+                // the SFU's consume reply carries no appData: always hand libmediasoupclient a JSON object ({} by default)
+                // and an rtpParameters object with the shapes it indexes (rtcp {}, encodings [{}], codec parameters {})
                 val c = rv.consume(object : Consumer.Listener { override fun onTransportClose(consumer: Consumer) {} },
-                    id, p.optString("producerId"), "audio", p.optJSONObject("rtpParameters")?.toString(), p.optJSONObject("appData")?.toString())
+                    id, p.optString("producerId"), "audio", MsJson.rtpParameters(p.opt("rtpParameters")).toString(), MsJson.appData(p.opt("appData")).toString())
                 (c.track as? AudioTrack)?.setEnabled(true) // plays through the ADM (voice-communication stream)
                 consumers[id] = c
                 runCatching { r("ms:consumer:resume", JSONObject().put("consumerId", id)) }
@@ -537,3 +562,6 @@ object NativeCallMedia {
 }
 
 private fun PeerConnection.IceConnectionState.toState(): String = name.lowercase()
+
+/** a libmediasoupclient step failed; message "<stage>: <cause>" reaches the page's ms-connect-failed reason */
+internal class MsStageException(val stage: String, cause: Throwable) : RuntimeException("$stage: ${cause.message ?: cause}", cause)

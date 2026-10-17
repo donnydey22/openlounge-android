@@ -31,8 +31,8 @@ android {
         applicationId "com.donnydey.openlounge"
         minSdk 24
         targetSdk 36
-        versionCode 32
-        versionName "0.3.16"
+        versionCode 33
+        versionName "0.3.17"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField "boolean", "STAGING", "false"
         buildConfigField "String", "STAGING_HOST", "\"\""
@@ -132,6 +132,7 @@ dependencies {
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'
 
     testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.json:json:20240303' // JVM org.json for MsJsonTest (android.jar's org.json is a stub in unit tests); test-only, not in the APK
     androidTestImplementation 'androidx.test:runner:1.6.2'
     androidTestImplementation 'androidx.test.ext:junit:1.2.1'
 }
