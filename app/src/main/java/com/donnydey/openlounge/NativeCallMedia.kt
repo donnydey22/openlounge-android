@@ -246,7 +246,15 @@ object NativeCallMedia {
                     .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
                     .setAcceptsDelayedFocusGain(false)
-                    .setOnAudioFocusChangeListener { }
+                    .setWillPauseWhenDucked(false)
+                    .setOnAudioFocusChangeListener { change ->
+                        // transient / duck losses: keep the call flowing; permanent loss (e.g. cellular call) → tell the page
+                        when (CallWakePolicy.onFocusChange(change)) {
+                            CallWakePolicy.FocusAction.NOTIFY_LOST -> emitState(JSONObject().put("type", "audioFocus").put("state", "lost"))
+                            CallWakePolicy.FocusAction.NOTIFY_REGAINED -> emitState(JSONObject().put("type", "audioFocus").put("state", "gained"))
+                            else -> {}
+                        }
+                    }
                     .build()
                 runCatching { am.requestAudioFocus(r) }
                 focus = r
