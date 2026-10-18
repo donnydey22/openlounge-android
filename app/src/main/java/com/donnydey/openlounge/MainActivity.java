@@ -111,6 +111,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     private String callId = null;
     private String callName = null;
     private AudioManager callAudioManager;
+    private CallWakeLocks callWake;
     private int modeBeforeCall = AudioManager.MODE_NORMAL;
     private boolean callDeviceCallbackRegistered = false;
     private final AudioDeviceCallback callDeviceCallback = new AudioDeviceCallback() {
@@ -1153,10 +1154,13 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                     if (target >= 0) am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, target, 0);
                 } catch (RuntimeException ignored) {}
                 setVolumeControlStream(AudioManager.STREAM_VOICE_CALL); // hardware keys adjust the call level
+                if (callWake == null) callWake = new CallWakeLocks(this);
+                callWake.start(); // partial wake lock for the call; proximity follows the route below
             }
             applyCallRoute();
         } else if (callAudioOn) {
             callAudioOn = false;
+            if (callWake != null) callWake.stop();
             unregisterCallDeviceCallback(am);
             try {
                 if (Build.VERSION.SDK_INT >= 31) am.clearCommunicationDevice();
@@ -1232,6 +1236,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                     if (type != null) devices.put(type, d);
                 }
                 CallAudioRoute.Device selected = CallAudioRoute.choose(callSpeaker, devices.keySet());
+                if (callWake != null) callWake.route(selected);
                 AudioDeviceInfo target = selected == null ? null : devices.get(selected);
                 if (target != null) am.setCommunicationDevice(target);
                 else am.clearCommunicationDevice();
@@ -1244,6 +1249,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 if (type != null) devices.add(type);
             }
             CallAudioRoute.Device selected = CallAudioRoute.choose(callSpeaker, devices);
+            if (callWake != null) callWake.route(selected);
             if (CallAudioRoute.usesLegacyBluetoothSco(selected)) {
                 am.startBluetoothSco();
                 am.setBluetoothScoOn(true);
