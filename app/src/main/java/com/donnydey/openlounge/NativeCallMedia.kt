@@ -73,6 +73,8 @@ object NativeCallMedia {
     private val seq = AtomicLong()
     private var factory: PeerConnectionFactory? = null
     private var adm: JavaAudioDeviceModule? = null
+    /** ~60 s of 10 ms buffers */
+    private val micLevel = MicLevel(6000)
     private var audioSource: AudioSource? = null
     private var session: MsSession? = null
     private var lk: NativeLiveKit? = null
@@ -199,6 +201,8 @@ object NativeCallMedia {
             .setAudioSource(android.media.MediaRecorder.AudioSource.VOICE_COMMUNICATION)
             .setAudioAttributes(attrs)
             .setUseStereoInput(false).setUseStereoOutput(false)
+            // read-only level meter (quiet-mic diagnosis): RMS of each ~10 ms capture buffer, median reported on close
+            .setSamplesReadyCallback { s -> micLevel.add(MicLevel.rms16(s.data, s.data.size)) }
             .createAudioDeviceModule()
         adm = a
         val f = PeerConnectionFactory.builder().setAudioDeviceModule(a)
@@ -225,6 +229,8 @@ object NativeCallMedia {
             mandatory.add(MediaConstraints.KeyValuePair("googEchoCancellation", "true"))
             mandatory.add(MediaConstraints.KeyValuePair("googNoiseSuppression", "true"))
             mandatory.add(MediaConstraints.KeyValuePair("googAutoGainControl", "true"))
+            // WebRTC's standard high-pass filter (removes low rumble so AGC tracks the voice, not handling noise)
+            mandatory.add(MediaConstraints.KeyValuePair("googHighpassFilter", "true"))
         }).also { audioSource = it }
         return f.createAudioTrack("ol-mic-" + seq.incrementAndGet(), src)
     }
@@ -259,6 +265,9 @@ object NativeCallMedia {
     }
 
     private fun closeAllInner(dropPrewarm: Boolean) {
+        val med = micLevel.median()
+        if (med > 0f) emitState(JSONObject().put("type", "micLevel").put("median", med.toDouble()))
+        micLevel.reset()
         session?.close(); session = null
         lk?.close(); lk = null
         if (dropPrewarm) { runCatching { preTrack?.dispose() }; preTrack = null }
