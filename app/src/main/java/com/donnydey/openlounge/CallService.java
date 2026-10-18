@@ -27,12 +27,19 @@ public class CallService extends Service {
     static final int NOTIF_ID = 7002;
     static final String EXTRA_NAME = "name";
     static final String EXTRA_CONNECTED = "connected";
+    static final String EXTRA_USER_VISIBLE = "user_visible";
 
     static boolean start(Context ctx, String callId, String name, boolean connected) {
+        return start(ctx, callId, name, connected, MainActivity.isVisible());
+    }
+
+    /** userVisible: started from a visible activity or a user tap (Accept), which lets Android 14+ grant the mic type */
+    static boolean start(Context ctx, String callId, String name, boolean connected, boolean userVisible) {
         Intent i = new Intent(ctx, CallService.class)
                 .putExtra(CallNotifications.EXTRA_CALL_ID, callId == null ? "" : callId)
                 .putExtra(EXTRA_NAME, name == null ? "" : name)
-                .putExtra(EXTRA_CONNECTED, connected);
+                .putExtra(EXTRA_CONNECTED, connected)
+                .putExtra(EXTRA_USER_VISIBLE, userVisible);
         try {
             ContextCompat.startForegroundService(ctx, i);
             return true;
@@ -53,18 +60,21 @@ public class CallService extends Service {
         String name = intent == null ? "" : intent.getStringExtra(EXTRA_NAME);
         boolean connected = intent != null && intent.getBooleanExtra(EXTRA_CONNECTED, true);
         Notification n = build(callId, name, connected);
-        int type = 0;
-        if (Build.VERSION.SDK_INT >= 29) {
-            type = ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL;
-            if (Build.VERSION.SDK_INT >= 30 && ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
-                type |= ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
-        }
-        try {
-            ServiceCompat.startForeground(this, NOTIF_ID, n, type);
-            Log.i(TAG, "call foreground service up (type " + type + ")");
-        } catch (RuntimeException e) {
-            Log.w(TAG, "startForeground failed: " + e.getClass().getSimpleName() + " " + e.getMessage());
-            stopSelf();
+        boolean userVisible = intent != null && intent.getBooleanExtra(EXTRA_USER_VISIBLE, false);
+        boolean mic = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
+        int type = CallFgsPolicy.types(Build.VERSION.SDK_INT, mic, userVisible);
+        while (true) {
+            try {
+                ServiceCompat.startForeground(this, NOTIF_ID, n, type);
+                Log.i(TAG, "call foreground service up (type " + type + ")");
+                break;
+            } catch (RuntimeException e) {
+                // Android 14+: a background "microphone" start is refused; keep the phoneCall FGS instead of dying
+                Log.w(TAG, "startForeground failed (type " + type + "): " + e.getClass().getSimpleName() + " " + e.getMessage());
+                int next = CallFgsPolicy.fallback(type);
+                if (next == 0) { stopSelf(); break; }
+                type = next;
+            }
         }
         return START_NOT_STICKY; // never resurrect a call after the process died
     }

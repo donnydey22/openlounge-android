@@ -104,6 +104,9 @@ public class IncomingCallActivity extends Activity {
     private void accept() {
         String id = callId;
         CallNotifications.cancel(this, id);
+        // Android 12+: the call FGS must be up before the WebView connects; starting it from this user tap (visible
+        // activity) is exempt from background-start limits and lets Android 14+ grant the microphone type.
+        CallService.start(getApplicationContext(), id, getIntent().getStringExtra(CallNotifications.EXTRA_CALLER), false, true);
         Intent open = new Intent(this, MainActivity.class)
                 .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 .putExtra(OpenLoungeMessagingService.EXTRA_OPEN_PATH, "/call/" + id + "?accept=1");

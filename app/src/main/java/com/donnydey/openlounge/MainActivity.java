@@ -100,6 +100,12 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     private volatile boolean pageLoaded = false;
     /** Main activity is resumed; only then may an FCM payload be exposed to the already-visible WebView. */
     private volatile boolean activityForeground = false;
+
+    /** true while the main activity is resumed (CallService: Android 14+ microphone FGS type needs a visible start) */
+    static boolean isVisible() {
+        MainActivity a = live.get();
+        return a != null && a.activityForeground;
+    }
     private boolean callAudioOn = false;
     private boolean callSpeaker = true;
     private String callId = null;

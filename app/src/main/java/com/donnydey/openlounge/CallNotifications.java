@@ -124,7 +124,10 @@ final class CallNotifications {
         n.flags |= Notification.FLAG_INSISTENT; // keep ringing until answered / declined / cancelled
         if (Build.VERSION.SDK_INT >= 34) {
             NotificationManager nm = ctx.getSystemService(NotificationManager.class);
-            if (nm != null && !nm.canUseFullScreenIntent()) Log.i(TAG, "full-screen intent not allowed: heads-up ring only");
+            if (nm != null && !nm.canUseFullScreenIntent()) {
+                Log.i(TAG, "full-screen intent not allowed: heads-up ring only");
+                FullScreenIntentPrompt.markRangWithoutFullScreen(ctx); // one more explainer after a real missed lock-screen ring
+            }
         }
         try {
             NotificationManagerCompat.from(ctx).notify(callId, NOTIF_ID, n);
