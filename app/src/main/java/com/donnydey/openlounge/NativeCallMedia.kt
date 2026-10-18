@@ -201,7 +201,13 @@ object NativeCallMedia {
             .setUseStereoInput(false).setUseStereoOutput(false)
             .createAudioDeviceModule()
         adm = a
-        val f = PeerConnectionFactory.builder().setAudioDeviceModule(a).createPeerConnectionFactory()
+        val f = PeerConnectionFactory.builder().setAudioDeviceModule(a)
+            // libmediasoupclient's Device.load builds a probe offer with an audio AND a video transceiver and parses it
+            // with sdptransform; with no video codec factories the video m-section has no payloads and the parsed JSON
+            // is not the shape ortc indexes (type_error.305). Software factories: deterministic, no EGL, audio-only use.
+            .setVideoEncoderFactory(org.webrtc.SoftwareVideoEncoderFactory())
+            .setVideoDecoderFactory(org.webrtc.SoftwareVideoDecoderFactory())
+            .createPeerConnectionFactory()
         factory = f
         return f
     }
