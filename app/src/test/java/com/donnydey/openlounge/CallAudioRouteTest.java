@@ -35,4 +35,31 @@ public class CallAudioRouteTest {
         assertEquals(CallAudioRoute.Device.WIRED, CallAudioRoute.choose(false,
                 EnumSet.of(CallAudioRoute.Device.EARPIECE, CallAudioRoute.Device.WIRED)));
     }
+
+    @Test public void userPickWinsWhileAvailable() {
+        EnumSet<CallAudioRoute.Device> all = EnumSet.of(CallAudioRoute.Device.SPEAKER, CallAudioRoute.Device.EARPIECE,
+                CallAudioRoute.Device.BLUETOOTH);
+        assertEquals(CallAudioRoute.Device.SPEAKER, CallAudioRoute.choose(CallAudioRoute.Device.SPEAKER, false, all));
+        assertEquals(CallAudioRoute.Device.EARPIECE, CallAudioRoute.choose(CallAudioRoute.Device.EARPIECE, true, all));
+        assertEquals(CallAudioRoute.Device.BLUETOOTH, CallAudioRoute.choose(null, true, all));
+    }
+
+    @Test public void unavailableUserPickFallsBackToAutomaticRouting() {
+        EnumSet<CallAudioRoute.Device> builtIn = EnumSet.of(CallAudioRoute.Device.SPEAKER, CallAudioRoute.Device.EARPIECE);
+        assertEquals(CallAudioRoute.Device.SPEAKER, CallAudioRoute.choose(CallAudioRoute.Device.BLUETOOTH, true, builtIn));
+        assertEquals(CallAudioRoute.Device.EARPIECE, CallAudioRoute.choose(CallAudioRoute.Device.WIRED, false, builtIn));
+    }
+
+    @Test public void kindAndIdRoundTripWithPage() {
+        for (CallAudioRoute.Device d : CallAudioRoute.Device.values()) {
+            assertEquals(d, CallAudioRoute.fromKind(CallAudioRoute.kind(d)));
+        }
+        assertEquals("system", CallAudioRoute.kind(null));
+        assertNull(CallAudioRoute.fromKind("airplay"));
+        assertNull(CallAudioRoute.fromKind(null));
+        assertEquals("speaker", CallAudioRoute.id(CallAudioRoute.Device.SPEAKER, "Pixel"));
+        assertEquals("earpiece", CallAudioRoute.id(CallAudioRoute.Device.EARPIECE, null));
+        assertEquals("bluetooth:AirPods Pro", CallAudioRoute.id(CallAudioRoute.Device.BLUETOOTH, "AirPods Pro"));
+        assertEquals("wired:", CallAudioRoute.id(CallAudioRoute.Device.WIRED, null));
+    }
 }

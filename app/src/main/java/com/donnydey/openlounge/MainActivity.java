@@ -108,6 +108,9 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     }
     private boolean callAudioOn = false;
     private boolean callSpeaker = true;
+    /** explicit route pick from the call screen; null = automatic (headset first, else speaker/earpiece toggle) */
+    private CallAudioRoute.Device callUserPick = null;
+    private String lastRouteReport = null;
     private String callId = null;
     private String callName = null;
     private AudioManager callAudioManager;
@@ -115,11 +118,12 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     private int modeBeforeCall = AudioManager.MODE_NORMAL;
     private boolean callDeviceCallbackRegistered = false;
     private final AudioDeviceCallback callDeviceCallback = new AudioDeviceCallback() {
+        // a device connected/disconnected: new situation → automatic routing again (and the page announces the change)
         @Override public void onAudioDevicesAdded(AudioDeviceInfo[] addedDevices) {
-            handler.post(() -> { if (callAudioOn) applyCallRoute(); });
+            handler.post(() -> { if (callAudioOn) { callUserPick = null; applyCallRoute(); } });
         }
         @Override public void onAudioDevicesRemoved(AudioDeviceInfo[] removedDevices) {
-            handler.post(() -> { if (callAudioOn) applyCallRoute(); });
+            handler.post(() -> { if (callAudioOn) { callUserPick = null; applyCallRoute(); } });
         }
     };
     private int loadRetries = 0;
@@ -1106,6 +1110,9 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             case "call:audioRoute":
                 if (m.has("speaker")) {
                     callSpeaker = m.optBoolean("speaker", true);
+                    // newer pages send route (kind) + user:true for a pick from the route sheet; auto guesses clear it
+                    if (m.optBoolean("user", false) && m.has("route")) callUserPick = CallAudioRoute.fromKind(m.optString("route"));
+                    else if (!m.optBoolean("user", false)) callUserPick = null;
                     if (callAudioOn) applyCallRoute();
                 }
                 break;
@@ -1170,6 +1177,8 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             try { am.setMode(modeBeforeCall); } catch (RuntimeException ignored) {}
             setVolumeControlStream(AudioManager.USE_DEFAULT_STREAM_TYPE);
             callSpeaker = true;
+            callUserPick = null;
+            lastRouteReport = null;
         }
     }
 
@@ -1219,6 +1228,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             case AudioDeviceInfo.TYPE_USB_HEADSET:
             case AudioDeviceInfo.TYPE_USB_DEVICE: return CallAudioRoute.Device.USB;
             case AudioDeviceInfo.TYPE_BLUETOOTH_SCO:
+            case AudioDeviceInfo.TYPE_HEARING_AID:
             case AudioDeviceInfo.TYPE_BLE_HEADSET: return CallAudioRoute.Device.BLUETOOTH;
             default: return null;
         }
@@ -1235,11 +1245,15 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                     CallAudioRoute.Device type = routeType(d);
                     if (type != null) devices.put(type, d);
                 }
-                CallAudioRoute.Device selected = CallAudioRoute.choose(callSpeaker, devices.keySet());
+                CallAudioRoute.Device selected = CallAudioRoute.choose(callUserPick, callSpeaker, devices.keySet());
                 if (callWake != null) callWake.route(selected);
                 AudioDeviceInfo target = selected == null ? null : devices.get(selected);
                 if (target != null) am.setCommunicationDevice(target);
                 else am.clearCommunicationDevice();
+                // report what Android actually routed to (getCommunicationDevice), not just what we asked for
+                AudioDeviceInfo actual = am.getCommunicationDevice();
+                CallAudioRoute.Device actualType = routeType(actual);
+                reportCallRoute(actualType != null ? actualType : selected, actual != null ? actual : target, devices);
                 return;
             }
 
@@ -1248,8 +1262,15 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 CallAudioRoute.Device type = routeType(d);
                 if (type != null) devices.add(type);
             }
-            CallAudioRoute.Device selected = CallAudioRoute.choose(callSpeaker, devices);
+            CallAudioRoute.Device selected = CallAudioRoute.choose(callUserPick, callSpeaker, devices);
             if (callWake != null) callWake.route(selected);
+            EnumMap<CallAudioRoute.Device, AudioDeviceInfo> legacy = new EnumMap<>(CallAudioRoute.Device.class);
+            for (AudioDeviceInfo d : am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
+                CallAudioRoute.Device type = routeType(d);
+                if (type != null && !legacy.containsKey(type)) legacy.put(type, d);
+            }
+            for (CallAudioRoute.Device t : devices) if (!legacy.containsKey(t)) legacy.put(t, null);
+            reportCallRoute(selected, selected == null ? null : legacy.get(selected), legacy);
             if (CallAudioRoute.usesLegacyBluetoothSco(selected)) {
                 am.startBluetoothSco();
                 am.setBluetoothScoOn(true);
@@ -1259,6 +1280,41 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 am.setSpeakerphoneOn(selected == CallAudioRoute.Device.SPEAKER);
             }
         } catch (RuntimeException ignored) {
+        }
+    }
+
+    private static String deviceName(CallAudioRoute.Device type, AudioDeviceInfo d) {
+        if (d == null || type == CallAudioRoute.Device.SPEAKER || type == CallAudioRoute.Device.EARPIECE) return "";
+        CharSequence n = d.getProductName();
+        String s = n == null ? "" : n.toString().trim();
+        // built-in product names are the phone model ("Pixel 8"), which reads wrong on a headset button
+        return s.equals(Build.MODEL) ? "" : (s.length() > 64 ? s.substring(0, 64) : s);
+    }
+
+    /**
+     * Tell the page the actual call route + every pickable output (Speaker / Phone / Headphones / AirPods …) as
+     * openlounge:native-audio-route, the event the iOS app already sends. Deduplicated so device callbacks don't spam.
+     */
+    private void reportCallRoute(CallAudioRoute.Device current, AudioDeviceInfo currentInfo, java.util.Map<CallAudioRoute.Device, AudioDeviceInfo> available) {
+        if (webView == null) return;
+        try {
+            JSONArray routes = new JSONArray();
+            for (java.util.Map.Entry<CallAudioRoute.Device, AudioDeviceInfo> e : available.entrySet()) {
+                String n = deviceName(e.getKey(), e.getValue());
+                routes.put(new JSONObject().put("kind", CallAudioRoute.kind(e.getKey())).put("id", CallAudioRoute.id(e.getKey(), n)).put("name", n));
+            }
+            String name = deviceName(current, currentInfo);
+            JSONObject d = new JSONObject()
+                    .put("kind", CallAudioRoute.kind(current)).put("id", CallAudioRoute.id(current, name)).put("name", name)
+                    .put("speaker", current == CallAudioRoute.Device.SPEAKER)
+                    .put("headset", current != null && current != CallAudioRoute.Device.SPEAKER && current != CallAudioRoute.Device.EARPIECE)
+                    .put("routes", routes).put("user", callUserPick != null).put("source", "android");
+            if (currentInfo != null) d.put("type", currentInfo.getType());
+            String json = d.toString();
+            if (json.equals(lastRouteReport)) return;
+            lastRouteReport = json;
+            webView.evaluateJavascript("(function(){try{window.dispatchEvent(new CustomEvent('openlounge:native-audio-route',{detail:" + json + "}))}catch(e){}})();", null);
+        } catch (Exception ignored) {
         }
     }
 

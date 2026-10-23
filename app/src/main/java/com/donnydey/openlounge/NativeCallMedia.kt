@@ -179,7 +179,8 @@ object NativeCallMedia {
             "consumerAvailable" -> { session?.syncConsumers(); return true }
             "mute" -> { val m = cmd.optBoolean("muted"); session?.setMuted(m); lk?.setMuted(m); return true }
             "restartIce" -> { session?.restartIceAll("page"); return true }
-            "ladder" -> return session?.ladder(cmd.optInt("audioBps", 48_000)) ?: false
+            // voiceBps (pages from Oct 23): Opus cap with a 32 kbps floor / 64 kbps top; older pages send only audioBps
+            "ladder" -> return session?.ladder(if (cmd.has("voiceBps")) cmd.optInt("voiceBps", 64_000).coerceIn(32_000, 64_000) else cmd.optInt("audioBps", 48_000)) ?: false
             "stats" -> return session?.stats() ?: JSONArray()
             "close" -> { closeAllInner(false); return true }
         }
@@ -384,9 +385,9 @@ object NativeCallMedia {
             }
             if (mic == null || firstTime) mic = takeMic(f)
             mic!!.setEnabled(!muted)
-            val enc = RtpParameters.Encoding(null, true, null).apply { maxBitrateBps = 48_000 }
+            val enc = RtpParameters.Encoding(null, true, null).apply { maxBitrateBps = 64_000 }
             producer = stage("produce") { send!!.produce(object : Producer.Listener { override fun onTransportClose(producer: Producer) {} }, mic!!, listOf(enc),
-                JSONObject().put("opusStereo", false).put("opusDtx", false).put("opusFec", true).put("opusMaxPlaybackRate", 48000).toString(),
+                JSONObject().put("opusStereo", false).put("opusDtx", false).put("opusFec", true).put("opusMaxPlaybackRate", 48000).put("opusMaxAverageBitrate", 64000).toString(),
                 null, JSONObject().put("source", "mic").put("native", true).put("platform", "android").toString()) }
             check()
             stage("consume") { syncConsumers() }
