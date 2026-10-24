@@ -116,7 +116,9 @@ public class IncomingCallActivity extends Activity {
                 // locked phone: ask for unlock, then open the call (MainActivity isn't shown over the lock screen)
                 km.requestDismissKeyguard(this, new KeyguardManager.KeyguardDismissCallback() {
                     @Override public void onDismissSucceeded() { open(open); }
-                    @Override public void onDismissCancelled() { open(open); }
+                    // FX-062: never open the call page behind the lock screen. MainActivity is not shown over the
+                    // keyguard, so its mic/camera dialogs could not be tapped. Stay on the call screen; Accept retries.
+                    @Override public void onDismissCancelled() { }
                     @Override public void onDismissError() { open(open); }
                 });
                 return;

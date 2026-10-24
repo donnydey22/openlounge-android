@@ -130,6 +130,10 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     private final Runnable retryLoad = this::loadConfiguredUrl;
 
     private PermissionRequest pendingWebPerm;
+    /** FX-062: WebView mic + camera requests arrive back to back on call accept. One system dialog at a time, in order;
+     *  a second request used to overwrite pendingWebPerm and relaunch the launcher over an open dialog, so the first
+     *  (microphone) request was never answered, its getUserMedia hung and the call sat on "Connecting". */
+    private final java.util.ArrayDeque<PermissionRequest> webPermQueue = new java.util.ArrayDeque<>();
     private ValueCallback<Uri[]> fileCallback;
 
     private final ActivityResultLauncher<String[]> permissionLauncher =
@@ -145,14 +149,11 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                     }
                 }
                 if (callAudioOn) applyCallRoute();
-                if (pendingWebPerm != null) {
-                    if (granted) {
-                        pendingWebPerm.grant(pendingWebPerm.getResources());
-                    } else {
-                        pendingWebPerm.deny();
-                    }
-                    pendingWebPerm = null;
-                }
+                PermissionRequest req = pendingWebPerm;
+                pendingWebPerm = null;
+                if (req != null) answerWebPermission(req);
+                // FX-062: next queued WebView request (mic, then camera) only after this dialog closed
+                handler.post(this::nextWebPermission);
             });
 
     /** deep link from a tapped notification, applied once the WebView is ready */
@@ -438,8 +439,45 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         if (needed.isEmpty()) {
             request.grant(request.getResources());
         } else {
-            pendingWebPerm = request;
+            webPermQueue.add(request);
+            nextWebPermission();
+        }
+    }
+
+    private void nextWebPermission() {
+        if (pendingWebPerm != null) return; // a system dialog is up: wait for its result
+        PermissionRequest next;
+        while ((next = webPermQueue.poll()) != null) {
+            List<String> needed = new ArrayList<>();
+            for (String res : next.getResources()) {
+                String p = PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(res) ? Manifest.permission.RECORD_AUDIO
+                        : PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(res) ? Manifest.permission.CAMERA : null;
+                if (p != null && ContextCompat.checkSelfPermission(this, p) != PackageManager.PERMISSION_GRANTED && !needed.contains(p)) needed.add(p);
+            }
+            if (Build.VERSION.SDK_INT >= 31 && needed.contains(Manifest.permission.RECORD_AUDIO)
+                    && ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                needed.add(Manifest.permission.BLUETOOTH_CONNECT);
+            }
+            if (needed.isEmpty()) { answerWebPermission(next); continue; } // granted meanwhile by the earlier dialog
+            pendingWebPerm = next;
             permissionLauncher.launch(needed.toArray(new String[0]));
+            return;
+        }
+    }
+
+    /** Grant exactly the resources the user allowed: a denied camera keeps the call going on audio (and vice versa). */
+    private void answerWebPermission(PermissionRequest req) {
+        List<String> ok = new ArrayList<>();
+        for (String res : req.getResources()) {
+            String p = PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(res) ? Manifest.permission.RECORD_AUDIO
+                    : PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(res) ? Manifest.permission.CAMERA : null;
+            if (p == null || ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED) ok.add(res);
+        }
+        try {
+            if (ok.isEmpty()) req.deny();
+            else req.grant(ok.toArray(new String[0]));
+        } catch (IllegalStateException ignored) {
+            // the page already gave up on this request (navigated / call ended)
         }
     }
 
