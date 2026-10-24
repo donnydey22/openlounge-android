@@ -32,6 +32,24 @@ object StreamCallProfile {
     const val ADAPT_RTT_MS = 450.0
     const val MAX_TURN_TTL_S = 600
 
+    /** The droplet (DigitalOcean UDP server; coturn + mediasoup). */
+    const val UDP_HOST = "165.232.137.71"
+
+    /** The lane's full ladder, UDP layer first: direct UDP (host/srflx via STUN on the droplet) → TURN UDP 3478 →
+     *  TURN TCP 3478 → TURNS 443. TURN entries only with a short-lived login from the server. */
+    fun laneIce(host: String = UDP_HOST, tlsHost: String = "turn.openlounge.app", username: String? = null, credential: String? = null): List<Ice> {
+        val out = mutableListOf(Ice(listOf("stun:$host:3478")))
+        if (username != null && credential != null) {
+            out += Ice(listOf("turn:$host:3478?transport=udp"), username, credential)
+            out += Ice(listOf("turn:$host:3478?transport=tcp"), username, credential)
+            out += Ice(listOf("turns:$tlsHost:443?transport=tcp"), username, credential)
+        }
+        return orderUdpFirst(out)
+    }
+
+    /** no server ICE yet: direct UDP only (never a relay without a login) */
+    fun defaultIce(): List<Ice> = laneIce()
+
     /** UDP-first rank of an ICE url: STUN/direct 0, TURN UDP 1, TURN TCP 2, TURNS 3. */
     fun urlRank(url: String): Int = when {
         url.startsWith("stun:") -> 0

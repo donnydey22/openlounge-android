@@ -213,6 +213,11 @@ class StreamCallSession(
         }
     }
 
+    fun setMuted(m: Boolean) { audioTrack?.setEnabled(!m) }
+
+    /** page / network-change request: same backoff-limited every-drop restart */
+    fun restartIceNow(why: String) = restartIce(why)
+
     fun close(reason: String = "hangup") {
         if (closed) return
         closed = true

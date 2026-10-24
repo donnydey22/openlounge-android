@@ -30,7 +30,7 @@ public class SessionBridgeNativeMediaTest {
     @Test public void nativeMediaShimContract() {
         String s = SessionBridge.NATIVE_MEDIA_SHIM;
         assertTrue(s.contains("window.OpenLoungeNativeMedia=Object.freeze("));
-        assertTrue(s.contains("capabilities:Object.freeze(['nativeMedia'])"));
+        assertTrue(s.contains("capabilities:Object.freeze(['streamP2p'])"));
         assertTrue(s.contains("platform:'android'"));
         assertTrue(s.contains("N.nativeMediaCmd(id,JSON.stringify(cmd||{}))"));
         assertTrue(s.contains("N.nativeMsReply(String(id),ok===true,"));

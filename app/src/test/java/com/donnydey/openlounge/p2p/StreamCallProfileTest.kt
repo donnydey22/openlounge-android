@@ -56,4 +56,14 @@ class StreamCallProfileTest {
         assertEquals(60_000L, StreamCallProfile.udpProbeDelay(1000))
         assertTrue(StreamCallProfile.isRelayed("relay", "host")); assertFalse(StreamCallProfile.isRelayed("srflx", "host"))
     }
+
+    @Test fun androidLaneUdpLayerFirst() {
+        val l = StreamCallProfile.laneIce(username = "1:u", credential = "c").map { it.urls[0] }
+        assertEquals(listOf("stun:165.232.137.71:3478", "turn:165.232.137.71:3478?transport=udp",
+            "turn:165.232.137.71:3478?transport=tcp", "turns:turn.openlounge.app:443?transport=tcp"), l)
+        assertEquals(listOf("stun:165.232.137.71:3478"), StreamCallProfile.defaultIce().map { it.urls[0] })
+        // the ranking never lets a TCP/TLS relay ahead of a UDP entry, whatever order the server sends
+        val shuffled = StreamCallProfile.orderUdpFirst(StreamCallProfile.laneIce(username = "1:u", credential = "c").reversed())
+        assertEquals(l, shuffled.map { it.urls[0] })
+    }
 }
