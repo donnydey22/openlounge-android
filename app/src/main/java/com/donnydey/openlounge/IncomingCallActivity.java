@@ -104,6 +104,9 @@ public class IncomingCallActivity extends Activity {
     private void accept() {
         String id = callId;
         CallNotifications.cancel(this, id);
+        // Android 12+: the call FGS must be up before the WebView connects; starting it from this user tap (visible
+        // activity) is exempt from background-start limits and lets Android 14+ grant the microphone type.
+        CallService.start(getApplicationContext(), id, getIntent().getStringExtra(CallNotifications.EXTRA_CALLER), false, true);
         Intent open = new Intent(this, MainActivity.class)
                 .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 .putExtra(OpenLoungeMessagingService.EXTRA_OPEN_PATH, "/call/" + id + "?accept=1");
@@ -113,7 +116,9 @@ public class IncomingCallActivity extends Activity {
                 // locked phone: ask for unlock, then open the call (MainActivity isn't shown over the lock screen)
                 km.requestDismissKeyguard(this, new KeyguardManager.KeyguardDismissCallback() {
                     @Override public void onDismissSucceeded() { open(open); }
-                    @Override public void onDismissCancelled() { open(open); }
+                    // FX-062: never open the call page behind the lock screen. MainActivity is not shown over the
+                    // keyguard, so its mic/camera dialogs could not be tapped. Stay on the call screen; Accept retries.
+                    @Override public void onDismissCancelled() { }
                     @Override public void onDismissError() { open(open); }
                 });
                 return;

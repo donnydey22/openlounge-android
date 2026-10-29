@@ -2,6 +2,8 @@ plugins {
     id 'com.android.application'
     // FCM: reads app/google-services.json (Firebase project open-lounge-2aabd)
     id 'com.google.gms.google-services'
+    // 0.3.16 native call media (NativeCallMedia.kt / NativeLiveKit.kt)
+    id 'org.jetbrains.kotlin.android'
 }
 
 // Release signing — two sources, first match wins:
@@ -29,9 +31,25 @@ android {
         applicationId "com.donnydey.openlounge"
         minSdk 24
         targetSdk 36
-        versionCode 19
-        versionName "0.3.7"
+        versionCode 37
+        versionName "0.3.21"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField "boolean", "STAGING", "false"
+        buildConfigField "String", "STAGING_HOST", "\"\""
+    }
+
+    // prod = the store/website app (openlounge.app). staging = test builds pointed at the native-media staging
+    // service (default URL + trusted origin); never shipped as the production APK.
+    flavorDimensions "env"
+    productFlavors {
+        prod { dimension "env" }
+        staging {
+            dimension "env"
+            versionNameSuffix "-staging"
+            buildConfigField "boolean", "STAGING", "true"
+            buildConfigField "String", "STAGING_HOST", "\"openlounge-staging-native-media-staging.up.railway.app\""
+            ndk { abiFilters "arm64-v8a", "armeabi-v7a" } // keeps the test APK under hosting size limits
+        }
     }
 
     signingConfigs {
@@ -75,7 +93,14 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
 
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
     packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
         resources {
             excludes += '/META-INF/{AL2.0,LGPL2.1}'
         }
@@ -99,7 +124,13 @@ dependencies {
     // opt-in biometric app lock (BiometricLock)
     implementation 'androidx.biometric:biometric:1.1.0'
 
+    // Keiko's call lane (Donny, Oct 24 2026 5:50 AM MST): Stream WebRTC Android 1.3.10 (m125, ChatSwap 167 parity).
+    // Replaces libmediasoup-android/libwebrtc-ktx (crow-misia org.webrtc) and livekit-android in the call path.
+    implementation 'io.getstream:stream-webrtc-android:1.3.10'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'
+
     testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.json:json:20240303' // JVM org.json for MsJsonTest (android.jar's org.json is a stub in unit tests); test-only, not in the APK
     androidTestImplementation 'androidx.test:runner:1.6.2'
     androidTestImplementation 'androidx.test.ext:junit:1.2.1'
 }

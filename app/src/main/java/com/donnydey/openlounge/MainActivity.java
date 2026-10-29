@@ -63,9 +63,12 @@ import java.util.EnumSet;
 import android.media.AudioDeviceInfo;
 import android.media.AudioDeviceCallback;
 import android.media.AudioManager;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import java.util.List;
 
-public class MainActivity extends AppCompatActivity implements SessionBridge.Host {
+public class MainActivity extends AppCompatActivity implements SessionBridge.Host, NativeCallMedia.Host {
     private NativePhoneAuth phoneAuth;
 
     @Override
@@ -97,25 +100,40 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     private volatile boolean pageLoaded = false;
     /** Main activity is resumed; only then may an FCM payload be exposed to the already-visible WebView. */
     private volatile boolean activityForeground = false;
+
+    /** true while the main activity is resumed (CallService: Android 14+ microphone FGS type needs a visible start) */
+    static boolean isVisible() {
+        MainActivity a = live.get();
+        return a != null && a.activityForeground;
+    }
     private boolean callAudioOn = false;
     private boolean callSpeaker = true;
+    /** explicit route pick from the call screen; null = automatic (headset first, else speaker/earpiece toggle) */
+    private CallAudioRoute.Device callUserPick = null;
+    private String lastRouteReport = null;
     private String callId = null;
     private String callName = null;
     private AudioManager callAudioManager;
+    private CallWakeLocks callWake;
     private int modeBeforeCall = AudioManager.MODE_NORMAL;
     private boolean callDeviceCallbackRegistered = false;
     private final AudioDeviceCallback callDeviceCallback = new AudioDeviceCallback() {
+        // a device connected/disconnected: new situation → automatic routing again (and the page announces the change)
         @Override public void onAudioDevicesAdded(AudioDeviceInfo[] addedDevices) {
-            handler.post(() -> { if (callAudioOn) applyCallRoute(); });
+            handler.post(() -> { if (callAudioOn) { callUserPick = null; applyCallRoute(); } });
         }
         @Override public void onAudioDevicesRemoved(AudioDeviceInfo[] removedDevices) {
-            handler.post(() -> { if (callAudioOn) applyCallRoute(); });
+            handler.post(() -> { if (callAudioOn) { callUserPick = null; applyCallRoute(); } });
         }
     };
     private int loadRetries = 0;
     private final Runnable retryLoad = this::loadConfiguredUrl;
 
     private PermissionRequest pendingWebPerm;
+    /** FX-062: WebView mic + camera requests arrive back to back on call accept. One system dialog at a time, in order;
+     *  a second request used to overwrite pendingWebPerm and relaunch the launcher over an open dialog, so the first
+     *  (microphone) request was never answered, its getUserMedia hung and the call sat on "Connecting". */
+    private final java.util.ArrayDeque<PermissionRequest> webPermQueue = new java.util.ArrayDeque<>();
     private ValueCallback<Uri[]> fileCallback;
 
     private final ActivityResultLauncher<String[]> permissionLauncher =
@@ -131,14 +149,11 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                     }
                 }
                 if (callAudioOn) applyCallRoute();
-                if (pendingWebPerm != null) {
-                    if (granted) {
-                        pendingWebPerm.grant(pendingWebPerm.getResources());
-                    } else {
-                        pendingWebPerm.deny();
-                    }
-                    pendingWebPerm = null;
-                }
+                PermissionRequest req = pendingWebPerm;
+                pendingWebPerm = null;
+                if (req != null) answerWebPermission(req);
+                // FX-062: next queued WebView request (mic, then camera) only after this dialog closed
+                handler.post(this::nextWebPermission);
             });
 
     /** deep link from a tapped notification, applied once the WebView is ready */
@@ -190,6 +205,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         super.onCreate(savedInstanceState);
         live = new WeakReference<>(this);
         setContentView(R.layout.activity_main);
+        watchNetworkHandoff();
         EdgeToEdge.apply(this, findViewById(R.id.root)); // 0.3.0: target SDK 36 (edge-to-edge enforced on Android 15+)
         // 0.3.0: predictive back (default on for target 36) never calls onBackPressed(); use the dispatcher
         getOnBackPressedDispatcher().addCallback(this, new androidx.activity.OnBackPressedCallback(true) {
@@ -258,6 +274,9 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
 
         // Durable native token store mirrored by src/lib/session.ts (window.OpenLoungeNative)
         sessionBridge = new SessionBridge(this, this);
+        // 0.3.16 native call media: process-wide (survives page reloads); this activity is its page relay
+        NativeCallMedia.init(this);
+        NativeCallMedia.setHost(this);
         // native feel: theme-colored background (no white flash before the page paints), no overscroll glow
         boolean dark = (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK) != Configuration.UI_MODE_NIGHT_NO;
         webView.setBackgroundColor(Color.parseColor(dark ? "#0b0b0d" : "#f4f3ee"));
@@ -269,6 +288,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                         "https://openlounge.app", "https://www.openlounge.app", Prefs.LEGACY_RAILWAY_URL));
                 androidx.webkit.WebViewCompat.addDocumentStartJavaScript(webView, SessionBridge.BIOMETRICS_SHIM, origins);
                 androidx.webkit.WebViewCompat.addDocumentStartJavaScript(webView, SessionBridge.CALLS_FLAG, origins);
+                androidx.webkit.WebViewCompat.addDocumentStartJavaScript(webView, SessionBridge.NATIVE_MEDIA_SHIM, origins);
             } catch (Exception ignored) {
             }
         }
@@ -320,6 +340,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 loadRetries = 0;
                 view.evaluateJavascript(SessionBridge.BIOMETRICS_SHIM, null); // no-op if already defined
                 view.evaluateJavascript(SessionBridge.CALLS_FLAG, null);
+                view.evaluateJavascript(SessionBridge.NATIVE_MEDIA_SHIM, null);
                 pageLoaded = true;
                 showWeb();
                 launchOverlay.markReady();
@@ -418,8 +439,45 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         if (needed.isEmpty()) {
             request.grant(request.getResources());
         } else {
-            pendingWebPerm = request;
+            webPermQueue.add(request);
+            nextWebPermission();
+        }
+    }
+
+    private void nextWebPermission() {
+        if (pendingWebPerm != null) return; // a system dialog is up: wait for its result
+        PermissionRequest next;
+        while ((next = webPermQueue.poll()) != null) {
+            List<String> needed = new ArrayList<>();
+            for (String res : next.getResources()) {
+                String p = PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(res) ? Manifest.permission.RECORD_AUDIO
+                        : PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(res) ? Manifest.permission.CAMERA : null;
+                if (p != null && ContextCompat.checkSelfPermission(this, p) != PackageManager.PERMISSION_GRANTED && !needed.contains(p)) needed.add(p);
+            }
+            if (Build.VERSION.SDK_INT >= 31 && needed.contains(Manifest.permission.RECORD_AUDIO)
+                    && ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                needed.add(Manifest.permission.BLUETOOTH_CONNECT);
+            }
+            if (needed.isEmpty()) { answerWebPermission(next); continue; } // granted meanwhile by the earlier dialog
+            pendingWebPerm = next;
             permissionLauncher.launch(needed.toArray(new String[0]));
+            return;
+        }
+    }
+
+    /** Grant exactly the resources the user allowed: a denied camera keeps the call going on audio (and vice versa). */
+    private void answerWebPermission(PermissionRequest req) {
+        List<String> ok = new ArrayList<>();
+        for (String res : req.getResources()) {
+            String p = PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(res) ? Manifest.permission.RECORD_AUDIO
+                    : PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(res) ? Manifest.permission.CAMERA : null;
+            if (p == null || ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED) ok.add(res);
+        }
+        try {
+            if (ok.isEmpty()) req.deny();
+            else req.grant(ok.toArray(new String[0]));
+        } catch (IllegalStateException ignored) {
+            // the page already gave up on this request (navigated / call ended)
         }
     }
 
@@ -603,7 +661,12 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             return;
         }
         // client-side navigation keeps the socket/session alive; full load as fallback
-        String js = "(function(){try{if(window.next&&window.next.router){window.next.router.push(" + JSONObject.quote(p) + ");return 1}}catch(e){}location.assign("
+        // Accept on a warm page: accept in place (no navigation/reboot; same as iOS 0.3.11) — web __olAcceptCall
+        String acceptId = null;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("^/call/([A-Za-z0-9-]{8,64})\\?accept=1").matcher(p);
+        if (m.find()) acceptId = m.group(1);
+        String pre = acceptId == null ? "" : "try{if(window.__olAcceptCall&&window.__olAcceptCall(" + JSONObject.quote(acceptId) + "))return 1}catch(e){}";
+        String js = "(function(){" + pre + "try{if(window.next&&window.next.router){window.next.router.push(" + JSONObject.quote(p) + ");return 1}}catch(e){}location.assign("
                 + JSONObject.quote(p) + ");return 1})()";
         webView.evaluateJavascript(js, null);
     }
@@ -976,6 +1039,36 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         return a.pageLoaded;
     }
 
+    // ---- 0.3.16 native call media host (NativeCallMedia.Host + SessionBridge.Host.nativeMediaResolve) ----
+    @Override
+    public void nativeMediaResolve(String reqId, boolean ok, String resultJson, String error) {
+        String r = resultJson == null || resultJson.isEmpty() ? "null" : resultJson;
+        String js = "(function(){try{window.__olNativeMediaResolve&&window.__olNativeMediaResolve(" + JSONObject.quote(reqId) + ","
+                + ok + "," + r + "," + JSONObject.quote(error == null ? "" : error) + ")}catch(e){}})()";
+        handler.post(() -> { if (webView != null) webView.evaluateJavascript(js, null); });
+    }
+
+    @Override
+    public boolean relay(String id, String event, String dataJson) {
+        if (webView == null || migrating || !pageLoaded) return false;
+        webView.evaluateJavascript("(function(){try{window.__olNativeMsReq(" + JSONObject.quote(id) + "," + JSONObject.quote(event) + ","
+                + dataJson + ")}catch(e){try{window.OpenLoungeNative.nativeMsReply(" + JSONObject.quote(id) + ",false,'null','no relay')}catch(_){}}})()", null);
+        return true;
+    }
+
+    @Override
+    public void emit(String detailJson) {
+        if (webView == null || !pageLoaded) return;
+        webView.evaluateJavascript("(function(){try{window.dispatchEvent(new CustomEvent('openlounge:native-media',{detail:"
+                + detailJson + "}))}catch(e){}})()", null);
+    }
+
+    @Override
+    public void nativeCallAudio(boolean on) {
+        // media is live → communication mode + route policy now (call:ended / onDestroy still switch it off)
+        if (on) callAudio(true);
+    }
+
     @Override
     public void callMessage(String json) {
         handler.post(() -> onPageCall(json));
@@ -1014,8 +1107,10 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 // Call mode + route are applied on call:connected (CallAudioPolicy).
                 if (CallAudioPolicy.enterCommunicationModeOn(type)) callAudio(true);
                 CallService.start(this, callId, callName, false);
+                if (CallAudioPolicy.startRingbackOn(type)) ringback(true);
                 break;
             case "call:connected":
+                if (CallAudioPolicy.stopRingbackOn(type)) ringback(false);
                 // a call taking over from a room keeps the same audio session
                 if (!id.isEmpty()) {
                     CallNotifications.cancel(this, id); // answered on the page's own ring screen
@@ -1025,12 +1120,24 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 CallService.start(this, callId, callName, true);
                 break;
             case "call:ended":
+                if (CallAudioPolicy.stopRingbackOn(type)) ringback(false);
+                NativeCallMedia.closeAll(); // the only native-media teardown besides the page's op 'close'
                 if (!id.isEmpty()) CallNotifications.cancel(this, id);
                 CallService.stop(this);
                 callAudio(false);
                 callId = null;
                 callName = null;
                 unlockForCall = false; // re-enable App Lock after the call
+                break;
+            case "call:ringtonePrepare":
+                // the page is about to play the incoming ringtone: no live call → no left-over call-mode session
+                // (communication mode / voice stream made the ring thin and quiet) and the native engine stopped
+                if (CallAudioPolicy.prepareRingtoneOn(type, callId != null || roomAudioLive)) {
+                    NativeCallMedia.releaseIdle();
+                    callAudio(false);
+                    AudioManager ram = (AudioManager) getSystemService(AUDIO_SERVICE);
+                    if (ram != null) try { ram.setMode(AudioManager.MODE_NORMAL); } catch (RuntimeException ignored) {}
+                }
                 break;
             case "room:joined":
                 if (callId == null) roomAudio(true);
@@ -1041,6 +1148,9 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             case "call:audioRoute":
                 if (m.has("speaker")) {
                     callSpeaker = m.optBoolean("speaker", true);
+                    // newer pages send route (kind) + user:true for a pick from the route sheet; auto guesses clear it
+                    if (m.optBoolean("user", false) && m.has("route")) callUserPick = CallAudioRoute.fromKind(m.optString("route"));
+                    else if (!m.optBoolean("user", false)) callUserPick = null;
                     if (callAudioOn) applyCallRoute();
                 }
                 break;
@@ -1056,6 +1166,24 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
      * transient focus here at the outgoing-ring stage could leave an Android 12+ WebView's later remote player faded
      * or muted, so the wrapper deliberately manages the route but does not compete for playback focus.
      */
+    private android.media.ToneGenerator ringbackTone;
+
+    /** Outgoing ringback on the media stream (not communication mode, so the loudspeaker plays it at normal level). */
+    private void ringback(boolean on) {
+        if (on) {
+            if (ringbackTone != null) return;
+            try {
+                ringbackTone = new android.media.ToneGenerator(AudioManager.STREAM_MUSIC, 80);
+                ringbackTone.startTone(android.media.ToneGenerator.TONE_SUP_RINGTONE); // loops until stopped
+            } catch (RuntimeException e) {
+                ringbackTone = null;
+            }
+        } else if (ringbackTone != null) {
+            try { ringbackTone.stopTone(); ringbackTone.release(); } catch (RuntimeException ignored) {}
+            ringbackTone = null;
+        }
+    }
+
     private void callAudio(boolean on) {
         AudioManager am = callAudioManager;
         if (am == null) callAudioManager = am = (AudioManager) getSystemService(AUDIO_SERVICE);
@@ -1066,10 +1194,18 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 callAudioOn = true;
                 registerCallDeviceCallback(am);
                 try { am.setMode(AudioManager.MODE_IN_COMMUNICATION); } catch (RuntimeException ignored) {}
+                try {
+                    int target = CallAudioPolicy.voiceCallVolumeFloor(am.getStreamVolume(AudioManager.STREAM_VOICE_CALL), am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL));
+                    if (target >= 0) am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, target, 0);
+                } catch (RuntimeException ignored) {}
+                setVolumeControlStream(AudioManager.STREAM_VOICE_CALL); // hardware keys adjust the call level
+                if (callWake == null) callWake = new CallWakeLocks(this);
+                callWake.start(); // partial wake lock for the call; proximity follows the route below
             }
             applyCallRoute();
         } else if (callAudioOn) {
             callAudioOn = false;
+            if (callWake != null) callWake.stop();
             unregisterCallDeviceCallback(am);
             try {
                 if (Build.VERSION.SDK_INT >= 31) am.clearCommunicationDevice();
@@ -1077,7 +1213,10 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             } catch (RuntimeException ignored) {}
             try { am.setSpeakerphoneOn(false); } catch (RuntimeException ignored) {}
             try { am.setMode(modeBeforeCall); } catch (RuntimeException ignored) {}
+            setVolumeControlStream(AudioManager.USE_DEFAULT_STREAM_TYPE);
             callSpeaker = true;
+            callUserPick = null;
+            lastRouteReport = null;
         }
     }
 
@@ -1085,7 +1224,11 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
      * Rooms get the same headset policy as calls: communication mode so a wired / USB-C / Bluetooth headset's mic
      * and speaker are used together, falling back to the loudspeaker when the headset is removed.
      */
+    /** a live room owns communication mode; the ringtone prep must not reset it */
+    private boolean roomAudioLive;
+
     private void roomAudio(boolean on) {
+        roomAudioLive = on;
         if (on) {
             if (callAudioOn) return;
             callSpeaker = true;
@@ -1123,6 +1266,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             case AudioDeviceInfo.TYPE_USB_HEADSET:
             case AudioDeviceInfo.TYPE_USB_DEVICE: return CallAudioRoute.Device.USB;
             case AudioDeviceInfo.TYPE_BLUETOOTH_SCO:
+            case AudioDeviceInfo.TYPE_HEARING_AID:
             case AudioDeviceInfo.TYPE_BLE_HEADSET: return CallAudioRoute.Device.BLUETOOTH;
             default: return null;
         }
@@ -1139,10 +1283,15 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                     CallAudioRoute.Device type = routeType(d);
                     if (type != null) devices.put(type, d);
                 }
-                CallAudioRoute.Device selected = CallAudioRoute.choose(callSpeaker, devices.keySet());
+                CallAudioRoute.Device selected = CallAudioRoute.choose(callUserPick, callSpeaker, devices.keySet());
+                if (callWake != null) callWake.route(selected);
                 AudioDeviceInfo target = selected == null ? null : devices.get(selected);
                 if (target != null) am.setCommunicationDevice(target);
                 else am.clearCommunicationDevice();
+                // report what Android actually routed to (getCommunicationDevice), not just what we asked for
+                AudioDeviceInfo actual = am.getCommunicationDevice();
+                CallAudioRoute.Device actualType = routeType(actual);
+                reportCallRoute(actualType != null ? actualType : selected, actual != null ? actual : target, devices);
                 return;
             }
 
@@ -1151,7 +1300,15 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 CallAudioRoute.Device type = routeType(d);
                 if (type != null) devices.add(type);
             }
-            CallAudioRoute.Device selected = CallAudioRoute.choose(callSpeaker, devices);
+            CallAudioRoute.Device selected = CallAudioRoute.choose(callUserPick, callSpeaker, devices);
+            if (callWake != null) callWake.route(selected);
+            EnumMap<CallAudioRoute.Device, AudioDeviceInfo> legacy = new EnumMap<>(CallAudioRoute.Device.class);
+            for (AudioDeviceInfo d : am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
+                CallAudioRoute.Device type = routeType(d);
+                if (type != null && !legacy.containsKey(type)) legacy.put(type, d);
+            }
+            for (CallAudioRoute.Device t : devices) if (!legacy.containsKey(t)) legacy.put(t, null);
+            reportCallRoute(selected, selected == null ? null : legacy.get(selected), legacy);
             if (CallAudioRoute.usesLegacyBluetoothSco(selected)) {
                 am.startBluetoothSco();
                 am.setBluetoothScoOn(true);
@@ -1164,6 +1321,41 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         }
     }
 
+    private static String deviceName(CallAudioRoute.Device type, AudioDeviceInfo d) {
+        if (d == null || type == CallAudioRoute.Device.SPEAKER || type == CallAudioRoute.Device.EARPIECE) return "";
+        CharSequence n = d.getProductName();
+        String s = n == null ? "" : n.toString().trim();
+        // built-in product names are the phone model ("Pixel 8"), which reads wrong on a headset button
+        return s.equals(Build.MODEL) ? "" : (s.length() > 64 ? s.substring(0, 64) : s);
+    }
+
+    /**
+     * Tell the page the actual call route + every pickable output (Speaker / Phone / Headphones / AirPods …) as
+     * openlounge:native-audio-route, the event the iOS app already sends. Deduplicated so device callbacks don't spam.
+     */
+    private void reportCallRoute(CallAudioRoute.Device current, AudioDeviceInfo currentInfo, java.util.Map<CallAudioRoute.Device, AudioDeviceInfo> available) {
+        if (webView == null) return;
+        try {
+            JSONArray routes = new JSONArray();
+            for (java.util.Map.Entry<CallAudioRoute.Device, AudioDeviceInfo> e : available.entrySet()) {
+                String n = deviceName(e.getKey(), e.getValue());
+                routes.put(new JSONObject().put("kind", CallAudioRoute.kind(e.getKey())).put("id", CallAudioRoute.id(e.getKey(), n)).put("name", n));
+            }
+            String name = deviceName(current, currentInfo);
+            JSONObject d = new JSONObject()
+                    .put("kind", CallAudioRoute.kind(current)).put("id", CallAudioRoute.id(current, name)).put("name", name)
+                    .put("speaker", current == CallAudioRoute.Device.SPEAKER)
+                    .put("headset", current != null && current != CallAudioRoute.Device.SPEAKER && current != CallAudioRoute.Device.EARPIECE)
+                    .put("routes", routes).put("user", callUserPick != null).put("source", "android");
+            if (currentInfo != null) d.put("type", currentInfo.getType());
+            String json = d.toString();
+            if (json.equals(lastRouteReport)) return;
+            lastRouteReport = json;
+            webView.evaluateJavascript("(function(){try{window.dispatchEvent(new CustomEvent('openlounge:native-audio-route',{detail:" + json + "}))}catch(e){}})();", null);
+        } catch (Exception ignored) {
+        }
+    }
+
     @SuppressWarnings("deprecation")
     private void clearLegacySco(AudioManager am) {
         try {
@@ -1173,9 +1365,42 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         }
     }
 
+    // Wi-Fi <-> cellular handoff: tell the page so a live call restarts ICE in place on the new interface
+    // (native-only call adaptation, web netAdapt.ts). WebView's navigator.connection "change" is unreliable here.
+    private ConnectivityManager.NetworkCallback netCallback;
+    private String lastNetType = null;
+    private void watchNetworkHandoff() {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (cm == null || android.os.Build.VERSION.SDK_INT < 24) return;
+            netCallback = new ConnectivityManager.NetworkCallback() {
+                @Override public void onCapabilitiesChanged(Network n, NetworkCapabilities c) {
+                    String t = c.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ? "wifi"
+                        : c.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ? "cellular"
+                        : c.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) ? "ethernet" : "other";
+                    String key = t + ":" + n;
+                    if (key.equals(lastNetType)) return;
+                    boolean first = lastNetType == null;
+                    lastNetType = key;
+                    if (first) return;
+                    handler.post(() -> {
+                        NativeCallMedia.onNetworkChange(); // app-owned media: fresh ICE now, even mid page reload
+                        if (webView != null) webView.evaluateJavascript("try{window.__olNetworkChanged&&window.__olNetworkChanged('" + key + "')}catch(e){}", null);
+                    });
+                }
+            };
+            cm.registerDefaultNetworkCallback(netCallback);
+        } catch (RuntimeException ignored) {}
+    }
+
     @Override
     protected void onDestroy() {
+        if (netCallback != null) {
+            try { ((ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE)).unregisterNetworkCallback(netCallback); } catch (RuntimeException ignored) {}
+            netCallback = null;
+        }
         activityForeground = false;
+        if (NativeCallMedia.getHost() == this) NativeCallMedia.setHost(null);
         if (live.get() == this) live = new WeakReference<>(null);
         if (isFinishing()) {
             CallService.stop(this);
@@ -1187,6 +1412,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             ((FrameLayout) findViewById(R.id.root)).removeView(webView);
             webView.destroy();
         }
+        ringback(false);
         super.onDestroy();
     }
 }

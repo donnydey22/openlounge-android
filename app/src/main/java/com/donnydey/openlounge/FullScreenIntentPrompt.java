@@ -27,6 +27,8 @@ final class FullScreenIntentPrompt {
     private static final String TAG = "OLCalls";
     private static final String PREFS = "ol_fsi_prompt";
     private static final String KEY_SHOWN = "shown";
+    private static final String KEY_RANG_WITHOUT = "rang_without_fsi";
+    private static final String KEY_RESHOWN = "reshown";
 
     private FullScreenIntentPrompt() {}
 
@@ -40,7 +42,14 @@ final class FullScreenIntentPrompt {
     static boolean shouldShow(Context ctx) {
         if (!missing(ctx)) return false;
         if (!NotificationManagerCompat.from(ctx).areNotificationsEnabled()) return false; // no ring at all yet: not the moment
-        return !prefs(ctx).getBoolean(KEY_SHOWN, false);
+        SharedPreferences p = prefs(ctx);
+        if (!p.getBoolean(KEY_SHOWN, false)) return true;
+        // a call actually rang without the lock-screen UI: ask one more time (ever), never again after that
+        return p.getBoolean(KEY_RANG_WITHOUT, false) && !p.getBoolean(KEY_RESHOWN, false);
+    }
+
+    static void markRangWithoutFullScreen(Context ctx) {
+        prefs(ctx).edit().putBoolean(KEY_RANG_WITHOUT, true).apply();
     }
 
     private static SharedPreferences prefs(Context ctx) {
@@ -50,7 +59,9 @@ final class FullScreenIntentPrompt {
     /** Shows the one-time prompt if it applies. Returns the dialog (or null). */
     static AlertDialog maybeShow(Activity a) {
         if (a == null || a.isFinishing() || !shouldShow(a)) return null;
-        prefs(a).edit().putBoolean(KEY_SHOWN, true).apply(); // one time, whatever the answer
+        SharedPreferences p = prefs(a);
+        boolean again = p.getBoolean(KEY_SHOWN, false);
+        p.edit().putBoolean(KEY_SHOWN, true).putBoolean(KEY_RESHOWN, again || p.getBoolean(KEY_RESHOWN, false)).apply(); // at most twice ever
         Log.i(TAG, "full-screen intent prompt shown");
         return new MaterialAlertDialogBuilder(a)
                 .setTitle(R.string.fsi_prompt_title)

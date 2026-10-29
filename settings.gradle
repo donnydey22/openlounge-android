@@ -10,6 +10,11 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // LiveKit's audioswitch fork (io.livekit:livekit-android requirement) — only that group is taken from JitPack
+        maven {
+            url 'https://jitpack.io'
+            content { includeGroup 'com.github.davidliu' }
+        }
     }
 }
 rootProject.name = "OpenLounge"

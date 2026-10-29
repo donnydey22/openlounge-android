@@ -14,4 +14,28 @@ public class CallAudioPolicyTest {
         assertTrue(CallAudioPolicy.enterCommunicationModeOn("call:connected"));
     }
     @Test public void nullSafe() { assertFalse(CallAudioPolicy.enterCommunicationModeOn(null)); }
+
+    @org.junit.Test
+    public void nativeRingbackStartsOnOutgoingStopsOnConnectOrEnd() {
+        assertTrue(CallAudioPolicy.startRingbackOn("call:outgoing"));
+        assertFalse(CallAudioPolicy.startRingbackOn("call:connected"));
+        assertTrue(CallAudioPolicy.stopRingbackOn("call:connected"));
+        assertTrue(CallAudioPolicy.stopRingbackOn("call:ended"));
+        assertFalse(CallAudioPolicy.stopRingbackOn("call:outgoing"));
+    }
+
+    @Test public void ringtonePrepareOnlyWhenIdle() {
+        assertTrue(CallAudioPolicy.prepareRingtoneOn("call:ringtonePrepare", false));
+        assertFalse(CallAudioPolicy.prepareRingtoneOn("call:ringtonePrepare", true));
+        assertFalse(CallAudioPolicy.prepareRingtoneOn("call:incoming", false));
+        assertFalse(CallAudioPolicy.prepareRingtoneOn(null, false));
+    }
+
+    @Test public void voiceCallVolumeRaisedToEightyPercentNeverLowered() {
+        org.junit.Assert.assertEquals(4, CallAudioPolicy.voiceCallVolumeFloor(1, 5));
+        org.junit.Assert.assertEquals(-1, CallAudioPolicy.voiceCallVolumeFloor(4, 5));
+        org.junit.Assert.assertEquals(-1, CallAudioPolicy.voiceCallVolumeFloor(5, 5));
+        org.junit.Assert.assertEquals(6, CallAudioPolicy.voiceCallVolumeFloor(2, 7));
+        org.junit.Assert.assertEquals(-1, CallAudioPolicy.voiceCallVolumeFloor(0, 0));
+    }
 }
