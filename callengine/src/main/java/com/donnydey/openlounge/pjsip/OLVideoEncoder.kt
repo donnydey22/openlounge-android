@@ -28,7 +28,20 @@ object OLVideoSpecV2 {
   /** H.264 runs on EVERY device (spec): hardware encoder preferred, else the platform MediaCodec H.264 encoder.
    *  AV1 is hardware-only (Tensor G3+). */
   fun encoders(mime: String): List<MediaCodecInfo> = if (mime == MediaFormat.MIMETYPE_VIDEO_AVC) hwEncoders(mime).ifEmpty {
-    MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.filter { it.isEncoder && it.supportedTypes.any { t -> t.equals(mime, true) } } } else hwEncoders(mime)
+    MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.filter { it.isEncoder && it.supportedTypes.any { t -> t.equals(mime, true) } }
+      .sortedByDescending { score(it, mime) } } else hwEncoders(mime)
+
+  /** Prefer encoders whose advertised caps match the spec (CBR + Surface input), e.g. c2.android.avc.encoder over OMX.google. */
+  fun score(ci: MediaCodecInfo, mime: String): Int { val caps = ci.getCapabilitiesForType(mime)
+    var s = 0
+    if (caps.encoderCapabilities?.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR) == true) s += 2
+    if (caps.colorFormats.contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)) s += 1
+    return s }
+
+  /** Constrained Baseline when advertised, else Baseline (same no-B-frame/CAVLC constraints for our use). */
+  fun avcProfile(ci: MediaCodecInfo): Int { val pl = ci.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC).profileLevels
+    return if (pl.any { it.profile == MediaCodecInfo.CodecProfileLevel.AVCProfileConstrainedBaseline }) MediaCodecInfo.CodecProfileLevel.AVCProfileConstrainedBaseline
+      else MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline }
 
   /** Mid-range = no encoder for this mime that supports 1080p30 (hardware first). */
   fun supports1080(mime: String): Boolean = encoders(mime).any { it.getCapabilitiesForType(mime).videoCapabilities?.areSizeAndRateSupported(1920, 1080, 30.0) == true }
@@ -72,7 +85,7 @@ class OLSimulcastEncoder(val onEncoded: (layer: Int, buf: java.nio.ByteBuffer, i
           if (Build.VERSION.SDK_INT >= 29) setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
           setInteger("max-bframes", 0)
           if (Build.VERSION.SDK_INT >= 30) setInteger(MediaFormat.KEY_LATENCY, 1)
-          if (mime == MediaFormat.MIMETYPE_VIDEO_AVC) setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileConstrainedBaseline)
+          if (mime == MediaFormat.MIMETYPE_VIDEO_AVC) setInteger(MediaFormat.KEY_PROFILE, OLVideoSpecV2.avcProfile(hw))
         }
         val c = MediaCodec.createByCodecName(hw.name)
         codecs += c
@@ -80,7 +93,7 @@ class OLSimulcastEncoder(val onEncoded: (layer: Int, buf: java.nio.ByteBuffer, i
         surfaces += c.createInputSurface()
         c.start()
       }
-    } catch (e: Exception) { stop(); throw VideoConfigException("MediaCodec configure failed: ${e.message}", e) }
+    } catch (e: Exception) { stop(); throw VideoConfigException("MediaCodec configure failed (${hw.name} cbr=${OLVideoSpecV2.score(hw, mime) >= 2}): ${e.message}", e) }
     running = true
     drain = Thread({
       Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO) // high-priority send
