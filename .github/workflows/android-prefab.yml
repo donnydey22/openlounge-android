@@ -57,4 +57,4 @@ jobs:
         with: { name: pjproject-2.17-prefab-aar, path: app/libs }
       - name: guard — no WebRTC in app
         run: "! grep -rniE 'org.webrtc|stream-webrtc|livekit|mediasoup' app/build.gradle settings.gradle app/src/main/java"
-      - run: chmod +x gradlew && ./gradlew --no-daemon :app:assembleDebug :app:testDebugUnitTest 2>&1 | tail -40; test ${PIPESTATUS[0]} -eq 0
+      - run: chmod +x gradlew && ./gradlew --no-daemon :app:assembleProdDebug :app:testProdDebugUnitTest 2>&1 | tail -40; test ${PIPESTATUS[0]} -eq 0
