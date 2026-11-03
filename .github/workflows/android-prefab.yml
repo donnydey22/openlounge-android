@@ -1,0 +1,38 @@
+name: pjsip-android-prefab
+on: { push: { branches: [pjsip-rebuild] }, workflow_dispatch: {} }
+env: { NDK_VER: "27.2.12479018" }
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;$NDK_VER" >/dev/null
+      - run: git clone -q --depth 1 -b 2.17 https://github.com/pjsip/pjproject.git
+      - name: build per ABI (pjproject configure-android, reference Application.mk ABIs)
+        working-directory: pjproject
+        run: |
+          export ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$NDK_VER
+          printf '#define PJ_CONFIG_ANDROID 1\n#define PJMEDIA_HAS_SRTP 1\n#include <pj/config_site_sample.h>\n' > pjlib/include/pj/config_site.h
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            make distclean >/dev/null 2>&1 || true
+            APP_PLATFORM=android-24 TARGET_ABI=$abi ./configure-android --use-ndk-cflags >/dev/null
+            make dep >/dev/null 2>&1; make -j4 >/dev/null
+            TC=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin
+            case $abi in arm64-v8a) T=aarch64-linux-android24;; armeabi-v7a) T=armv7a-linux-androideabi24;; x86_64) T=x86_64-linux-android24;; esac
+            mkdir -p ../prefab/modules/pjproject/libs/android.$abi
+            $TC/clang --target=$T -shared -o ../prefab/modules/pjproject/libs/android.$abi/libpjproject.so \
+              -Wl,--whole-archive $(find . -path ./pjsip-apps -prune -o -name "*.a" -print | grep -v pjsua2) -Wl,--no-whole-archive -llog -lOpenSLES -lm -Wl,-z,max-page-size=16384
+            echo "{\"abi\":\"$abi\",\"api\":24,\"ndk\":27,\"stl\":\"none\"}" > ../prefab/modules/pjproject/libs/android.$abi/abi.json
+          done
+          mkdir -p ../prefab/modules/pjproject/include; for d in pjlib pjlib-util pjnath pjmedia pjsip; do cp -R $d/include/* ../prefab/modules/pjproject/include/; done
+          cp pjsip-apps/src/samples/android_sample/jni/Application.mk pjsip-apps/src/samples/android_sample/jni/Android.mk ../prefab/
+      - name: package prefab AAR
+        run: |
+          echo '{"schema_version":2,"name":"pjproject","version":"2.17.0","dependencies":[]}' > prefab/prefab.json
+          echo '{"export_libraries":[]}' > prefab/modules/pjproject/module.json
+          mkdir aar && mv prefab aar/ && cd aar
+          printf '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="app.openlounge.pjproject"><uses-sdk android:minSdkVersion="24"/></manifest>' > AndroidManifest.xml
+          echo "" > R.txt; mkdir -p tmp && (cd tmp && jar cf ../classes.jar .) && rm -r tmp
+          zip -qr ../pjproject-2.17-prefab.aar . && cd .. && unzip -l pjproject-2.17-prefab.aar | tail -15
+      - uses: actions/upload-artifact@v4
+        with: { name: pjproject-2.17-prefab-aar, path: pjproject-2.17-prefab.aar }
