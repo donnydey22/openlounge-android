@@ -29,7 +29,7 @@ jobs:
             case $abi in arm64-v8a) T=aarch64-linux-android24;; armeabi-v7a) T=armv7a-linux-androideabi24;; x86_64) T=x86_64-linux-android24;; esac
             mkdir -p ../prefab/modules/pjproject/libs/android.$abi
             $TC/clang++ --target=$T -shared -static-libstdc++ -o ../prefab/modules/pjproject/libs/android.$abi/libpjproject.so \
-              -Wl,--whole-archive $(find . -path ./pjsip-apps -prune -o -name "*.a" -print | grep -v pjsua2 | grep -v libpjsdp) -Wl,--no-whole-archive ../opus-$abi/lib/libopus.a -llog -lOpenSLES -lmediandk -landroid -lcamera2ndk -lEGL -lGLESv2 -laaudio -lm -Wl,-z,max-page-size=16384
+              -Wl,--whole-archive $(find . -path ./pjsip-apps -prune -o -name "*.a" -print | grep -v pjsua2 | grep -v libpjsdp) -Wl,--no-whole-archive ../opus-$abi/lib/libopus.a -llog -lOpenSLES -lmediandk -landroid -lcamera2ndk -lEGL -lGLESv2 -lm -Wl,-z,max-page-size=16384
             echo "{\"abi\":\"$abi\",\"api\":24,\"ndk\":27,\"stl\":\"none\"}" > ../prefab/modules/pjproject/libs/android.$abi/abi.json
           done
           mkdir -p ../prefab/modules/pjproject/include; for d in pjlib pjlib-util pjnath pjmedia pjsip; do cp -R $d/include/* ../prefab/modules/pjproject/include/; done
