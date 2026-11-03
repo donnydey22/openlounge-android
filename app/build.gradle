@@ -26,9 +26,6 @@ def hasSigning = envSigning || keystorePropsFile.exists()
 android {
     namespace 'com.donnydey.openlounge'
     compileSdk 36
-    ndkVersion '27.2.12479018'
-    buildFeatures { prefab true }
-    externalNativeBuild { cmake { path 'src/main/cpp/CMakeLists.txt'; version '3.22.1' } }
 
     defaultConfig {
         applicationId "com.donnydey.openlounge"
@@ -129,7 +126,7 @@ dependencies {
     implementation 'androidx.biometric:biometric:1.1.0'
 
     // PJSIP media engine (pjproject 2.17 prefab AAR built by .github/workflows/android-prefab.yml). No WebRTC.
-    implementation files('libs/pjproject-2.17-prefab.aar')
+    implementation project(':callengine')
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'
 
     testImplementation 'junit:junit:4.13.2'
