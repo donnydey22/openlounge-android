@@ -36,7 +36,7 @@ class SfuLegTest {
             a.getString("ssrc")!!.toLong(), a.getString("txPt")!!.toInt(), a.getString("rxPt")!!.toInt(), 440, true)
         val ssrcs = a.getString("vssrcs")!!.split(",").map { it.toLong() }.toLongArray()
         val vr = PjsipEngine.nativeSfuVideoStart(vip, a.getString("vport")!!.toInt(), a.getString("vtx")!!, a.getString("vrx")!!, ssrcs, a.getString("vpt")!!.toInt())
-        var videoError = "null"; val enc = OLSimulcastEncoder()
+        var videoError = "null"; val enc = if (a.getString("simlayers") == "small") OLSimulcastEncoder(layersOverride = listOf(OLVideoLayer(160, 90, 80_000, 15), OLVideoLayer(320, 180, 250_000, 30), OLVideoLayer(640, 360, 600_000, 30))) else OLSimulcastEncoder()
         enc.onAnnexB = { layer, au, key, ts -> PjsipEngine.nativeSfuVideoSend(layer, au, au.size, ts, key) }
         try { enc.start() } catch (e: VideoConfigException) { videoError = "\"${e.message?.replace("\"", "'")}\"" }
         val dec = OLVideoDecoder(); val running = java.util.concurrent.atomic.AtomicBoolean(true)
