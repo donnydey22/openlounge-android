@@ -31,13 +31,13 @@ JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeVide
 #include "ol_sfu.h"
 JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeSfuAudioStart(JNIEnv*e,jclass o,jstring ip,jint port,jstring tx,jstring rx,jlong ssrc,jint txPt,jint rxPt,jint toneHz,jboolean nullSnd){
   const char*a=(*e)->GetStringUTFChars(e,ip,0),*b=(*e)->GetStringUTFChars(e,tx,0),*c=(*e)->GetStringUTFChars(e,rx,0);
-  pj_thread_desc d; pj_thread_t*t; if(!pj_thread_is_registered()) pj_thread_register("jni",d,&t);
+  static __thread pj_thread_desc d; pj_thread_t*t; if(!pj_thread_is_registered()) pj_thread_register("jni",d,&t);
   if(nullSnd) pjsua_set_null_snd_dev();
   jint r=ol_sfu_audio_start(a,port,b,c,(unsigned)ssrc,txPt,rxPt,toneHz);
   (*e)->ReleaseStringUTFChars(e,ip,a); (*e)->ReleaseStringUTFChars(e,tx,b); (*e)->ReleaseStringUTFChars(e,rx,c); return r; }
 JNIEXPORT jintArray JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeSfuStats(JNIEnv*e,jclass o){
-  pj_thread_desc d; pj_thread_t*t; if(!pj_thread_is_registered()) pj_thread_register("jni",d,&t);
+  static __thread pj_thread_desc d; pj_thread_t*t; if(!pj_thread_is_registered()) pj_thread_register("jni",d,&t);
   unsigned rx=0,lost=0,tx=0; ol_sfu_stats(&rx,&lost,&tx); jint v[4]={(jint)rx,(jint)lost,(jint)tx,ol_sfu_rx_level()};
   jintArray a=(*e)->NewIntArray(e,4); (*e)->SetIntArrayRegion(e,a,0,4,v); return a; }
 JNIEXPORT void JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeSfuStop(JNIEnv*e,jclass o){
-  pj_thread_desc d; pj_thread_t*t; if(!pj_thread_is_registered()) pj_thread_register("jni",d,&t); ol_sfu_stop(); }
+  static __thread pj_thread_desc d; pj_thread_t*t; if(!pj_thread_is_registered()) pj_thread_register("jni",d,&t); ol_sfu_stop(); }
