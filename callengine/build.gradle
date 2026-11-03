@@ -20,4 +20,5 @@ android {
 dependencies {
     // pjproject 2.17 prefab AAR (built by .github/workflows/android-prefab.yml), linked + packaged via this module
     implementation files('../app/libs/pjproject-2.17-prefab.aar')
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0' // native WS signaling (CallSignalClient)
 }

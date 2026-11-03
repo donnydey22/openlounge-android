@@ -15,3 +15,15 @@ JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeOpen
   return pjsua_set_snd_dev(PJMEDIA_AUD_DEFAULT_CAPTURE_DEV,PJMEDIA_AUD_DEFAULT_PLAYBACK_DEV); }
 JNIEXPORT void JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeTeardown(JNIEnv*e,jclass o){
   pjsua_call_hangup_all(); pjsua_set_no_snd_dev(); }
+/* Video (t4464u): H.264 via MediaCodec (pjmedia and_media codec). QuickHD start burst then steady caps. */
+#if PJMEDIA_HAS_VIDEO
+static jint set_h264(int w,int h,int bps){ pj_str_t id=pj_str("H264"); pjmedia_vid_codec_param p;
+  if(pjsua_vid_codec_set_priority(&id,255)!=PJ_SUCCESS) return -1;
+  if(pjsua_vid_codec_get_param(&id,&p)!=PJ_SUCCESS) return -2;
+  p.enc_fmt.det.vid.size.w=w; p.enc_fmt.det.vid.size.h=h; p.enc_fmt.det.vid.avg_bps=bps; p.enc_fmt.det.vid.max_bps=bps;
+  return pjsua_vid_codec_set_param(&id,&p)==PJ_SUCCESS?0:-3; }
+#else
+static jint set_h264(int w,int h,int bps){ return -9; }
+#endif
+JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeVideoQuickHd(JNIEnv*e,jclass o){ return set_h264(1920,1080,2500000); }
+JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeVideoSteady(JNIEnv*e,jclass o){ return set_h264(1280,720,1200000); }
