@@ -69,10 +69,12 @@ JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeSfuV
   jint r=ol_sfu_video_send(layer,(const unsigned char*)p,len,(unsigned)ts,key?1:0); (*e)->ReleasePrimitiveArrayCritical(e,au,p,JNI_ABORT); return r; }
 /* Next received AU as [key, ts(4 BE), annexb...] or null. */
 JNIEXPORT jbyteArray JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeSfuVideoPoll(JNIEnv*e,jclass o){
+  REG();
   if (!vq_mx) return NULL; pj_mutex_lock(vq_mx); if (vq_h == vq_t) { pj_mutex_unlock(vq_mx); return NULL; }
   int n=vq[vq_h].n; jbyteArray a=(*e)->NewByteArray(e,n+5); jbyte h[5]={(jbyte)vq[vq_h].key,(jbyte)(vq[vq_h].ts>>24),(jbyte)(vq[vq_h].ts>>16),(jbyte)(vq[vq_h].ts>>8),(jbyte)vq[vq_h].ts};
   (*e)->SetByteArrayRegion(e,a,0,5,h); (*e)->SetByteArrayRegion(e,a,5,n,(const jbyte*)vq[vq_h].d); free(vq[vq_h].d); vq[vq_h].d=NULL; vq_h=(vq_h+1)%OLQ; pj_mutex_unlock(vq_mx); return a; }
 JNIEXPORT jintArray JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeSfuVideoStats(JNIEnv*e,jclass o){
+  REG();
   unsigned rp,ra,rk,rg,tp,ta[3],tk[3]; ol_sfu_video_stats(&rp,&ra,&rk,&rg,&tp,ta,tk);
   jint v[12]={(jint)rp,(jint)ra,(jint)rk,(jint)rg,(jint)tp,(jint)ta[0],(jint)ta[1],(jint)ta[2],(jint)tk[0],(jint)tk[1],(jint)tk[2],(jint)vq_drop};
   jintArray a=(*e)->NewIntArray(e,12); (*e)->SetIntArrayRegion(e,a,0,12,v); return a; }
