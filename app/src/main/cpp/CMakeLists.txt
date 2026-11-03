@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.22)
+project(olpjsip C)
+find_package(pjproject REQUIRED CONFIG)
+add_library(olpjsip SHARED olpjsip.c)
+target_compile_definitions(olpjsip PRIVATE PJ_AUTOCONF=1)
+target_link_libraries(olpjsip pjproject::pjproject log)

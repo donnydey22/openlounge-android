@@ -1,0 +1,15 @@
+package com.donnydey.openlounge.pjsip
+// Open Lounge PJSIP engine (pjproject 2.17 prefab). One path; SRTP SDES mandatory (keys only in
+// SDP a=crypto); adaptive pjmedia_jbuf (progressive discard) + Opus PLC/FEC; full teardown on every call end.
+object PjsipEngine {
+    @Volatile private var loaded = false
+    @Volatile private var started = false
+    private fun load() { if (!loaded) { System.loadLibrary("pjproject"); System.loadLibrary("olpjsip"); loaded = true } }
+    @JvmStatic external fun nativeStart(jbMinPre: Int, jbMaxPre: Int, jbMax: Int): Int
+    @JvmStatic external fun nativeOpenSound(): Int
+    @JvmStatic external fun nativeTeardown()
+    @JvmStatic fun start(): Int { load(); if (started) return 0; val r = nativeStart(1, 16, 50); started = r == 0; return r }
+    /** Called only once the ConnectionService call is active (Android's didActivate equivalent). */
+    @JvmStatic fun openSound(): Int { start(); return nativeOpenSound() }
+    @JvmStatic fun teardown() { if (started) nativeTeardown() }
+}

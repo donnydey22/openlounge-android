@@ -1,4 +1,4 @@
-name: pjsip-android-prefab
+name: pjsip-android
 on: { push: { branches: [pjsip-rebuild] }, workflow_dispatch: {} }
 env: { NDK_VER: "27.2.12479018" }
 jobs:
@@ -7,7 +7,14 @@ jobs:
     timeout-minutes: 90
     steps:
       - run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;$NDK_VER" >/dev/null
-      - run: git clone -q --depth 1 -b 2.17 https://github.com/pjsip/pjproject.git
+      - run: |
+          git clone -q --depth 1 -b 2.17 https://github.com/pjsip/pjproject.git
+          git clone -q --depth 1 -b v1.5.2 https://github.com/xiph/opus.git
+      - name: libopus per ABI
+        run: |
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            cmake -S opus -B ob-$abi -DCMAKE_TOOLCHAIN_FILE=$ANDROID_HOME/ndk/$NDK_VER/build/cmake/android.toolchain.cmake -DANDROID_ABI=$abi -DANDROID_PLATFORM=24 -DCMAKE_INSTALL_PREFIX=$PWD/opus-$abi -DOPUS_BUILD_PROGRAMS=OFF -DOPUS_BUILD_TESTING=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON >/dev/null
+            cmake --build ob-$abi --target install -j4 >/dev/null; done
       - name: build per ABI (pjproject configure-android, reference Application.mk ABIs)
         working-directory: pjproject
         run: |
@@ -15,13 +22,14 @@ jobs:
           printf '#define PJ_CONFIG_ANDROID 1\n#define PJMEDIA_HAS_SRTP 1\n#include <pj/config_site_sample.h>\n' > pjlib/include/pj/config_site.h
           for abi in arm64-v8a armeabi-v7a x86_64; do
             make distclean >/dev/null 2>&1 || true
-            APP_PLATFORM=android-24 TARGET_ABI=$abi ./configure-android --use-ndk-cflags >/dev/null
+            APP_PLATFORM=android-24 TARGET_ABI=$abi ./configure-android --use-ndk-cflags --with-opus=$PWD/../opus-$abi >/dev/null
+            grep -q 'PJMEDIA_HAS_OPUS_CODEC 1' pjmedia/include/pjmedia-codec/config_auto.h && echo "opus ON ($abi)"
             make dep >/dev/null 2>&1; make -j4 >/dev/null
             TC=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin
             case $abi in arm64-v8a) T=aarch64-linux-android24;; armeabi-v7a) T=armv7a-linux-androideabi24;; x86_64) T=x86_64-linux-android24;; esac
             mkdir -p ../prefab/modules/pjproject/libs/android.$abi
             $TC/clang --target=$T -shared -o ../prefab/modules/pjproject/libs/android.$abi/libpjproject.so \
-              -Wl,--whole-archive $(find . -path ./pjsip-apps -prune -o -name "*.a" -print | grep -v pjsua2 | grep -v libpjsdp) -Wl,--no-whole-archive -llog -lOpenSLES -lm -Wl,-z,max-page-size=16384
+              -Wl,--whole-archive $(find . -path ./pjsip-apps -prune -o -name "*.a" -print | grep -v pjsua2 | grep -v libpjsdp) -Wl,--no-whole-archive ../opus-$abi/lib/libopus.a -llog -lOpenSLES -lm -Wl,-z,max-page-size=16384
             echo "{\"abi\":\"$abi\",\"api\":24,\"ndk\":27,\"stl\":\"none\"}" > ../prefab/modules/pjproject/libs/android.$abi/abi.json
           done
           mkdir -p ../prefab/modules/pjproject/include; for d in pjlib pjlib-util pjnath pjmedia pjsip; do cp -R $d/include/* ../prefab/modules/pjproject/include/; done
@@ -36,3 +44,17 @@ jobs:
           zip -qr ../pjproject-2.17-prefab.aar . && cd .. && unzip -l pjproject-2.17-prefab.aar | tail -15
       - uses: actions/upload-artifact@v4
         with: { name: pjproject-2.17-prefab-aar, path: pjproject-2.17-prefab.aar }
+  app:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;$NDK_VER" "cmake;3.22.1" >/dev/null
+      - uses: actions/download-artifact@v4
+        with: { name: pjproject-2.17-prefab-aar, path: app/libs }
+      - name: guard — no WebRTC in app
+        run: "! grep -rniE 'org.webrtc|stream-webrtc|livekit|mediasoup' app/build.gradle settings.gradle app/src/main/java"
+      - run: chmod +x gradlew && ./gradlew --no-daemon :app:assembleDebug :app:testDebugUnitTest 2>&1 | tail -40; test ${PIPESTATUS[0]} -eq 0

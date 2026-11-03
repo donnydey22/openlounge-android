@@ -407,6 +407,9 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     }
 
     private void handleWebPermission(PermissionRequest request) {
+        // PJSIP rebuild: the WebView renders UI only and never captures mic/camera.
+        request.deny();
+        if (true) return;
         // only our own site may use the mic/camera
         if (request.getOrigin() == null || !isConfiguredHost(request.getOrigin())) {
             request.deny();
