@@ -57,4 +57,13 @@ jobs:
         with: { name: pjproject-2.17-prefab-aar, path: app/libs }
       - name: guard — no WebRTC in app
         run: "! grep -rniE 'org.webrtc|stream-webrtc|livekit|mediasoup' app/build.gradle settings.gradle app/src/main/java"
-      - run: chmod +x gradlew && ./gradlew --no-daemon :app:assembleProdDebug :app:testProdDebugUnitTest 2>&1 | tail -40; test ${PIPESTATUS[0]} -eq 0
+      - run: chmod +x gradlew && ./gradlew --no-daemon --no-build-cache --rerun-tasks :app:assembleProdDebug :app:testProdDebugUnitTest 2>&1 | tail -40; test ${PIPESTATUS[0]} -eq 0
+      - name: fail if any WebRTC / libpeerconnection symbol, import or dependency remains
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon -q :app:dependencies --configuration prodDebugRuntimeClasspath > deps.txt
+          ! grep -iE "webrtc|peerconnection|livekit|mediasoup" deps.txt
+          APK=$(find app/build/outputs/apk -name "*.apk" | head -1); mkdir x && cd x && unzip -q ../$APK
+          ! ls lib/*/ | grep -iE "webrtc|peerconnection|jingle"
+          ! (for f in lib/*/*.so; do $ANDROID_HOME/ndk/$NDK_VER/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm -D "$f" 2>/dev/null; done; strings classes*.dex) | grep -iE "org/webrtc|org\.webrtc|peerconnection"
+          echo "APK clean: $(ls lib/*/)"

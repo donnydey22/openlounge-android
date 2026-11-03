@@ -407,9 +407,43 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     }
 
     private void handleWebPermission(PermissionRequest request) {
-        // PJSIP rebuild: the WebView renders UI only — no mic/camera capture, no getUserMedia grants.
-        request.deny();
+        // only our own site may use the mic/camera
+        if (request.getOrigin() == null || !isConfiguredHost(request.getOrigin())) {
+            request.deny();
+            return;
+        }
+        List<String> androidPerms = new ArrayList<>();
+        boolean wantsRoomAudio = false;
+        for (String res : request.getResources()) {
+            if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(res)) {
+                androidPerms.add(Manifest.permission.RECORD_AUDIO);
+                // Headset mics (BT SCO / LE audio) need BLUETOOTH_CONNECT at runtime on Android 12+.
+                if (Build.VERSION.SDK_INT >= 31) androidPerms.add(Manifest.permission.BLUETOOTH_CONNECT);
+                wantsRoomAudio = true;
+            } else if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(res)) {
+                androidPerms.add(Manifest.permission.CAMERA);
+            }
+        }
+        if (wantsRoomAudio && callId == null) roomAudio(true);
+        wantsRoomAudio = false;
+        if (androidPerms.isEmpty()) {
+            request.grant(request.getResources());
+            return;
+        }
+        List<String> needed = new ArrayList<>();
+        for (String p : androidPerms) {
+            if (ContextCompat.checkSelfPermission(this, p) != PackageManager.PERMISSION_GRANTED) {
+                needed.add(p);
+            }
+        }
+        if (needed.isEmpty()) {
+            request.grant(request.getResources());
+        } else {
+            webPermQueue.add(request);
+            nextWebPermission();
+        }
     }
+
     private void nextWebPermission() {
         if (pendingWebPerm != null) return; // a system dialog is up: wait for its result
         PermissionRequest next;
