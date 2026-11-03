@@ -79,3 +79,5 @@ JNIEXPORT jintArray JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativ
   jint v[12]={(jint)rp,(jint)ra,(jint)rk,(jint)rg,(jint)tp,(jint)ta[0],(jint)ta[1],(jint)ta[2],(jint)tk[0],(jint)tk[1],(jint)tk[2],(jint)vq_drop};
   jintArray a=(*e)->NewIntArray(e,12); (*e)->SetIntArrayRegion(e,a,0,12,v); return a; }
 JNIEXPORT void JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeSfuVideoStop(JNIEnv*e,jclass o){ REG(); ol_sfu_video_stop(); ol_sfu_video_set_sink(NULL,NULL); vq_clear(); }
+/* PLI/FIR from the SFU since the last poll, as a per-layer bitmask; the encoder answers with an immediate IDR. */
+JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeSfuVideoTakeKeyReq(JNIEnv*e,jclass o){ (void)e;(void)o; return (jint)ol_sfu_video_take_keyreq(); }

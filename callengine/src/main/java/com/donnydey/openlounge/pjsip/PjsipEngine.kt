@@ -20,6 +20,7 @@ object PjsipEngine {
     @JvmStatic external fun nativeSfuVideoPoll(): ByteArray? // [key, ts BE x4, annexB...]
     @JvmStatic external fun nativeSfuVideoStats(): IntArray // rxPkt, rxAu, rxKey, rxGap, txPkt, txAu0..2, txKey0..2, queueDrop
     @JvmStatic external fun nativeSfuVideoStop()
+    @JvmStatic external fun nativeSfuVideoTakeKeyReq(): Int
     fun ensureLoaded() = load()
     /** QuickHD: 1080p/2.5 Mbps for the first 4 s of a video call, then 720p/1.2 Mbps. */
     @JvmStatic fun startVideoBurst() { start(); nativeVideoQuickHd()

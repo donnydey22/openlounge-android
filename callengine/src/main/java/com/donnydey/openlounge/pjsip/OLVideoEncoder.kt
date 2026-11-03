@@ -69,6 +69,9 @@ class OLSimulcastEncoder(val onEncoded: (layer: Int, buf: java.nio.ByteBuffer, i
   private val codecs = ArrayList<MediaCodec>()
   val surfaces = ArrayList<Surface>()
   private var drain: Thread? = null
+  private var keyReq = 0
+  /** Per-layer PLI/FIR bitmask source (default: the native SFU video leg). */
+  var keyReqSource: () -> Int = { runCatching { PjsipEngine.nativeSfuVideoTakeKeyReq() }.getOrDefault(0) }
   @Volatile private var running = false
   /** 3 = all encoder hints accepted; lower = hints the encoder rejected were dropped (reported by the harness). */
   var hintLevel = 3
@@ -104,7 +107,16 @@ class OLSimulcastEncoder(val onEncoded: (layer: Int, buf: java.nio.ByteBuffer, i
     drain = Thread({
       Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO) // high-priority send
       val info = MediaCodec.BufferInfo()
+      val lastSync = LongArray(codecs.size)
       while (running) for ((i, c) in codecs.withIndex()) {
+        // Keyframes: answer SFU PLI/FIR with an IDR now, and force one every KEYFRAME_S as a floor (OMX.google.h264 and
+        // some HW encoders ignore KEY_I_FRAME_INTERVAL for Surface input; a new consumer would otherwise wait forever).
+        if (i == 0) keyReq = keyReq or keyReqSource()
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (keyReq and (1 shl i) != 0 || now - lastSync[i] >= OLVideoSpecV2.KEYFRAME_S * 1000L) {
+          keyReq = keyReq and (1 shl i).inv(); lastSync[i] = now
+          runCatching { c.setParameters(android.os.Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) }) }
+        }
         val ix = try { c.dequeueOutputBuffer(info, 2_000) } catch (_: IllegalStateException) { -1 }
         if (ix == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED && csd[i] == null) csdFrom(c.outputFormat)?.let { csd[i] = it }
         if (ix >= 0) { c.getOutputBuffer(ix)?.let { onEncoded(i, it, info); annexB(i, it, info) }; c.releaseOutputBuffer(ix, false) }
