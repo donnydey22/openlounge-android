@@ -25,8 +25,13 @@ object OLVideoSpecV2 {
     return m.groupValues[1].toInt() >= 3
   }
 
-  /** Mid-range = no hardware encoder for this mime that supports 1080p30. */
-  fun supports1080(mime: String): Boolean = hwEncoders(mime).any { it.getCapabilitiesForType(mime).videoCapabilities?.areSizeAndRateSupported(1920, 1080, 30.0) == true }
+  /** H.264 runs on EVERY device (spec): hardware encoder preferred, else the platform MediaCodec H.264 encoder.
+   *  AV1 is hardware-only (Tensor G3+). */
+  fun encoders(mime: String): List<MediaCodecInfo> = if (mime == MediaFormat.MIMETYPE_VIDEO_AVC) hwEncoders(mime).ifEmpty {
+    MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.filter { it.isEncoder && it.supportedTypes.any { t -> t.equals(mime, true) } } } else hwEncoders(mime)
+
+  /** Mid-range = no encoder for this mime that supports 1080p30 (hardware first). */
+  fun supports1080(mime: String): Boolean = encoders(mime).any { it.getCapabilitiesForType(mime).videoCapabilities?.areSizeAndRateSupported(1920, 1080, 30.0) == true }
 
   fun hwEncoders(mime: String): List<MediaCodecInfo> = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.filter {
     it.isEncoder && it.supportedTypes.any { t -> t.equals(mime, true) } && (Build.VERSION.SDK_INT < 29 || (it.isHardwareAccelerated && !it.isSoftwareOnly))
@@ -41,7 +46,11 @@ object OLVideoSpecV2 {
 }
 
 /** One hardware MediaCodec per layer, each with its own input Surface. Throws VideoConfigException -> fail the call. */
-class OLSimulcastEncoder(val onEncoded: (layer: Int, buf: java.nio.ByteBuffer, info: MediaCodec.BufferInfo) -> Unit) {
+class OLSimulcastEncoder(val onEncoded: (layer: Int, buf: java.nio.ByteBuffer, info: MediaCodec.BufferInfo) -> Unit = { _, _, _ -> }) {
+  /** Annex-B AU per layer (SPS/PPS prepended on keyframes), 90 kHz ts -> PjsipEngine.nativeSfuVideoSend. */
+  var onAnnexB: ((layer: Int, au: ByteArray, key: Boolean, ts90k: Long) -> Unit)? = null
+  private val csd = arrayOfNulls<ByteArray>(3)
+  val encoderName: String get() = OLVideoSpecV2.encoders(mime).firstOrNull()?.name ?: "none"
   val mime = OLVideoSpecV2.mime()
   val layers = OLVideoSpecV2.layers(mime)
   private val codecs = ArrayList<MediaCodec>()
@@ -50,7 +59,7 @@ class OLSimulcastEncoder(val onEncoded: (layer: Int, buf: java.nio.ByteBuffer, i
   @Volatile private var running = false
 
   fun start() {
-    val hw = OLVideoSpecV2.hwEncoders(mime).firstOrNull() ?: throw VideoConfigException("no hardware $mime encoder")
+    val hw = OLVideoSpecV2.encoders(mime).firstOrNull() ?: throw VideoConfigException("no $mime encoder")
     try {
       for (l in layers) {
         val f = MediaFormat.createVideoFormat(mime, l.width, l.height).apply {
@@ -78,9 +87,17 @@ class OLSimulcastEncoder(val onEncoded: (layer: Int, buf: java.nio.ByteBuffer, i
       val info = MediaCodec.BufferInfo()
       while (running) for ((i, c) in codecs.withIndex()) {
         val ix = try { c.dequeueOutputBuffer(info, 2_000) } catch (_: IllegalStateException) { -1 }
-        if (ix >= 0) { c.getOutputBuffer(ix)?.let { onEncoded(i, it, info) }; c.releaseOutputBuffer(ix, false) }
+        if (ix >= 0) { c.getOutputBuffer(ix)?.let { onEncoded(i, it, info); annexB(i, it, info) }; c.releaseOutputBuffer(ix, false) }
       }
     }, "ol-video-send").also { it.start() }
+  }
+
+  private fun annexB(i: Int, b: java.nio.ByteBuffer, info: MediaCodec.BufferInfo) {
+    val cb = onAnnexB ?: return; if (info.size <= 0) return
+    val d = ByteArray(info.size); b.position(info.offset); b.get(d, 0, info.size)
+    if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) { csd[i] = d; return } // MediaCodec AVC output is Annex-B
+    val key = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
+    cb(i, if (key && csd[i] != null) csd[i]!! + d else d, key, info.presentationTimeUs * 9 / 100)
   }
 
   /** Teardown on every call end. */
@@ -90,4 +107,28 @@ class OLSimulcastEncoder(val onEncoded: (layer: Int, buf: java.nio.ByteBuffer, i
     for (s in surfaces) runCatching { s.release() }
     codecs.clear(); surfaces.clear()
   }
+}
+
+/** H.264 decode of Annex-B AUs via MediaCodec (ByteBuffer output). Counts frames, errors and non-black frames. */
+class OLVideoDecoder {
+  private var c: MediaCodec? = null
+  @Volatile var decoded = 0; @Volatile var errors = 0; @Volatile var nonBlack = 0; @Volatile var firstAtMs = 0L
+  private var gotKey = false
+  fun decode(au: ByteArray, key: Boolean, ptsUs: Long) {
+    if (c == null) { if (!key) return
+      try { c = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).apply { configure(MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, 1280, 720), null, null, 0); start() } }
+      catch (e: Exception) { errors++; return } }
+    if (key) gotKey = true; if (!gotKey) return
+    val d = c!!
+    try {
+      val ix = d.dequeueInputBuffer(10_000); if (ix >= 0) { d.getInputBuffer(ix)!!.apply { clear(); put(au) }; d.queueInputBuffer(ix, 0, au.size, ptsUs, 0) }
+      val info = MediaCodec.BufferInfo()
+      while (true) { val ox = d.dequeueOutputBuffer(info, 0); if (ox < 0) break
+        if (info.size > 0) { decoded++; if (firstAtMs == 0L) firstAtMs = System.currentTimeMillis()
+          if (decoded % 10 == 1) { val ob = d.getOutputBuffer(ox)!!; var sum = 0L; var n = 0; val lim = minOf(info.size, 1280 * 720)
+            var k = info.offset; while (k < info.offset + lim) { sum += (ob.get(k).toInt() and 0xff); n++; k += 97 }; if (n > 0 && sum / n > 16) nonBlack++ } }
+        d.releaseOutputBuffer(ox, false) }
+    } catch (e: Exception) { errors++ }
+  }
+  fun close() { c?.let { runCatching { it.stop() }; runCatching { it.release() } }; c = null }
 }

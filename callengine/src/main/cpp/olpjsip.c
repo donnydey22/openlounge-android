@@ -45,3 +45,35 @@ JNIEXPORT jintArray JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativ
   jintArray a=(*e)->NewIntArray(e,4); (*e)->SetIntArrayRegion(e,a,0,4,v); return a; }
 JNIEXPORT void JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeSfuStop(JNIEnv*e,jclass o){
   static __thread pj_thread_desc d; pj_thread_t*t; if(!pj_thread_is_registered()) pj_thread_register("jni",d,&t); ol_sfu_stop(); }
+/* Video spec v2 leg (ol_sfu_video.c): own transport/SRTP key/3 SSRCs. Received AUs are queued here and polled from
+   Kotlin (decoder thread), so the pjmedia rx thread never attaches to the JVM. */
+#include <string.h>
+#include <stdlib.h>
+#include "ol_sfu_video.h"
+#define OLQ 64
+static struct { unsigned char *d; int n, key; unsigned ts; } vq[OLQ]; static int vq_h, vq_t; static pj_mutex_t *vq_mx; static unsigned vq_drop;
+#define REG() static __thread pj_thread_desc d_; pj_thread_t*t_; if(!pj_thread_is_registered()) pj_thread_register("jni",d_,&t_)
+static void vq_sink(void *u, const unsigned char *a, int n, int key, unsigned ts) { (void)u; pj_mutex_lock(vq_mx);
+  int nx = (vq_t + 1) % OLQ; if (nx == vq_h) { free(vq[vq_h].d); vq[vq_h].d = NULL; vq_h = (vq_h + 1) % OLQ; vq_drop++; }
+  vq[vq_t].d = malloc(n); memcpy(vq[vq_t].d, a, n); vq[vq_t].n = n; vq[vq_t].key = key; vq[vq_t].ts = ts; vq_t = nx; pj_mutex_unlock(vq_mx); }
+static void vq_clear(void) { if (!vq_mx) return; pj_mutex_lock(vq_mx); while (vq_h != vq_t) { free(vq[vq_h].d); vq[vq_h].d = NULL; vq_h = (vq_h + 1) % OLQ; } vq_drop = 0; pj_mutex_unlock(vq_mx); }
+JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeSfuVideoStart(JNIEnv*e,jclass o,jstring ip,jint port,jstring tx,jstring rx,jlongArray ssrcs,jint pt){
+  REG(); if (!vq_mx) pj_mutex_create_simple(pjsua_pool_create("olvq", 512, 512), "olvq", &vq_mx); vq_clear();
+  const char*a=(*e)->GetStringUTFChars(e,ip,0),*b=(*e)->GetStringUTFChars(e,tx,0),*c=(*e)->GetStringUTFChars(e,rx,0);
+  jsize n=(*e)->GetArrayLength(e,ssrcs); jlong v[3]={0}; if(n>3)n=3; (*e)->GetLongArrayRegion(e,ssrcs,0,n,v); unsigned s[3]={(unsigned)v[0],(unsigned)v[1],(unsigned)v[2]};
+  ol_sfu_video_set_sink(vq_sink, NULL);
+  jint r=ol_sfu_video_start(a,port,b,c,s,n,pt);
+  (*e)->ReleaseStringUTFChars(e,ip,a); (*e)->ReleaseStringUTFChars(e,tx,b); (*e)->ReleaseStringUTFChars(e,rx,c); return r; }
+JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeSfuVideoSend(JNIEnv*e,jclass o,jint layer,jbyteArray au,jint len,jlong ts,jboolean key){
+  REG(); jbyte*p=(*e)->GetPrimitiveArrayCritical(e,au,0); if(!p) return -1;
+  jint r=ol_sfu_video_send(layer,(const unsigned char*)p,len,(unsigned)ts,key?1:0); (*e)->ReleasePrimitiveArrayCritical(e,au,p,JNI_ABORT); return r; }
+/* Next received AU as [key, ts(4 BE), annexb...] or null. */
+JNIEXPORT jbyteArray JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeSfuVideoPoll(JNIEnv*e,jclass o){
+  if (!vq_mx) return NULL; pj_mutex_lock(vq_mx); if (vq_h == vq_t) { pj_mutex_unlock(vq_mx); return NULL; }
+  int n=vq[vq_h].n; jbyteArray a=(*e)->NewByteArray(e,n+5); jbyte h[5]={(jbyte)vq[vq_h].key,(jbyte)(vq[vq_h].ts>>24),(jbyte)(vq[vq_h].ts>>16),(jbyte)(vq[vq_h].ts>>8),(jbyte)vq[vq_h].ts};
+  (*e)->SetByteArrayRegion(e,a,0,5,h); (*e)->SetByteArrayRegion(e,a,5,n,(const jbyte*)vq[vq_h].d); free(vq[vq_h].d); vq[vq_h].d=NULL; vq_h=(vq_h+1)%OLQ; pj_mutex_unlock(vq_mx); return a; }
+JNIEXPORT jintArray JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeSfuVideoStats(JNIEnv*e,jclass o){
+  unsigned rp,ra,rk,rg,tp,ta[3],tk[3]; ol_sfu_video_stats(&rp,&ra,&rk,&rg,&tp,ta,tk);
+  jint v[12]={(jint)rp,(jint)ra,(jint)rk,(jint)rg,(jint)tp,(jint)ta[0],(jint)ta[1],(jint)ta[2],(jint)tk[0],(jint)tk[1],(jint)tk[2],(jint)vq_drop};
+  jintArray a=(*e)->NewIntArray(e,12); (*e)->SetIntArrayRegion(e,a,0,12,v); return a; }
+JNIEXPORT void JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeSfuVideoStop(JNIEnv*e,jclass o){ REG(); ol_sfu_video_stop(); ol_sfu_video_set_sink(NULL,NULL); vq_clear(); }

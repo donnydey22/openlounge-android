@@ -93,7 +93,7 @@ jobs:
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
-      - name: android<->browser audio cells (emulator, real engine, real mediasoup PlainTransport)
+      - name: android<->browser audio + video cells (emulator, real engine + product MediaCodec codec, real mediasoup PlainTransport)
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 30
@@ -101,7 +101,7 @@ jobs:
           target: google_apis
           disable-animations: true
           emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot
-          script: adb install -r -t $(find callengine/build/outputs/apk/androidTest -name "*.apk" | head -1) && cd ol && PHONE=android CELL_SECONDS=30 node tests/pjsip-matrix/run-phone.mjs
+          script: adb install -r -t $(find callengine/build/outputs/apk/androidTest -name "*.apk" | head -1) && cd ol && PHONE=android MEDIA=audio,video CELL_SECONDS=30 node tests/pjsip-matrix/run-phone.mjs
       - if: always()
         uses: actions/upload-artifact@v4
         with: { name: matrix-android, path: ol/tests/pjsip-matrix/results }

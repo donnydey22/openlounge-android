@@ -14,6 +14,12 @@ object PjsipEngine {
     @JvmStatic external fun nativeSfuAudioStart(ip: String, port: Int, txKeyB64: String, rxKeyB64: String, ssrc: Long, txPt: Int, rxPt: Int, toneHz: Int, nullSnd: Boolean): Int
     @JvmStatic external fun nativeSfuStats(): IntArray // rxPkt, rxLost, txPkt, rxLevel
     @JvmStatic external fun nativeSfuStop()
+    // Video spec v2 leg (ol_sfu_video.c): own "video" PlainTransport, own SRTP key, 3 simulcast SSRCs
+    @JvmStatic external fun nativeSfuVideoStart(ip: String, port: Int, txKeyB64: String, rxKeyB64: String, ssrcs: LongArray, pt: Int): Int
+    @JvmStatic external fun nativeSfuVideoSend(layer: Int, annexB: ByteArray, len: Int, ts90k: Long, key: Boolean): Int
+    @JvmStatic external fun nativeSfuVideoPoll(): ByteArray? // [key, ts BE x4, annexB...]
+    @JvmStatic external fun nativeSfuVideoStats(): IntArray // rxPkt, rxAu, rxKey, rxGap, txPkt, txAu0..2, txKey0..2, queueDrop
+    @JvmStatic external fun nativeSfuVideoStop()
     fun ensureLoaded() = load()
     /** QuickHD: 1080p/2.5 Mbps for the first 4 s of a video call, then 720p/1.2 Mbps. */
     @JvmStatic fun startVideoBurst() { start(); nativeVideoQuickHd()
