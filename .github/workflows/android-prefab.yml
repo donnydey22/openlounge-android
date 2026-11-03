@@ -67,3 +67,41 @@ jobs:
           ! ls lib/*/ | grep -iE "webrtc|peerconnection|jingle"
           ! (for f in lib/*/*.so; do $ANDROID_HOME/ndk/$NDK_VER/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm -D "$f" 2>/dev/null; done; strings classes*.dex) | grep -iE "org/webrtc|org\.webrtc|peerconnection"
           echo "APK clean: $(ls lib/*/)"
+  emulator-matrix:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with: { repository: donnydey22/openlounge, ref: pjsip-rebuild, path: ol }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: mymindstorm/setup-emsdk@v14
+        with: { version: 3.1.74, actions-cache-folder: "" }
+      - run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;$NDK_VER" "cmake;3.22.1" >/dev/null
+      - uses: actions/download-artifact@v4
+        with: { name: pjproject-2.17-prefab-aar, path: app/libs }
+      - name: build instrumented test APK (x86_64 engine)
+        run: chmod +x gradlew && ./gradlew --no-daemon --no-build-cache :callengine:assembleDebugAndroidTest 2>&1 | tail -20; test ${PIPESTATUS[0]} -eq 0
+      - name: CI stack deps (wasm browser peer, mediasoup worker)
+        working-directory: ol
+        run: wasm-call/build.sh && for d in media-sfu ws-media-relay tests/pjsip-matrix; do (cd $d && npm install --no-audit --no-fund); done
+      - name: enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+      - name: android<->browser audio cells (emulator, real engine, real mediasoup PlainTransport)
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot
+          script: adb install -r -t $(find callengine/build/outputs/apk/androidTest -name "*.apk" | head -1) && cd ol && PHONE=android CELL_SECONDS=30 node tests/pjsip-matrix/run-phone.mjs
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: matrix-android, path: ol/tests/pjsip-matrix/results }

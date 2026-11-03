@@ -10,6 +10,11 @@ object PjsipEngine {
     @JvmStatic external fun nativeTeardown()
     @JvmStatic external fun nativeVideoQuickHd(): Int
     @JvmStatic external fun nativeVideoSteady(): Int
+    // Phone -> mediasoup PlainTransport audio leg (SDES keys base64, AES_CM_128_HMAC_SHA1_80). toneHz>0 = CI test tone.
+    @JvmStatic external fun nativeSfuAudioStart(ip: String, port: Int, txKeyB64: String, rxKeyB64: String, ssrc: Long, txPt: Int, rxPt: Int, toneHz: Int, nullSnd: Boolean): Int
+    @JvmStatic external fun nativeSfuStats(): IntArray // rxPkt, rxLost, txPkt, rxLevel
+    @JvmStatic external fun nativeSfuStop()
+    fun ensureLoaded() = load()
     /** QuickHD: 1080p/2.5 Mbps for the first 4 s of a video call, then 720p/1.2 Mbps. */
     @JvmStatic fun startVideoBurst() { start(); nativeVideoQuickHd()
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ nativeVideoSteady() }, 4000) }
