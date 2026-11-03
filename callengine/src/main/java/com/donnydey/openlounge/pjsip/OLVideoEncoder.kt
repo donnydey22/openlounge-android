@@ -108,12 +108,14 @@ class OLSimulcastEncoder(val onEncoded: (layer: Int, buf: java.nio.ByteBuffer, i
       Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO) // high-priority send
       val info = MediaCodec.BufferInfo()
       val lastSync = LongArray(codecs.size)
+      // Software OMX.google.h264 (emulator) can't afford 3 IDRs/s at 30 fps; PLI still gets an immediate IDR there.
+      val floorMs = if (encoderName.startsWith("OMX.google") || encoderName.startsWith("c2.android")) 2000L else OLVideoSpecV2.KEYFRAME_S * 1000L
       while (running) for ((i, c) in codecs.withIndex()) {
         // Keyframes: answer SFU PLI/FIR with an IDR now, and force one every KEYFRAME_S as a floor (OMX.google.h264 and
         // some HW encoders ignore KEY_I_FRAME_INTERVAL for Surface input; a new consumer would otherwise wait forever).
         if (i == 0) keyReq = keyReq or keyReqSource()
         val now = android.os.SystemClock.elapsedRealtime()
-        if (keyReq and (1 shl i) != 0 || now - lastSync[i] >= OLVideoSpecV2.KEYFRAME_S * 1000L) {
+        if (keyReq and (1 shl i) != 0 || now - lastSync[i] >= floorMs) {
           keyReq = keyReq and (1 shl i).inv(); lastSync[i] = now
           runCatching { c.setParameters(android.os.Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) }) }
         }
