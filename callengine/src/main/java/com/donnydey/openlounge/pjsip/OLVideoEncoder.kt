@@ -106,6 +106,7 @@ class OLSimulcastEncoder(val onEncoded: (layer: Int, buf: java.nio.ByteBuffer, i
       val info = MediaCodec.BufferInfo()
       while (running) for ((i, c) in codecs.withIndex()) {
         val ix = try { c.dequeueOutputBuffer(info, 2_000) } catch (_: IllegalStateException) { -1 }
+        if (ix == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED && csd[i] == null) csdFrom(c.outputFormat)?.let { csd[i] = it }
         if (ix >= 0) { c.getOutputBuffer(ix)?.let { onEncoded(i, it, info); annexB(i, it, info) }; c.releaseOutputBuffer(ix, false) }
       }
     }, "ol-video-send").also { it.start() }
@@ -115,8 +116,23 @@ class OLSimulcastEncoder(val onEncoded: (layer: Int, buf: java.nio.ByteBuffer, i
     val cb = onAnnexB ?: return; if (info.size <= 0) return
     val d = ByteArray(info.size); b.position(info.offset); b.get(d, 0, info.size)
     if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) { csd[i] = d; return } // MediaCodec AVC output is Annex-B
-    val key = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
-    cb(i, if (key && csd[i] != null) csd[i]!! + d else d, key, info.presentationTimeUs * 9 / 100)
+    // Some encoders (OMX.google.h264 on the emulator) don't flag every IDR or repeat SPS/PPS in-band; the browser decoder
+    // then fails with "non-existing PPS 0". Detect IDR from the bitstream and make sure SPS+PPS precede it.
+    val types = nalTypes(d)
+    val key = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0 || 5 in types
+    val c = csd[i]
+    cb(i, if (key && c != null && 7 !in types) c + d else d, key, info.presentationTimeUs * 9 / 100)
+  }
+
+  private fun nalTypes(a: ByteArray): Set<Int> { val t = HashSet<Int>(); var k = 0
+    while (k + 3 < a.size) { if (a[k].toInt() == 0 && a[k + 1].toInt() == 0 && a[k + 2].toInt() == 1) { t += a[k + 3].toInt() and 0x1f; k += 3 } else k++ }
+    return t }
+
+  /** csd-0 (SPS) + csd-1 (PPS) from the output format, for encoders that never emit a CODEC_CONFIG buffer. */
+  private fun csdFrom(f: MediaFormat): ByteArray? { val out = java.io.ByteArrayOutputStream()
+    for (k in listOf("csd-0", "csd-1")) { val b = f.getByteBuffer(k) ?: continue; val x = ByteArray(b.remaining()); b.duplicate().get(x)
+      if (x.size < 4 || !(x[0].toInt() == 0 && x[1].toInt() == 0)) out.write(byteArrayOf(0, 0, 0, 1)); out.write(x) }
+    return out.toByteArray().takeIf { it.isNotEmpty() }
   }
 
   /** Teardown on every call end. */
