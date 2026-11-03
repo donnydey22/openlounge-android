@@ -70,30 +70,34 @@ class OLSimulcastEncoder(val onEncoded: (layer: Int, buf: java.nio.ByteBuffer, i
   val surfaces = ArrayList<Surface>()
   private var drain: Thread? = null
   @Volatile private var running = false
+  /** 3 = all encoder hints accepted; lower = hints the encoder rejected were dropped (reported by the harness). */
+  var hintLevel = 3
 
   fun start() {
     val hw = OLVideoSpecV2.encoders(mime).firstOrNull() ?: throw VideoConfigException("no $mime encoder")
     try {
-      for (l in layers) {
-        val f = MediaFormat.createVideoFormat(mime, l.width, l.height).apply {
-          setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-          setInteger(MediaFormat.KEY_BIT_RATE, l.bps)
-          // CBR per spec wherever the encoder advertises it; encoders without CBR (e.g. OMX.google.h264 on API 30 emulators /
-          // devices with no HW AVC) reject the key with 0x80001001, so they keep their default rate control at the same target bitrate.
-          if (OLVideoSpecV2.score(hw, mime) >= 2) setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
-          setInteger(MediaFormat.KEY_FRAME_RATE, l.fps)
-          setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, OLVideoSpecV2.KEYFRAME_S)
-          setInteger(MediaFormat.KEY_PRIORITY, 0) // realtime
-          if (Build.VERSION.SDK_INT >= 29) setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
-          setInteger("max-bframes", 0)
-          if (Build.VERSION.SDK_INT >= 30) setInteger(MediaFormat.KEY_LATENCY, 1)
-          if (mime == MediaFormat.MIMETYPE_VIDEO_AVC) setInteger(MediaFormat.KEY_PROFILE, OLVideoSpecV2.avcProfile(hw))
+      for ((li, l) in layers.withIndex()) {
+        // Spec keys (bitrate, keyframe interval, no B-frames, Surface input) are always set. Latency/priority/profile are
+        // encoder hints: some encoders (OMX.google.h264 on API 30) reject them with 0x80001001, so drop hints step by step.
+        var last: Exception? = null; var ok = false
+        for (hints in 3 downTo 0) {
+          val f = MediaFormat.createVideoFormat(mime, l.width, l.height).apply {
+            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+            setInteger(MediaFormat.KEY_BIT_RATE, l.bps)
+            // CBR per spec wherever the encoder advertises it; encoders without CBR keep default rate control at the same target.
+            if (OLVideoSpecV2.score(hw, mime) >= 2) setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+            setInteger(MediaFormat.KEY_FRAME_RATE, l.fps)
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, OLVideoSpecV2.KEYFRAME_S)
+            if (Build.VERSION.SDK_INT >= 29) setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+            if (hints >= 3 && Build.VERSION.SDK_INT >= 30) setInteger(MediaFormat.KEY_LATENCY, 1)
+            if (hints >= 2) setInteger(MediaFormat.KEY_PRIORITY, 0) // realtime
+            if (hints >= 1 && mime == MediaFormat.MIMETYPE_VIDEO_AVC) setInteger(MediaFormat.KEY_PROFILE, OLVideoSpecV2.avcProfile(hw))
+          }
+          val c = MediaCodec.createByCodecName(hw.name)
+          try { c.configure(f, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE) } catch (e: Exception) { last = e; c.release(); continue }
+          codecs += c; surfaces += c.createInputSurface(); c.start(); hintLevel = minOf(hintLevel, hints); ok = true; break
         }
-        val c = MediaCodec.createByCodecName(hw.name)
-        codecs += c
-        c.configure(f, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        surfaces += c.createInputSurface()
-        c.start()
+        if (!ok) throw IllegalStateException("layer $li ${l.width}x${l.height}: ${last?.message}", last)
       }
     } catch (e: Exception) { stop(); throw VideoConfigException("MediaCodec configure failed (${hw.name} cbr=${OLVideoSpecV2.score(hw, mime) >= 2}): ${e.message}", e) }
     running = true
