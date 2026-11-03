@@ -72,6 +72,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
+      - name: free runner disk (emulator userdata needs ~7.4 GB)
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift /usr/local/share/boost /opt/hostedtoolcache/CodeQL /usr/local/julia* || true; df -h / | tail -1
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with: { repository: donnydey22/openlounge, ref: pjsip-rebuild, path: ol }
