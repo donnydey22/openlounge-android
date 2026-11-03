@@ -78,7 +78,9 @@ class OLSimulcastEncoder(val onEncoded: (layer: Int, buf: java.nio.ByteBuffer, i
         val f = MediaFormat.createVideoFormat(mime, l.width, l.height).apply {
           setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
           setInteger(MediaFormat.KEY_BIT_RATE, l.bps)
-          setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+          // CBR per spec wherever the encoder advertises it; encoders without CBR (e.g. OMX.google.h264 on API 30 emulators /
+          // devices with no HW AVC) reject the key with 0x80001001, so they keep their default rate control at the same target bitrate.
+          if (OLVideoSpecV2.score(hw, mime) >= 2) setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
           setInteger(MediaFormat.KEY_FRAME_RATE, l.fps)
           setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, OLVideoSpecV2.KEYFRAME_S)
           setInteger(MediaFormat.KEY_PRIORITY, 0) // realtime
