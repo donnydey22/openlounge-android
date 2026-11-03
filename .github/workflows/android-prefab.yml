@@ -19,7 +19,7 @@ jobs:
         working-directory: pjproject
         run: |
           export ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$NDK_VER
-          printf '#define PJ_CONFIG_ANDROID 1\n#define PJMEDIA_HAS_SRTP 1\n#include <pj/config_site_sample.h>\n' > pjlib/include/pj/config_site.h
+          printf '#define PJ_CONFIG_ANDROID 1\n#define PJMEDIA_HAS_SRTP 1\n#define PJMEDIA_HAS_VIDEO 1\n#define PJMEDIA_HAS_ANDROID_MEDIACODEC 1\n#include <pj/config_site_sample.h>\n' > pjlib/include/pj/config_site.h
           for abi in arm64-v8a armeabi-v7a x86_64; do
             make distclean >/dev/null 2>&1 || true
             APP_PLATFORM=android-24 TARGET_ABI=$abi ./configure-android --use-ndk-cflags --with-opus=$PWD/../opus-$abi >/dev/null

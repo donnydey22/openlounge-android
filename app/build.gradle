@@ -2,7 +2,7 @@ plugins {
     id 'com.android.application'
     // FCM: reads app/google-services.json (Firebase project open-lounge-2aabd)
     id 'com.google.gms.google-services'
-    // 0.3.16 native call media (NativeCallMedia.kt / NativeLiveKit.kt)
+    // native call media: NativeCallMedia.kt -> PJSIP engine
     id 'org.jetbrains.kotlin.android'
 }
 
