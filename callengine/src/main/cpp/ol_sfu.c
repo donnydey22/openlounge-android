@@ -36,7 +36,7 @@ int ol_sfu_audio_start(const char *ip, int port, const char *tx_b64, const char 
   { /* OPUS_PIN: one fixed Opus profile on every leg (matches media-sfu plain.mjs): 48 kHz mono, 20 ms, inband FEC on,
        expected loss 20 % (FEC kicks in under loss), VBR, PLC on. fmtp pinned both ways. */
     pjmedia_codec_opus_config oc; if (pjmedia_codec_opus_get_config(&oc) == PJ_SUCCESS) { oc.sample_rate = 48000; oc.channel_cnt = 1;
-      oc.frm_ptime = 20; oc.packet_loss = 20; oc.cbr = PJ_FALSE; oc.bit_rate = 32000; pjmedia_codec_opus_set_default_param(&oc, si.param); }
+      oc.frm_ptime = 20; oc.packet_loss = 20; oc.cbr = PJ_FALSE; oc.bit_rate = 64000; /* Android: 64 kbps (Donny 11/4) */ pjmedia_codec_opus_set_default_param(&oc, si.param); }
     si.param->setting.plc = 1; si.param->setting.vad = 0; si.param->setting.frm_per_pkt = 1;
     static const char *k[] = { "useinbandfec", "minptime", "stereo", "maxplaybackrate" }, *v[] = { "1", "10", "0", "48000" };
     pjmedia_codec_fmtp *f[2] = { &si.param->setting.enc_fmtp, &si.param->setting.dec_fmtp };

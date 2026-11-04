@@ -5,7 +5,7 @@ static void srtp_mandatory(pjsua_acc_config*a){ a->use_srtp=PJMEDIA_SRTP_MANDATO
 JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeStart(JNIEnv*e,jclass o,jint mn,jint mx,jint jm){
   pjsua_config c; pjsua_media_config m; pjsua_config_default(&c); pjsua_media_config_default(&m);
   m.jb_init=-1; m.jb_min_pre=mn; m.jb_max_pre=mx; m.jb_max=jm; m.jb_discard_algo=PJMEDIA_JB_DISCARD_PROGRESSIVE;
-  m.no_vad=1; m.clock_rate=48000;
+  m.no_vad=1; m.clock_rate=48000; m.ec_tail_len=200; /* explicit 200 ms echo tail */
   if(pjsua_create()!=PJ_SUCCESS) return -1;
   if(pjsua_init(&c,NULL,&m)!=PJ_SUCCESS) return -2;
   /* pjsua_acc_add asserts without a SIP transport (signaling is our WS, not SIP): bind a loopback-only, ephemeral
