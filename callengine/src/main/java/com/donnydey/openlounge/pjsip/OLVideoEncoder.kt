@@ -59,12 +59,12 @@ object OLVideoSpecV2 {
 }
 
 /** One hardware MediaCodec per layer, each with its own input Surface. Throws VideoConfigException -> fail the call. */
-class OLSimulcastEncoder(val onEncoded: (layer: Int, buf: java.nio.ByteBuffer, info: MediaCodec.BufferInfo) -> Unit = { _, _, _ -> }, layersOverride: List<OLVideoLayer>? = null) {
+class OLSimulcastEncoder(val onEncoded: (layer: Int, buf: java.nio.ByteBuffer, info: MediaCodec.BufferInfo) -> Unit = { _, _, _ -> }, layersOverride: List<OLVideoLayer>? = null, forceH264: Boolean = false) {
   /** Annex-B AU per layer (SPS/PPS prepended on keyframes), 90 kHz ts -> PjsipEngine.nativeSfuVideoSend. */
   var onAnnexB: ((layer: Int, au: ByteArray, key: Boolean, ts90k: Long) -> Unit)? = null
   private val csd = arrayOfNulls<ByteArray>(3)
   val encoderName: String get() = OLVideoSpecV2.encoders(mime).firstOrNull()?.name ?: "none"
-  val mime = OLVideoSpecV2.mime()
+  val mime = if (forceH264) MediaFormat.MIMETYPE_VIDEO_AVC else OLVideoSpecV2.mime() // SFU calls: H.264 only
   val layers = layersOverride ?: OLVideoSpecV2.layers(mime) // override: CI emulator only (software encoder)
   private val codecs = ArrayList<MediaCodec>()
   val surfaces = ArrayList<Surface>()

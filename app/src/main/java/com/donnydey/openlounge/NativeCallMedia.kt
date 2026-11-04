@@ -17,13 +17,17 @@ object NativeCallMedia {
         fun relay(id: String, event: String, dataJson: String): Boolean
         fun emit(detailJson: String)
         fun nativeCallAudio(on: Boolean)
+        /** show/hide the native remote + local video tiles under the (transparent) WebView */
+        fun nativeCallVideo(on: Boolean) {}
     }
 
     @JvmStatic @Volatile var host: Host? = null
     private val main = Handler(Looper.getMainLooper())
     @Volatile private var active = false
 
-    @JvmStatic fun init(ctx: Context) {}
+    private var appCtx: Context? = null
+    @JvmStatic fun init(ctx: Context) { appCtx = ctx.applicationContext }
+    @Volatile private var videoOn = false
 
     @JvmStatic fun handle(cmdJson: String, done: (Boolean, String?, String?) -> Unit) {
         val op = runCatching { JSONObject(cmdJson).optString("op") }.getOrDefault("")
@@ -40,8 +44,18 @@ object NativeCallMedia {
             }
             // Option B: the page's existing authenticated socket runs call:* (start/accept/decline/hangup + push);
             // at answer the call screen sends {op:"connect", callId} with the ms:* relay installed -> SFU audio leg.
-            "connect" -> { val id = JSONObject(cmdJson).optString("callId"); if (id.isEmpty()) return done(false, null, "callId required")
-                callId = id; requestSfu(id) { r, err -> if (r == 0) done(true, JSONObject().put("engine", "pjsip").toString(), null) else done(false, null, err ?: "pjsip start $r") } }
+            "connect" -> { val c = JSONObject(cmdJson); val id = c.optString("callId"); if (id.isEmpty()) return done(false, null, "callId required")
+                val wantVideo = c.optBoolean("video") && c.optBoolean("nativeVideo")
+                callId = id; requestSfu(id) { r, err ->
+                    if (r != 0) return@requestSfu done(false, null, err ?: "pjsip start $r")
+                    done(true, JSONObject().put("engine", "pjsip").put("video", wantVideo).toString(), null)
+                    if (wantVideo) requestVideo(id, true) } }
+            // camera on/off/flip; the first "on" in an audio call upgrades it (opens the video leg)
+            "camera" -> { val c = JSONObject(cmdJson); val on = c.optBoolean("on"); val face = c.optString("facing", "user")
+                val id = callId
+                if (on && !videoOn && id != null) { requestVideo(id, true, face); return done(true, "true", null) }
+                main.post { NativeCallVideo.camera(on, face) { ok, e -> done(ok, ok.toString(), e) } } }
+            "videoStats" -> { val v = NativeCallVideo.stats(); done(true, org.json.JSONArray().apply { v.forEach { put(it) } }.put(NativeCallVideo.rxFrames).put(NativeCallVideo.txFrames).toString(), null) }
             "mute" -> { val m = runCatching { JSONObject(cmdJson).optBoolean("muted") }.getOrDefault(false)
                 val r = runCatching { PjsipEngine.nativeSfuSetMute(m) }.getOrDefault(-1); done(r >= 0, (r >= 0).toString(), if (r < 0) "mute failed" else null) }
             "end" -> { callId = null; closeAll(); done(true, "true", null) }
@@ -101,6 +115,30 @@ object NativeCallMedia {
                     host?.emit(JSONObject().put("type", "pjsip:audio").put("start", r).toString()) } } } } } }
     }
 
+    /** Video leg (ol_sfu_video.c): own "video" PlainTransport + SRTP key, 2 simulcast SSRCs, H.264 PT 102. */
+    private fun requestVideo(id: String, camOn: Boolean, face: String = "user") {
+        if (videoOn) return; videoOn = true
+        val vKey = newKey(); val base = 300000L + java.security.SecureRandom().nextInt(1_000_000)
+        val ssrcs = LongArray(NativeCallVideo.LAYERS.size) { base + it * 2 }
+        val d = { JSONObject().put("callId", id).put("purpose", "video") }
+        val vfail = { step: String, e: String? -> videoOn = false; fail("video-$step", e) }
+        rpc("ms:plain:create", d()) { ok, c, e -> if (!ok || c == null) return@rpc vfail("create", e)
+          val ip = c.optString("ip"); val port = c.optInt("port"); val rx = c.optJSONObject("srtpParameters")?.optString("keyBase64").orEmpty()
+          rpc("ms:plain:connect", d().put("srtpParameters", JSONObject().put("cryptoSuite", "AES_CM_128_HMAC_SHA1_80").put("keyBase64", vKey))) { ok2, _, e2 ->
+            if (!ok2) return@rpc vfail("connect", e2)
+            main.post {
+              val r = appCtx?.let { NativeCallVideo.start(it, ip, port, vKey, rx, ssrcs, 102) } ?: -1
+              if (r != 0) return@post vfail("start", "ol_sfu_video_start $r")
+              host?.nativeCallVideo(true)
+              NativeCallVideo.onFirstRemoteFrame = { host?.emit(JSONObject().put("state", "remote-video").put("type", "pjsip:video").toString()) }
+              val ssrcArr = org.json.JSONArray().apply { ssrcs.forEach { put(it) } }
+              rpc("ms:plain:produce", d().put("kind", "video").put("ssrcs", ssrcArr).put("payloadType", 102).put("codec", "h264").put("platform", "android")) { ok3, _, e3 ->
+                if (!ok3) return@rpc vfail("produce", e3)
+                if (camOn) main.post { NativeCallVideo.camera(true, face) { cok, ce -> if (!cok) fail("camera", ce) } }
+                rpc("ms:plain:consume", d()) { _, _, _ -> } // remote video arrives on the same leg; the SFU PLIs for a keyframe
+              } } } }
+    }
+
     private fun onSignal(m: JSONObject) {
         when (m.optString("t")) {
             "call:accepted" -> { val id = m.optString("callId"); callId = id; requestSfu(id) }
@@ -116,7 +154,7 @@ object NativeCallMedia {
         val r = PjsipEngine.nativeSfuAudioStart(l.ip, l.port, l.tx, l.rx, l.ssrc, l.txPt, l.rxPt, 0, false)
         host?.emit(JSONObject().put("type", "pjsip:netchange").put("restart", r).toString())
     }
-    @JvmStatic fun closeAll() = main.post { leg = null; runCatching { PjsipEngine.nativeSfuStop() }; PjsipEngine.teardown(); if (active) { active = false; host?.nativeCallAudio(false) } }
+    @JvmStatic fun closeAll() = main.post { if (videoOn) { videoOn = false; NativeCallVideo.stop(); host?.nativeCallVideo(false) }; leg = null; runCatching { PjsipEngine.nativeSfuStop() }; PjsipEngine.teardown(); if (active) { active = false; host?.nativeCallAudio(false) } }
     @JvmStatic fun isActive(): Boolean = active
     @JvmStatic fun releaseIdle() { PjsipEngine.teardown() }
 }

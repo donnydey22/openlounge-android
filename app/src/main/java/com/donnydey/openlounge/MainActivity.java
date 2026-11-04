@@ -232,6 +232,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         launchOverlay.start();
 
         webView = findViewById(R.id.webview);
+        installCallVideoViews();
         setupPanel = findViewById(R.id.setup_panel);
         loadingPanel = findViewById(R.id.loading_panel);
         errorPanel = findViewById(R.id.error_panel);
@@ -1061,6 +1062,44 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         if (webView == null || !pageLoaded) return;
         webView.evaluateJavascript("(function(){try{window.dispatchEvent(new CustomEvent('openlounge:native-media',{detail:"
                 + detailJson + "}))}catch(e){}})()", null);
+    }
+
+    // ---- pjsip-rebuild in-app video: remote full-screen + local PiP TextureViews under a transparent WebView ----
+    private android.view.TextureView remoteVideo, localVideo;
+    private Integer savedWebBg;
+    private void installCallVideoViews() {
+        FrameLayout root = findViewById(R.id.root);
+        if (root == null || webView == null) return;
+        remoteVideo = new android.view.TextureView(this);
+        localVideo = new android.view.TextureView(this);
+        float d = getResources().getDisplayMetrics().density;
+        FrameLayout.LayoutParams pip = new FrameLayout.LayoutParams((int) (110 * d), (int) (160 * d), android.view.Gravity.TOP | android.view.Gravity.END);
+        pip.setMargins(0, (int) (96 * d), (int) (16 * d), 0);
+        int at = root.indexOfChild(webView);
+        root.addView(remoteVideo, at, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        root.addView(localVideo, at + 1, pip);
+        localVideo.setScaleX(-1f); // selfie mirror
+        remoteVideo.setVisibility(View.GONE);
+        localVideo.setVisibility(View.GONE);
+        NativeCallVideo.INSTANCE.setRemote(remoteVideo);
+        NativeCallVideo.INSTANCE.setLocal(localVideo);
+    }
+
+    @Override
+    public void nativeCallVideo(boolean on) {
+        handler.post(() -> {
+            if (remoteVideo == null || webView == null) return;
+            if (on && checkSelfPermission(android.Manifest.permission.CAMERA) != android.content.pm.PackageManager.PERMISSION_GRANTED)
+                requestPermissions(new String[]{android.Manifest.permission.CAMERA}, 0x0C4);
+            int v = on ? View.VISIBLE : View.GONE;
+            remoteVideo.setVisibility(v);
+            localVideo.setVisibility(v);
+            if (on && savedWebBg == null) savedWebBg = webView.getSolidColor();
+            webView.setBackgroundColor(on ? android.graphics.Color.TRANSPARENT : (savedWebBg != null ? savedWebBg : android.graphics.Color.BLACK));
+            if (!on) savedWebBg = null;
+            if (on) webView.evaluateJavascript("document.documentElement.classList.add('ol-native-video')", null);
+            else webView.evaluateJavascript("document.documentElement.classList.remove('ol-native-video')", null);
+        });
     }
 
     @Override
