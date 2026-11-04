@@ -10,7 +10,7 @@ import org.json.JSONObject
 /**
  * Native call media — PJSIP only (WebRTC removed, pjsip-rebuild). Same host surface as before so MainActivity /
  * SessionBridge stay unchanged; the WebView never captures or plays call audio. SDP/SRTP signaling over the
- * existing TLS WebSocket (M4): 'open' starts the SRTP audio leg to the mediasoup PlainTransport; 'close' tears down fully.
+ * existing TLS WebSocket (M4): 'open' starts the SRTP audio leg to the SFU PlainTransport; 'close' tears down fully.
  */
 object NativeCallMedia {
     interface Host {
@@ -67,7 +67,7 @@ object NativeCallMedia {
     private fun newKey(): String { val b = ByteArray(30); java.security.SecureRandom().nextBytes(b)
         return android.util.Base64.encodeToString(b, android.util.Base64.NO_WRAP) }
 
-    /** Offer our SDES key to the mediasoup gateway; it answers with the PlainTransport ip/port and its key. */
+    /** Offer our SDES key to the SFU gateway; it answers with the PlainTransport ip/port and its key. */
     private fun requestSfu(id: String) { txKey = newKey()
         signal?.sfuPlain(id, "v=0\r\nm=audio 9 RTP/SAVP 111\r\na=rtpmap:111 opus/48000/2\r\na=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:$txKey\r\n") }
 
