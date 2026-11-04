@@ -81,7 +81,7 @@ object NativeCallMedia {
         val id = "pj${seq.incrementAndGet()}"; pending[id] = cb
         if (host?.relay(id, event, data.toString()) != true) { pending.remove(id); cb(false, null, "no relay") }
     }
-    private fun fail(step: String, e: String?) = host?.emit(JSONObject().put("type", "pjsip:error").put("step", step).put("error", e ?: "").toString())
+    private fun fail(step: String, e: String?) { host?.emit(JSONObject().put("type", "pjsip:error").put("step", step).put("error", e ?: "").toString()) }
 
     /** join -> plain:create (SFU ip/port/key) -> plain:connect (our key) -> plain:produce (our ssrc) -> plain:consume -> start leg. */
     private fun requestSfu(id: String) {
