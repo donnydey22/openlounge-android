@@ -38,11 +38,7 @@ object NativeCallMedia {
                 if (r == 0) { active = true; host?.nativeCallAudio(true); done(true, JSONObject().put("engine", "pjsip").toString(), null) }
                 else done(false, null, "pjsip audio leg start failed: $r")
             }
-            "connect" -> { val c = JSONObject(cmdJson); signal?.close()
-                signal = CallSignalClient(c.getString("url"), c.getString("token")).also { sc ->
-                    sc.onMessage = { m -> main.post { onSignal(m) } }
-                    sc.onUiEvent = { t, m -> host?.emit(JSONObject(m.toString()).put("type", t).toString()) }
-                    sc.connect() }
+            "connect" -> { val c = JSONObject(cmdJson); creds = c.getString("url") to c.getString("token"); connectSignal()
                 done(true, "true", null) }
             "call" -> { val c = JSONObject(cmdJson); done(signal?.call(c.getString("to"), c.optBoolean("video"), c.optString("route", "sfu")) == true, null, null) }
             "accept" -> { val id = JSONObject(cmdJson).getString("callId"); callId = id
@@ -55,34 +51,60 @@ object NativeCallMedia {
         }
     }
 
-    @JvmStatic fun onMsReply(id: String, ok: Boolean, resultJson: String?, error: String?) {}
+    @JvmStatic fun onMsReply(id: String, ok: Boolean, resultJson: String?, error: String?) {
+        val cb = pending.remove(id) ?: return
+        cb(ok, resultJson?.let { runCatching { JSONObject(it) }.getOrNull() }, error)
+    }
     private data class Leg(val ip: String, val port: Int, val tx: String, val rx: String, val ssrc: Long, val txPt: Int, val rxPt: Int)
     @Volatile private var leg: Leg? = null
     private fun startLeg(l: Leg): Int { PjsipEngine.start(); PjsipEngine.openSound(); leg = l
         return PjsipEngine.nativeSfuAudioStart(l.ip, l.port, l.tx, l.rx, l.ssrc, l.txPt, l.rxPt, 0, false) }
 
     @Volatile private var signal: CallSignalClient? = null
+    @Volatile private var creds: Pair<String, String>? = null // in-memory only; never logged
+    private fun connectSignal() { val (u, t) = creds ?: return; signal?.close()
+        signal = CallSignalClient(u, t).also { sc ->
+            sc.onMessage = { m -> main.post { onSignal(m) } }
+            sc.onUiEvent = { ty, m -> host?.emit(JSONObject(m.toString()).put("type", ty).toString()) }
+            sc.connect() } }
+    /** FCM call_incoming woke us: reopen the signal socket so call-signal re-delivers the ring (connected()). */
+    @JvmStatic fun onPushWake() = main.post { connectSignal() }
     @Volatile private var callId: String? = null
     private var txKey = ""
     private fun newKey(): String { val b = ByteArray(30); java.security.SecureRandom().nextBytes(b)
         return android.util.Base64.encodeToString(b, android.util.Base64.NO_WRAP) }
 
-    /** Offer our SDES key to the SFU gateway; it answers with the PlainTransport ip/port and its key. */
-    private fun requestSfu(id: String) { txKey = newKey()
-        signal?.sfuPlain(id, "v=0\r\nm=audio 9 RTP/SAVP 111\r\na=rtpmap:111 opus/48000/2\r\na=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:$txKey\r\n") }
+    // SFU PlainTransport RPCs ride the page's authenticated socket: host.relay(id, "ms:...", data) -> onMsReply.
+    private val pending = java.util.concurrent.ConcurrentHashMap<String, (Boolean, JSONObject?, String?) -> Unit>()
+    private val seq = java.util.concurrent.atomic.AtomicInteger()
+    private fun rpc(event: String, data: JSONObject, cb: (Boolean, JSONObject?, String?) -> Unit) {
+        val id = "pj${seq.incrementAndGet()}"; pending[id] = cb
+        if (host?.relay(id, event, data.toString()) != true) { pending.remove(id); cb(false, null, "no relay") }
+    }
+    private fun fail(step: String, e: String?) = host?.emit(JSONObject().put("type", "pjsip:error").put("step", step).put("error", e ?: "").toString())
+
+    /** join -> plain:create (SFU ip/port/key) -> plain:connect (our key) -> plain:produce (our ssrc) -> plain:consume -> start leg. */
+    private fun requestSfu(id: String) {
+        txKey = newKey(); val ssrc = 100000L + java.security.SecureRandom().nextInt(1_000_000)
+        val d = { JSONObject().put("callId", id) }
+        rpc("ms:join", d()) { ok, _, e -> if (!ok) return@rpc fail("join", e)
+          rpc("ms:plain:create", d()) { ok1, c, e1 -> if (!ok1 || c == null) return@rpc fail("create", e1)
+            val ip = c.optString("ip"); val port = c.optInt("port"); val rx = c.optJSONObject("srtpParameters")?.optString("keyBase64").orEmpty()
+            rpc("ms:plain:connect", d().put("srtpParameters", JSONObject().put("cryptoSuite", "AES_CM_128_HMAC_SHA1_80").put("keyBase64", txKey))) { ok2, _, e2 ->
+              if (!ok2) return@rpc fail("connect", e2)
+              rpc("ms:plain:produce", d().put("kind", "audio").put("ssrc", ssrc).put("payloadType", 111)) { ok3, _, e3 ->
+                if (!ok3) return@rpc fail("produce", e3)
+                rpc("ms:plain:consume", d()) { _, cons, _ ->
+                  val rxPt = cons?.optJSONArray("consumers")?.optJSONObject(0)?.optInt("payloadType", 111) ?: 111
+                  main.post { val r = startLeg(Leg(ip, port, txKey, rx, ssrc, 111, rxPt))
+                    if (r == 0) { active = true; host?.nativeCallAudio(true) }
+                    host?.emit(JSONObject().put("type", "pjsip:audio").put("start", r).toString()) } } } } } }
+    }
 
     private fun onSignal(m: JSONObject) {
         when (m.optString("t")) {
             "call:accepted" -> { val id = m.optString("callId"); callId = id; requestSfu(id) }
             "call:ended" -> { callId = null; closeAll() }
-            "sfu:answer", "sfu:plain" -> { val sdp = m.optString("sdp")
-                val ip = Regex("""c=IN IP[46] (\S+)""").find(sdp)?.groupValues?.get(1)
-                val port = Regex("""m=audio (\d+)""").find(sdp)?.groupValues?.get(1)?.toInt()
-                val rx = CallSignalClient.cryptoKey(sdp)
-                if (ip == null || port == null || rx == null) { host?.emit(JSONObject().put("type", "pjsip:error").put("error", "bad sfu answer").toString()); return }
-                val r = startLeg(Leg(ip, port, txKey, rx, m.optLong("ssrc", 1111L), 111, 111))
-                if (r == 0) { active = true; host?.nativeCallAudio(true) }
-                host?.emit(JSONObject().put("type", "pjsip:audio").put("start", r).toString()) }
         }
     }
 

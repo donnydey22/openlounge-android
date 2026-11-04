@@ -39,6 +39,7 @@ public class OpenLoungeMessagingService extends FirebaseMessagingService {
         // 0.3.1 native call ringing (NATIVE_SPEC.md §1/§4)
         String type = d.get("type");
         if ("call_incoming".equals(type)) {
+            NativeCallMedia.onPushWake();
             CallNotifications.onIncoming(this, d);
             return;
         }
