@@ -38,13 +38,12 @@ object NativeCallMedia {
                 if (r == 0) { active = true; host?.nativeCallAudio(true); done(true, JSONObject().put("engine", "pjsip").toString(), null) }
                 else done(false, null, "pjsip audio leg start failed: $r")
             }
-            "connect" -> { val c = JSONObject(cmdJson); creds = c.getString("url") to c.getString("token"); connectSignal()
-                done(true, "true", null) }
-            "call" -> { val c = JSONObject(cmdJson); done(signal?.call(c.getString("to"), c.optBoolean("video"), c.optString("route", "sfu")) == true, null, null) }
-            "accept" -> { val id = JSONObject(cmdJson).getString("callId"); callId = id
-                val ok = signal?.accept(id) == true; if (ok) requestSfu(id); done(ok, null, null) }
-            "reject" -> done(signal?.reject(JSONObject(cmdJson).getString("callId")) == true, null, null)
-            "end" -> { callId?.let { signal?.leave(it) }; callId = null; closeAll(); done(true, "true", null) }
+            // Option B: the page's existing authenticated socket runs call:* (start/accept/decline/hangup + push);
+            // at answer the call screen sends {op:"connect", callId} with the ms:* relay installed -> SFU audio leg.
+            "connect" -> { val id = JSONObject(cmdJson).optString("callId"); if (id.isEmpty()) return done(false, null, "callId required")
+                callId = id; requestSfu(id) { r, err -> if (r == 0) done(true, JSONObject().put("engine", "pjsip").toString(), null) else done(false, null, err ?: "pjsip start $r") } }
+            "mute" -> done(true, "true", null) // TODO engine mute JNI
+            "end" -> { callId = null; closeAll(); done(true, "true", null) }
             "stats" -> { val s = runCatching { PjsipEngine.nativeSfuStats() }.getOrNull()
                 done(true, JSONObject().put("rxPkt", s?.getOrNull(0)).put("rxLost", s?.getOrNull(1)).put("txPkt", s?.getOrNull(2)).toString(), null) }
             else -> done(false, null, "unknown op: $op")
@@ -81,23 +80,23 @@ object NativeCallMedia {
         val id = "pj${seq.incrementAndGet()}"; pending[id] = cb
         if (host?.relay(id, event, data.toString()) != true) { pending.remove(id); cb(false, null, "no relay") }
     }
-    private fun fail(step: String, e: String?) { host?.emit(JSONObject().put("type", "pjsip:error").put("step", step).put("error", e ?: "").toString()) }
+    private fun fail(step: String, e: String?, result: (Int, String?) -> Unit = { _, _ -> }) { result(-1, "$step: $e"); host?.emit(JSONObject().put("type", "pjsip:error").put("step", step).put("error", e ?: "").toString()) }
 
     /** join -> plain:create (SFU ip/port/key) -> plain:connect (our key) -> plain:produce (our ssrc) -> plain:consume -> start leg. */
-    private fun requestSfu(id: String) {
+    private fun requestSfu(id: String, result: (Int, String?) -> Unit = { _, _ -> }) {
         txKey = newKey(); val ssrc = 100000L + java.security.SecureRandom().nextInt(1_000_000)
         val d = { JSONObject().put("callId", id) }
-        rpc("ms:join", d()) { ok, _, e -> if (!ok) return@rpc fail("join", e)
-          rpc("ms:plain:create", d()) { ok1, c, e1 -> if (!ok1 || c == null) return@rpc fail("create", e1)
+        rpc("ms:join", d()) { ok, _, e -> if (!ok) return@rpc fail("join", e, result)
+          rpc("ms:plain:create", d()) { ok1, c, e1 -> if (!ok1 || c == null) return@rpc fail("create", e1, result)
             val ip = c.optString("ip"); val port = c.optInt("port"); val rx = c.optJSONObject("srtpParameters")?.optString("keyBase64").orEmpty()
             rpc("ms:plain:connect", d().put("srtpParameters", JSONObject().put("cryptoSuite", "AES_CM_128_HMAC_SHA1_80").put("keyBase64", txKey))) { ok2, _, e2 ->
-              if (!ok2) return@rpc fail("connect", e2)
+              if (!ok2) return@rpc fail("connect", e2, result)
               rpc("ms:plain:produce", d().put("kind", "audio").put("ssrc", ssrc).put("payloadType", 111)) { ok3, _, e3 ->
-                if (!ok3) return@rpc fail("produce", e3)
+                if (!ok3) return@rpc fail("produce", e3, result)
                 rpc("ms:plain:consume", d()) { _, cons, _ ->
                   val rxPt = cons?.optJSONArray("consumers")?.optJSONObject(0)?.optInt("payloadType", 111) ?: 111
                   main.post { val r = startLeg(Leg(ip, port, txKey, rx, ssrc, 111, rxPt))
-                    if (r == 0) { active = true; host?.nativeCallAudio(true) }
+                    if (r == 0) { active = true; host?.nativeCallAudio(true) }; result(r, null)
                     host?.emit(JSONObject().put("type", "pjsip:audio").put("start", r).toString()) } } } } } }
     }
 
