@@ -103,7 +103,7 @@ jobs:
           target: google_apis
           disable-animations: true
           emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot
-          script: adb install -r -t $(find callengine/build/outputs/apk/androidTest -name "*.apk" | head -1) && cd ol && PHONE=android MEDIA=audio,video CELL_SECONDS=30 node tests/pjsip-matrix/run-phone.mjs
+          script: adb install -r -t $(find callengine/build/outputs/apk/androidTest -name "*.apk" | head -1) && cd ol && PHONE=android MEDIA=audio,video CELL_SECONDS=30 BG_CELL=1 node tests/pjsip-matrix/run-phone.mjs
       - if: always()
         uses: actions/upload-artifact@v4
         with: { name: matrix-android, path: ol/tests/pjsip-matrix/results }
