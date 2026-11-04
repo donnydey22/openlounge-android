@@ -8,6 +8,7 @@ int ol_sfu_rx_level(void);
 int ol_sfu_stats(unsigned *rx_pkt, unsigned *rx_lost, unsigned *tx_pkt);
 int ol_sfu_local_port(void);
 void ol_sfu_stop(void);
+int ol_sfu_set_mute(int muted);
 #ifdef __cplusplus
 }
 #endif

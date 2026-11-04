@@ -42,7 +42,8 @@ object NativeCallMedia {
             // at answer the call screen sends {op:"connect", callId} with the ms:* relay installed -> SFU audio leg.
             "connect" -> { val id = JSONObject(cmdJson).optString("callId"); if (id.isEmpty()) return done(false, null, "callId required")
                 callId = id; requestSfu(id) { r, err -> if (r == 0) done(true, JSONObject().put("engine", "pjsip").toString(), null) else done(false, null, err ?: "pjsip start $r") } }
-            "mute" -> done(true, "true", null) // TODO engine mute JNI
+            "mute" -> { val m = runCatching { JSONObject(cmdJson).optBoolean("muted") }.getOrDefault(false)
+                val r = runCatching { PjsipEngine.nativeSfuSetMute(m) }.getOrDefault(-1); done(r >= 0, (r >= 0).toString(), if (r < 0) "mute failed" else null) }
             "end" -> { callId = null; closeAll(); done(true, "true", null) }
             "stats" -> { val s = runCatching { PjsipEngine.nativeSfuStats() }.getOrNull()
                 done(true, JSONObject().put("rxPkt", s?.getOrNull(0)).put("rxLost", s?.getOrNull(1)).put("txPkt", s?.getOrNull(2)).toString(), null) }

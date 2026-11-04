@@ -14,6 +14,7 @@ object PjsipEngine {
     @JvmStatic external fun nativeSfuAudioStart(ip: String, port: Int, txKeyB64: String, rxKeyB64: String, ssrc: Long, txPt: Int, rxPt: Int, toneHz: Int, nullSnd: Boolean): Int
     @JvmStatic external fun nativeSfuStats(): IntArray // rxPkt, rxLost, txPkt, rxLevel
     @JvmStatic external fun nativeSfuStop()
+    @JvmStatic external fun nativeSfuSetMute(muted: Boolean): Int
     // Video spec v2 leg (ol_sfu_video.c): own "video" PlainTransport, own SRTP key, 3 simulcast SSRCs
     @JvmStatic external fun nativeSfuVideoStart(ip: String, port: Int, txKeyB64: String, rxKeyB64: String, ssrcs: LongArray, pt: Int): Int
     @JvmStatic external fun nativeSfuVideoSend(layer: Int, annexB: ByteArray, len: Int, ts90k: Long, key: Boolean): Int

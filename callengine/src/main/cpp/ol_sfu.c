@@ -70,3 +70,5 @@ void ol_sfu_stop(void) {
   if (srtp) { pjmedia_transport_close(srtp); srtp = NULL; udp = NULL; }
   if (pool) { pj_pool_release(pool); pool = NULL; }
 }
+/* Real mute: cut the mic (conf slot 0) from the outbound stream; remote audio keeps playing. */
+int ol_sfu_set_mute(int muted) { if (slot < 0) return -1; return muted ? (int)pjsua_conf_disconnect(0, slot) : (int)pjsua_conf_connect(0, slot); }
