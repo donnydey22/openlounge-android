@@ -22,7 +22,8 @@ import com.donnydey.openlounge.pjsip.PjsipEngine
  * Camera2 guarantees 3 PRIV outputs on every hardware level, hence 2 layers + preview.
  */
 object NativeCallVideo {
-    val LAYERS = listOf(OLVideoLayer(320, 180, 150_000, 15), OLVideoLayer(1280, 720, 1_500_000, 30))
+    // SFU android ladder (media-sfu/src/plain.mjs:13, checked at :29) takes exactly 3 SSRCs: 180p/720p/1080p
+    val LAYERS = listOf(OLVideoLayer(320, 180, 120_000, 15), OLVideoLayer(1280, 720, 600_000, 30), OLVideoLayer(1920, 1080, 1_600_000, 30))
     var remote: TextureView? = null
     var local: TextureView? = null
     var onFirstRemoteFrame: (() -> Unit)? = null
