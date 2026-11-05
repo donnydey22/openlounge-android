@@ -62,7 +62,7 @@ JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeSfuV
   const char*a=(*e)->GetStringUTFChars(e,ip,0),*b=(*e)->GetStringUTFChars(e,tx,0),*c=(*e)->GetStringUTFChars(e,rx,0);
   jsize n=(*e)->GetArrayLength(e,ssrcs); jlong v[3]={0}; if(n>3)n=3; (*e)->GetLongArrayRegion(e,ssrcs,0,n,v); unsigned s[3]={(unsigned)v[0],(unsigned)v[1],(unsigned)v[2]};
   ol_sfu_video_set_sink(vq_sink, NULL);
-  jint r=ol_sfu_video_start(a,port,b,c,s,n,pt);
+  jint r=a[0]?ol_sfu_video_start(a,port,b,c,s,n,pt):ol_sfu_video_start_direct(s,n,pt); /* empty ip = phone<->phone direct path only */
   (*e)->ReleaseStringUTFChars(e,ip,a); (*e)->ReleaseStringUTFChars(e,tx,b); (*e)->ReleaseStringUTFChars(e,rx,c); return r; }
 JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeSfuVideoSend(JNIEnv*e,jclass o,jint layer,jbyteArray au,jint len,jlong ts,jboolean key){
   REG(); jbyte*p=(*e)->GetPrimitiveArrayCritical(e,au,0); if(!p) return -1;
