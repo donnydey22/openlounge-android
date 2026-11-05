@@ -1083,7 +1083,22 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         localVideo.setVisibility(View.GONE);
         NativeCallVideo.INSTANCE.setRemote(remoteVideo);
         NativeCallVideo.INSTANCE.setLocal(localVideo);
+        callScreen = new NativeCallScreen(this, root, new NativeCallScreen.Actions() {
+            @Override public boolean pageCall(String detailJson) { return dispatchNativeCall(detailJson); }
+            @Override public void speaker(boolean on) {
+                callSpeaker = on;
+                callUserPick = on ? CallAudioRoute.Device.SPEAKER : CallAudioRoute.Device.EARPIECE;
+                if (callAudioOn) applyCallRoute(); // reportCallRoute tells the page (openlounge:native-audio-route)
+            }
+            @Override public void camera(boolean on, String facing) {
+                try {
+                    NativeCallMedia.handle(new JSONObject().put("op", "camera").put("on", on).put("facing", facing).toString(),
+                            (ok, r, e) -> kotlin.Unit.INSTANCE);
+                } catch (Exception ignored) {}
+            }
+        });
     }
+    private NativeCallScreen callScreen;
 
     @Override
     public void nativeCallVideo(boolean on) {
@@ -1097,6 +1112,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             if (on && savedWebBg == null) savedWebBg = webView.getSolidColor();
             webView.setBackgroundColor(on ? android.graphics.Color.TRANSPARENT : (savedWebBg != null ? savedWebBg : android.graphics.Color.BLACK));
             if (!on) savedWebBg = null;
+            if (callScreen != null) callScreen.onNativeVideo(on);
             if (on) webView.evaluateJavascript("document.documentElement.classList.add('ol-native-video')", null);
             else webView.evaluateJavascript("document.documentElement.classList.remove('ol-native-video')", null);
         });
@@ -1123,6 +1139,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         String type = m.optString("type", "");
         String id = m.optString("callId", "");
         if (!id.isEmpty() && !id.matches(CallApi.CALL_ID_RE)) return;
+        if (callScreen != null) callScreen.onPageCall(type, m);
         switch (type) {
             case "call:incoming": {
                 // Page got call:incoming over WS while App Lock / backgrounded — surface IncomingCallActivity

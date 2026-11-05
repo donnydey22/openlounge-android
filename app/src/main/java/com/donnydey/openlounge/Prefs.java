@@ -91,4 +91,7 @@ public final class Prefs {
             return false;
         }
     }
+
+    /** Native call screen (NativeCallScreen) kill switch; on by default, off -> the page's own call screen as before. */
+    public static boolean nativeCallUi(Context ctx) { return sp(ctx).getBoolean("native_call_ui", true); }
 }
