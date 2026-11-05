@@ -13,7 +13,7 @@
 
 static pj_pool_t *pool; static pjmedia_transport *ice, *srtp; static pjmedia_stream *stream;
 static pjsua_conf_port_id slot = -1, tone_slot = -1; static pjmedia_port *tone;
-static pjmedia_sdp_session *local_sdp, *remote_sdp; static int gathered, started;
+static pjmedia_sdp_session *local_sdp, *remote_sdp; static int gathered, started, live; /* live = wired to mic/speaker (only after the switch) */
 static ol_p2p_cfg cfg; static char s_stun[128], s_turn[128], s_tu[128], s_tp[256];
 static ol_p2p_cb cb; static void *cb_user;
 
@@ -52,8 +52,14 @@ static int start_media(void) { /* both SDPs known; ICE checks begin, stream ride
     pjmedia_tone_desc d; pj_bzero(&d, sizeof d); d.freq1 = (short)cfg.test_tone_hz; d.on_msec = 30000; d.volume = 16000;
     pjmedia_tonegen_play(tone, 1, &d, PJMEDIA_TONEGEN_LOOP); pjsua_conf_add_port(pool, tone, &tone_slot); pjsua_conf_connect(tone_slot, slot);
     pjsua_conf_connect(slot, 0);
-  } else { pjsua_conf_connect(0, slot); pjsua_conf_connect(slot, 0); }
+  } else { pjsua_conf_connect(0, slot); pjsua_conf_connect(slot, 0);
+    if (!live) { pjsua_conf_adjust_tx_level(slot, 0.0f); pjsua_conf_adjust_rx_level(slot, 0.0f); } }
   started = 1; return 0; }
+
+/* Switch audio onto this leg (caller drops the SFU leg after). Until then the stream runs (RTP both ways keeps ICE
+   and stats alive: VAD off, so silent Opus frames still flow) at level 0, so nothing is heard or sent twice. */
+int ol_p2p_activate(int on) { live = on ? 1 : 0; if (slot < 0 || cfg.test_tone_hz > 0) return 0;
+  float g = on ? 1.0f : 0.0f; pjsua_conf_adjust_tx_level(slot, g); pjsua_conf_adjust_rx_level(slot, g); return 0; }
 
 static void on_ice_complete(pjmedia_transport *tp, pj_ice_strans_op op, pj_status_t st) {
   (void)tp;
@@ -118,4 +124,4 @@ void ol_p2p_stop(void) {
   if (stream) { pjmedia_stream_destroy(stream); stream = NULL; }
   if (srtp) { if (started) pjmedia_transport_media_stop(srtp); pjmedia_transport_close(srtp); srtp = NULL; ice = NULL; }
   if (pool) { pj_pool_release(pool); pool = NULL; }
-  local_sdp = remote_sdp = NULL; gathered = started = 0; }
+  local_sdp = remote_sdp = NULL; gathered = started = live = 0; }

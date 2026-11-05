@@ -29,6 +29,7 @@ object PjsipEngine {
     @JvmStatic external fun nativeP2pRestart(): Int  // OS network change (tgcalls NativeNetworkingImpl.cpp:635-637)
     @JvmStatic external fun nativeP2pStats(): IntArray // rxPkt, rxLost, txPkt, rxLevel
     @JvmStatic external fun nativeP2pSetMute(muted: Boolean): Int
+    @JvmStatic external fun nativeP2pActivate(on: Boolean): Int // switch call audio onto the P2P leg
     @JvmStatic external fun nativeP2pStop()
     fun ensureLoaded() = load()
     /** QuickHD: 1080p/2.5 Mbps for the first 4 s of a video call, then 720p/1.2 Mbps. */

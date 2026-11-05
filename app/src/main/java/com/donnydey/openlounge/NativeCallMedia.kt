@@ -46,8 +46,10 @@ object NativeCallMedia {
             // at answer the call screen sends {op:"connect", callId} with the ms:* relay installed -> SFU audio leg.
             "connect" -> { val c = JSONObject(cmdJson); val id = c.optString("callId"); if (id.isEmpty()) return done(false, null, "callId required")
                 val wantVideo = c.optBoolean("video") && c.optBoolean("nativeVideo")
-                callId = id; requestSfu(id) { r, err ->
+                callId = id; p2pCfg = P2pCfg.from(c)
+                requestSfu(id) { r, err ->
                     if (r != 0) return@requestSfu done(false, null, err ?: "pjsip start $r")
+                    main.post { startP2p() } // phone-to-phone leg alongside the server route; audio switches only once proven
                     done(true, JSONObject().put("engine", "pjsip").put("video", wantVideo).toString(), null)
                     if (wantVideo) requestVideo(id, true) } }
             // camera on/off/flip; the first "on" in an audio call upgrades it (opens the video leg)
@@ -55,7 +57,10 @@ object NativeCallMedia {
                 val id = callId
                 if (on && !videoOn && id != null) { requestVideo(id, true, face); return done(true, "true", null) }
                 main.post { NativeCallVideo.camera(on, face) { ok, e -> done(ok, ok.toString(), e) } } }
+            // the other phone's call:p2p message (page forwards it from the server socket)
+            "p2p" -> { val c = JSONObject(cmdJson); main.post { onP2pMsg(c.optString("callId"), c.optJSONObject("msg")) }; done(true, "true", null) }
             "mute" -> { val m = runCatching { JSONObject(cmdJson).optBoolean("muted") }.getOrDefault(false)
+                muted = m; if (p2pState != P2P_OFF) runCatching { PjsipEngine.nativeP2pSetMute(m) }
                 val r = runCatching { PjsipEngine.nativeSfuSetMute(m) }.getOrDefault(-1); done(r >= 0, (r >= 0).toString(), if (r < 0) "mute failed" else null) }
             "end" -> { callId = null; closeAll(); done(true, "true", null) }
             else -> done(false, null, "unknown op: $op")
@@ -143,15 +148,120 @@ object NativeCallMedia {
         }
     }
 
-    /** Network changed (Wi-Fi <-> cellular): re-bind the RTP socket to the new interface, same SRTP keys/SSRC. */
+    /** Network changed (Wi-Fi <-> cellular): re-bind the RTP socket to the new interface, same SRTP keys/SSRC.
+     *  If audio was on the direct leg, it goes back to the server route first, then the direct leg regathers
+     *  (tgcalls NativeNetworkingImpl.cpp:635-637) and audio switches again only once it is proven both ways. */
     @JvmStatic fun onNetworkChange() = main.post {
         val l = leg ?: return@post
         if (!active) return@post
+        if (p2pState == P2P_LIVE) runCatching { PjsipEngine.nativeP2pActivate(false) }
         PjsipEngine.nativeSfuStop()
         val r = PjsipEngine.nativeSfuAudioStart(l.ip, l.port, l.tx, l.rx, l.ssrc, l.txPt, l.rxPt, 0, false)
+        if (muted) runCatching { PjsipEngine.nativeSfuSetMute(true) }
         host?.emit(JSONObject().put("type", "pjsip:netchange").put("restart", r).toString())
+        if (p2pState != P2P_OFF && p2pState != P2P_FAILED) restartP2p(true)
     }
-    @JvmStatic fun closeAll() = main.post { if (videoOn) { videoOn = false; NativeCallVideo.stop(); host?.nativeCallVideo(false) }; leg = null; runCatching { PjsipEngine.nativeSfuStop() }; PjsipEngine.teardown(); if (active) { active = false; host?.nativeCallAudio(false) } }
+
+    // ---- Phone-to-phone direct leg (ol_p2p.c). WhatsApp: direct first, relay fallback; Telegram tgcalls 38dcea1
+    // v2/NativeNetworkingImpl.cpp:576-640: one ICE agent with host + STUN + our TURN (UDP, TCP). The server route
+    // stays up until the direct leg carries RTP both ways; then audio switches and the server route is dropped.
+    private data class P2pCfg(val offerer: Boolean, val stun: String, val turn: String, val user: String, val pass: String, val tcp: Boolean, val relayOnly: Boolean) {
+        companion object {
+            /** reuse the relay logins the server already hands out in connect.iceServers (turn:/turns: urls) */
+            fun from(c: JSONObject): P2pCfg? {
+                val arr = c.optJSONArray("iceServers") ?: return null
+                var turn = ""; var tcp = false; var user = ""; var pass = ""
+                for (i in 0 until arr.length()) { val s = arr.optJSONObject(i) ?: continue
+                    val urls = s.optJSONArray("urls")?.let { a -> List(a.length()) { a.optString(it) } } ?: listOf(s.optString("urls"))
+                    for (u in urls) { val m = Regex("^turn:([^?]+)(\\?transport=(udp|tcp))?$").find(u) ?: continue
+                        val isTcp = m.groupValues[3] == "tcp" || c.optBoolean("tcpOnly")
+                        if (turn.isEmpty() || (!isTcp && tcp)) { turn = m.groupValues[1]; tcp = isTcp; user = s.optString("username"); pass = s.optString("credential") } } }
+                if (turn.isEmpty()) return null
+                return P2pCfg(c.optBoolean("p2pOfferer"), turn, turn, user, pass, tcp, c.optBoolean("relayOnly"))
+            }
+        }
+    }
+    private const val P2P_OFF = 0; private const val P2P_TRYING = 1; private const val P2P_LIVE = 2; private const val P2P_FAILED = 3
+    @Volatile private var p2pState = P2P_OFF
+    private var p2pCfg: P2pCfg? = null
+    private var p2pPendingOffer: String? = null
+    private var p2pGen = 0
+    @Volatile private var muted = false
+    private const val P2P_TIMEOUT_MS = 15_000L
+
+    private fun startP2p() {
+        val cfg = p2pCfg ?: return
+        if (!cfg.offerer && p2pPendingOffer == null) { p2pState = P2P_TRYING; armTimeout(); return } // callee waits for the offer
+        beginP2p(cfg)
+    }
+    private fun beginP2p(cfg: P2pCfg) {
+        val r = runCatching { PjsipEngine.nativeP2pBegin(cfg.offerer, cfg.stun, cfg.turn, cfg.user, cfg.pass, cfg.tcp, cfg.relayOnly, 0, false) }.getOrDefault(-99)
+        if (r != 0) return p2pFail("begin $r")
+        p2pState = P2P_TRYING; if (muted) runCatching { PjsipEngine.nativeP2pSetMute(true) }
+        p2pPendingOffer?.let { p2pPendingOffer = null; PjsipEngine.nativeP2pRemote(it) }
+        armTimeout(); poll(p2pGen)
+    }
+    private fun armTimeout() { val g = ++p2pGen; main.postDelayed({ if (g == p2pGen && p2pState == P2P_TRYING) p2pFail("timeout") }, P2P_TIMEOUT_MS) }
+    /** ICE events come from pjsua threads through a queue (olpjsip.c); drained here on the main thread. */
+    private fun poll(g: Int) {
+        if (g != p2pGen || p2pState == P2P_OFF || p2pState == P2P_FAILED) return
+        while (true) { val ev = runCatching { PjsipEngine.nativeP2pTake() }.getOrNull() ?: break
+            val text = ev.substringAfter('\n')
+            when (ev[0]) {
+                '1' -> sendP2p(JSONObject().put("sdp", text).put("offer", p2pCfg?.offerer == true))
+                '2' -> host?.emit(JSONObject().put("type", "pjsip:p2p").put("state", "ice").toString())
+                '3' -> return p2pFail(text)
+            } }
+        if (p2pState == P2P_TRYING) maybeSwitch()
+        main.postDelayed({ poll(g) }, if (p2pState == P2P_LIVE) 500L else 50L)
+        if (p2pState == P2P_LIVE) watchLive()
+    }
+    /** "Connected" = audio flowing both ways: packets received from and sent to the other phone on the direct leg. */
+    private fun maybeSwitch() {
+        val st = runCatching { PjsipEngine.nativeP2pStats() }.getOrNull() ?: return
+        if (st[0] < 10 || st[2] < 10) return
+        PjsipEngine.nativeP2pActivate(true); p2pState = P2P_LIVE; lastRx = st[0]; lastRxAt = android.os.SystemClock.elapsedRealtime()
+        runCatching { PjsipEngine.nativeSfuStop() } // drop the server route; leg kept for fallback / network change
+        host?.emit(JSONObject().put("type", "pjsip:p2p").put("state", "direct").toString())
+    }
+    private var lastRx = 0; private var lastRxAt = 0L
+    /** direct leg went silent (no RTP for 3 s): back to the server route, then retry the direct leg */
+    private fun watchLive() {
+        val st = runCatching { PjsipEngine.nativeP2pStats() }.getOrNull() ?: return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (st[0] != lastRx) { lastRx = st[0]; lastRxAt = now; return }
+        if (now - lastRxAt > 3_000) { backToServer("rx stall"); restartP2p(true) }
+    }
+    private fun backToServer(why: String) {
+        if (p2pState == P2P_LIVE) { runCatching { PjsipEngine.nativeP2pActivate(false) }
+            leg?.let { l -> PjsipEngine.nativeSfuAudioStart(l.ip, l.port, l.tx, l.rx, l.ssrc, l.txPt, l.rxPt, 0, false); if (muted) runCatching { PjsipEngine.nativeSfuSetMute(true) } } }
+        host?.emit(JSONObject().put("type", "pjsip:p2p").put("state", "server").put("why", why).toString())
+    }
+    private fun restartP2p(tellPeer: Boolean) {
+        val cfg = p2pCfg ?: return
+        p2pState = P2P_TRYING
+        if (cfg.offerer) { if (runCatching { PjsipEngine.nativeP2pRestart() }.getOrDefault(-1) != 0) return p2pFail("restart"); armTimeout(); poll(p2pGen) }
+        else { runCatching { PjsipEngine.nativeP2pStop() }; armTimeout(); if (tellPeer) sendP2p(JSONObject().put("restart", true)) }
+    }
+    private fun p2pFail(why: String) {
+        backToServer(why); p2pGen++; p2pState = P2P_FAILED; runCatching { PjsipEngine.nativeP2pStop() }
+    }
+    private fun sendP2p(msg: JSONObject) { val id = callId ?: return
+        rpc("call:p2p", JSONObject().put("callId", id).put("msg", msg)) { ok, _, e -> if (!ok) main.post { p2pFail("send ${e ?: ""}") } } }
+    private fun onP2pMsg(id: String, msg: JSONObject?) {
+        if (msg == null || (callId != null && id != callId)) return
+        val cfg = p2pCfg ?: run { msg.optString("sdp").takeIf { it.isNotEmpty() }?.let { p2pPendingOffer = it }; return } // offer before connect
+        if (msg.optBoolean("restart")) { if (cfg.offerer && p2pState != P2P_OFF) { if (p2pState == P2P_LIVE) backToServer("peer network change"); restartP2p(false) }; return }
+        val sdp = msg.optString("sdp"); if (sdp.isEmpty()) return
+        if (cfg.offerer) { if (p2pState == P2P_TRYING) { val r = PjsipEngine.nativeP2pRemote(sdp); if (r != 0) p2pFail("answer $r") }; return }
+        // callee: a (new) offer. After a restart by the caller, go back to the server route and answer afresh.
+        if (p2pState == P2P_LIVE) backToServer("peer restart")
+        if (p2pState == P2P_OFF) { p2pPendingOffer = sdp; return } // connect not reached yet; startP2p picks it up
+        p2pPendingOffer = sdp; beginP2p(cfg)
+    }
+    private fun stopP2p() { p2pGen++; p2pState = P2P_OFF; p2pCfg = null; p2pPendingOffer = null; runCatching { PjsipEngine.nativeP2pStop() } }
+
+    @JvmStatic fun closeAll() = main.post { stopP2p(); if (videoOn) { videoOn = false; NativeCallVideo.stop(); host?.nativeCallVideo(false) }; leg = null; runCatching { PjsipEngine.nativeSfuStop() }; PjsipEngine.teardown(); if (active) { active = false; host?.nativeCallAudio(false) } }
     @JvmStatic fun isActive(): Boolean = active
     @JvmStatic fun releaseIdle() { PjsipEngine.teardown() }
 }
