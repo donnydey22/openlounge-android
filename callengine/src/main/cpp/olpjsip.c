@@ -1,5 +1,8 @@
 #include <jni.h>
 #include <pjsua-lib/pjsua.h>
+/* JNI entries run on whichever JVM thread called them (main, WebView JavaBridge): register before any pjsua call.
+   The pjproject 2.17 prefab keeps pj_assert live, so an unregistered thread aborts in pj_thread_this(). */
+#define REG() static __thread pj_thread_desc d_; pj_thread_t*t_; if(!pj_thread_is_registered()) pj_thread_register("jni",d_,&t_)
 static void srtp_mandatory(pjsua_acc_config*a){ a->use_srtp=PJMEDIA_SRTP_MANDATORY; a->srtp_secure_signaling=0; a->srtp_opt.keying_count=1; a->srtp_opt.keying[0]=PJMEDIA_SRTP_KEYING_SDES; }
 
 JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeStart(JNIEnv*e,jclass o,jint mn,jint mx,jint jm){
@@ -16,9 +19,9 @@ JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeStar
   { pjsua_acc_config a; pjsua_acc_config_default(&a); srtp_mandatory(&a); a.id=pj_str("sip:openlounge@local"); pjsua_acc_add(&a,PJ_TRUE,NULL); }
   return 0; }
 JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeOpenSound(JNIEnv*e,jclass o){
-  return pjsua_set_snd_dev(PJMEDIA_AUD_DEFAULT_CAPTURE_DEV,PJMEDIA_AUD_DEFAULT_PLAYBACK_DEV); }
+  REG(); return pjsua_set_snd_dev(PJMEDIA_AUD_DEFAULT_CAPTURE_DEV,PJMEDIA_AUD_DEFAULT_PLAYBACK_DEV); }
 JNIEXPORT void JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeTeardown(JNIEnv*e,jclass o){
-  pjsua_call_hangup_all(); pjsua_set_no_snd_dev(); }
+  REG(); pjsua_call_hangup_all(); pjsua_set_no_snd_dev(); }
 /* Video (t4464u): H.264 via MediaCodec (pjmedia and_media codec). QuickHD start burst then steady caps. */
 #if PJMEDIA_HAS_VIDEO
 static jint set_h264(int w,int h,int bps){ pj_str_t id=pj_str("H264"); pjmedia_vid_codec_param p;
@@ -29,8 +32,8 @@ static jint set_h264(int w,int h,int bps){ pj_str_t id=pj_str("H264"); pjmedia_v
 #else
 static jint set_h264(int w,int h,int bps){ return -9; }
 #endif
-JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeVideoQuickHd(JNIEnv*e,jclass o){ return set_h264(1920,1080,2500000); }
-JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeVideoSteady(JNIEnv*e,jclass o){ return set_h264(1280,720,1200000); }
+JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeVideoQuickHd(JNIEnv*e,jclass o){ REG(); return set_h264(1920,1080,2500000); }
+JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeVideoSteady(JNIEnv*e,jclass o){ REG(); return set_h264(1280,720,1200000); }
 /* Phone -> mediasoup PlainTransport audio leg (Donny 12:37 AM decision 2), shared ol_sfu.c. */
 #include "ol_sfu.h"
 JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeSfuAudioStart(JNIEnv*e,jclass o,jstring ip,jint port,jstring tx,jstring rx,jlong ssrc,jint txPt,jint rxPt,jint toneHz,jboolean nullSnd){
@@ -52,7 +55,6 @@ JNIEXPORT void JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeSfuS
 #include "ol_sfu_video.h"
 #define OLQ 64
 static struct { unsigned char *d; int n, key; unsigned ts; } vq[OLQ]; static int vq_h, vq_t; static pj_mutex_t *vq_mx; static unsigned vq_drop;
-#define REG() static __thread pj_thread_desc d_; pj_thread_t*t_; if(!pj_thread_is_registered()) pj_thread_register("jni",d_,&t_)
 static void vq_sink(void *u, const unsigned char *a, int n, int key, unsigned ts) { (void)u; pj_mutex_lock(vq_mx);
   int nx = (vq_t + 1) % OLQ; if (nx == vq_h) { free(vq[vq_h].d); vq[vq_h].d = NULL; vq_h = (vq_h + 1) % OLQ; vq_drop++; }
   vq[vq_t].d = malloc(n); memcpy(vq[vq_t].d, a, n); vq[vq_t].n = n; vq[vq_t].key = key; vq[vq_t].ts = ts; vq_t = nx; pj_mutex_unlock(vq_mx); }
@@ -101,7 +103,7 @@ JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeP2pR
   REG(); const char*s=(*e)->GetStringUTFChars(e,sdp,0); jint r=ol_p2p_remote(s); (*e)->ReleaseStringUTFChars(e,sdp,s); return r; }
 /* Next event as "ev\ntext" or null. */
 JNIEXPORT jstring JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeP2pTake(JNIEnv*e,jclass o){
-  if (!pq_mx) return NULL; pj_mutex_lock(pq_mx); if (pq_h == pq_t) { pj_mutex_unlock(pq_mx); return NULL; }
+  if (!pq_mx) return NULL; REG(); pj_mutex_lock(pq_mx); if (pq_h == pq_t) { pj_mutex_unlock(pq_mx); return NULL; }
   size_t n = strlen(pq[pq_h].t); char *s = malloc(n + 4); s[0] = (char)('0' + pq[pq_h].ev); s[1] = '\n'; memcpy(s + 2, pq[pq_h].t, n + 1);
   free(pq[pq_h].t); pq_h = (pq_h + 1) % OLPQ; pj_mutex_unlock(pq_mx); jstring r = (*e)->NewStringUTF(e, s); free(s); return r; }
 JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeP2pRestart(JNIEnv*e,jclass o){ REG(); return ol_p2p_restart(); }

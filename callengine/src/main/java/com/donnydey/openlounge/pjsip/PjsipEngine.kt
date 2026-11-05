@@ -40,8 +40,8 @@ object PjsipEngine {
     /** AV1 only where a hardware decoder exists (negotiated per device via signaling). */
     @JvmStatic fun hardwareAv1(): Boolean = android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS).codecInfos
         .any { !it.isEncoder && (android.os.Build.VERSION.SDK_INT < 29 || it.isHardwareAccelerated) && it.supportedTypes.any { t -> t.equals("video/av01", true) } }
-    @JvmStatic fun start(): Int { load(); if (started) return 0; val r = nativeStart(1, 16, 50); started = r == 0; return r }
+    @JvmStatic @Synchronized fun start(): Int { load(); if (started) return 0; val r = nativeStart(1, 16, 50); started = r == 0; return r }
     /** Called only once the ConnectionService call is active (Android's didActivate equivalent). */
-    @JvmStatic fun openSound(): Int { start(); return nativeOpenSound() }
-    @JvmStatic fun teardown() { if (started) nativeTeardown() }
+    @JvmStatic @Synchronized fun openSound(): Int { val s = start(); if (s != 0) return s; return nativeOpenSound() } // never touch a half-initialized pjsua
+    @JvmStatic @Synchronized fun teardown() { if (started) nativeTeardown() }
 }

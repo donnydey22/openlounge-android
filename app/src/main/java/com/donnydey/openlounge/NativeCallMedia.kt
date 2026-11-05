@@ -33,7 +33,7 @@ object NativeCallMedia {
         val op = runCatching { JSONObject(cmdJson).optString("op") }.getOrDefault("")
         when (op) {
             "close" -> { closeAll(); done(true, "true", null) }
-            "prewarm" -> done(true, JSONObject().put("engine", "pjsip").put("start", PjsipEngine.start()).toString(), null)
+            "prewarm" -> main.post { done(true, JSONObject().put("engine", "pjsip").put("start", PjsipEngine.start()).toString(), null) } // pjsua on main only (was JavaBridge thread -> unregistered pjlib thread)
             "open" -> main.post {
                 val c = JSONObject(cmdJson)
                 val leg = Leg(c.getString("ip"), c.getInt("port"), c.getString("txKey"), c.getString("rxKey"),
@@ -77,7 +77,14 @@ object NativeCallMedia {
     }
     private data class Leg(val ip: String, val port: Int, val tx: String, val rx: String, val ssrc: Long, val txPt: Int, val rxPt: Int)
     @Volatile private var leg: Leg? = null
-    private fun startLeg(l: Leg): Int { PjsipEngine.start(); PjsipEngine.openSound(); leg = l
+    private fun startLeg(l: Leg): Int {
+        // Telegram answer order (DrKLO/Telegram@3de37c8 VoIPService.java:4300-4306 acceptIncomingCall: stopRinging -> configureDeviceForCall,
+        // whose :4865 sets MODE_IN_COMMUNICATION + :4870 voice-call focus) -> engine start (:3473 makeInstance). Audio mode first, then pjsua.
+        host?.nativeCallAudio(true)
+        val s0 = PjsipEngine.start(); if (s0 != 0) return s0 - 100
+        val snd = PjsipEngine.openSound()
+        if (snd != 0) host?.emit(JSONObject().put("type", "pjsip:error").put("step", "sound").put("error", "pj $snd").toString())
+        leg = l
         return PjsipEngine.nativeSfuAudioStart(l.ip, l.port, l.tx, l.rx, l.ssrc, l.txPt, l.rxPt, 0, false) }
 
     @Volatile private var signal: CallSignalClient? = null
@@ -279,7 +286,9 @@ object NativeCallMedia {
     private var directWantVideo = false
     private fun startDirect(wantVideo: Boolean, done: (Boolean, String?, String?) -> Unit) {
         if (p2pCfg == null) return done(false, null, "direct: no relay config")
-        PjsipEngine.start(); PjsipEngine.openSound()
+        host?.nativeCallAudio(true) // Telegram order: audio mode before engine (VoIPService.java:4303-4305)
+        val s0 = PjsipEngine.start(); if (s0 != 0) return done(false, null, "direct: pjsua start $s0")
+        val snd = PjsipEngine.openSound(); if (snd != 0) host?.emit(JSONObject().put("type", "pjsip:error").put("step", "sound").put("error", "pj $snd").toString())
         directDone = done; directWantVideo = wantVideo
         startP2p()
     }
