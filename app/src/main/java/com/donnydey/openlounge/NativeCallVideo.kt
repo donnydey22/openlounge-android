@@ -146,7 +146,6 @@ object NativeCallVideo {
         camThread?.quitSafely(); camThread = null
     }
 
-    fun stats(): IntArray = runCatching { PjsipEngine.nativeSfuVideoStats() }.getOrDefault(IntArray(0))
 
     fun stop() {
         running = false; stopCamera()

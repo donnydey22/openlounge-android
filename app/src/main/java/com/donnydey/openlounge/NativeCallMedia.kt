@@ -55,7 +55,6 @@ object NativeCallMedia {
                 val id = callId
                 if (on && !videoOn && id != null) { requestVideo(id, true, face); return done(true, "true", null) }
                 main.post { NativeCallVideo.camera(on, face) { ok, e -> done(ok, ok.toString(), e) } } }
-            "videoStats" -> { val v = NativeCallVideo.stats(); done(true, org.json.JSONArray().apply { v.forEach { put(it) } }.put(NativeCallVideo.rxFrames).put(NativeCallVideo.txFrames).toString(), null) }
             "mute" -> { val m = runCatching { JSONObject(cmdJson).optBoolean("muted") }.getOrDefault(false)
                 val r = runCatching { PjsipEngine.nativeSfuSetMute(m) }.getOrDefault(-1); done(r >= 0, (r >= 0).toString(), if (r < 0) "mute failed" else null) }
             "end" -> { callId = null; closeAll(); done(true, "true", null) }

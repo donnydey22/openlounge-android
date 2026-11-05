@@ -107,6 +107,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         return a != null && a.activityForeground;
     }
     private boolean callAudioOn = false;
+    private final AudioManager.OnAudioFocusChangeListener callFocus = focusChange -> {};
     private boolean callSpeaker = true;
     /** explicit route pick from the call screen; null = automatic (headset first, else speaker/earpiece toggle) */
     private CallAudioRoute.Device callUserPick = null;
@@ -1052,16 +1053,18 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     @Override
     public boolean relay(String id, String event, String dataJson) {
         if (webView == null || migrating || !pageLoaded) return false;
-        webView.evaluateJavascript("(function(){try{window.__olNativeMsReq(" + JSONObject.quote(id) + "," + JSONObject.quote(event) + ","
-                + dataJson + ")}catch(e){try{window.OpenLoungeNative.nativeMsReply(" + JSONObject.quote(id) + ",false,'null','no relay')}catch(_){}}})()", null);
+        String js = "(function(){try{window.__olNativeMsReq(" + JSONObject.quote(id) + "," + JSONObject.quote(event) + ","
+                + dataJson + ")}catch(e){try{window.OpenLoungeNative.nativeMsReply(" + JSONObject.quote(id) + ",false,'null','no relay')}catch(_){}}})()";
+        handler.post(() -> { if (webView != null) webView.evaluateJavascript(js, null); });
         return true;
     }
 
     @Override
     public void emit(String detailJson) {
         if (webView == null || !pageLoaded) return;
-        webView.evaluateJavascript("(function(){try{window.dispatchEvent(new CustomEvent('openlounge:native-media',{detail:"
-                + detailJson + "}))}catch(e){}})()", null);
+        String js = "(function(){try{window.dispatchEvent(new CustomEvent('openlounge:native-media',{detail:"
+                + detailJson + "}))}catch(e){}})()";
+        handler.post(() -> { if (webView != null) webView.evaluateJavascript(js, null); });
     }
 
     // ---- pjsip-rebuild in-app video: remote full-screen + local PiP TextureViews under a transparent WebView ----
@@ -1250,6 +1253,8 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 callAudioOn = true;
                 registerCallDeviceCallback(am);
                 try { am.setMode(AudioManager.MODE_IN_COMMUNICATION); } catch (RuntimeException ignored) {}
+                // Copied from Telegram DrKLO/Telegram@3de37c8 TMessagesProj/src/main/java/org/telegram/messenger/voip/VoIPService.java:4870 (GPL-2.0); listener arg adapted (VoIPService.this -> callFocus)
+                int focusResult = am.requestAudioFocus(callFocus, AudioManager.STREAM_VOICE_CALL, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT);
                 try {
                     int target = CallAudioPolicy.voiceCallVolumeFloor(am.getStreamVolume(AudioManager.STREAM_VOICE_CALL), am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL));
                     if (target >= 0) am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, target, 0);
@@ -1269,6 +1274,8 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             } catch (RuntimeException ignored) {}
             try { am.setSpeakerphoneOn(false); } catch (RuntimeException ignored) {}
             try { am.setMode(modeBeforeCall); } catch (RuntimeException ignored) {}
+            // Copied from Telegram DrKLO/Telegram@3de37c8 VoIPService.java:4254 (GPL-2.0); listener arg adapted (this -> callFocus)
+            am.abandonAudioFocus(callFocus);
             setVolumeControlStream(AudioManager.USE_DEFAULT_STREAM_TYPE);
             callSpeaker = true;
             callUserPick = null;
