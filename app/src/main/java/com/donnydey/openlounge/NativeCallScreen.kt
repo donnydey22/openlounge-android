@@ -68,9 +68,9 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     fun onPageCall(type: String, m: JSONObject) {
         val id = m.optString("callId", "")
         when (type) {
-            "call:incoming" -> if (id.isNotEmpty()) incoming = id to m.optString("name", "")
-            "call:outgoing" -> if (id.isNotEmpty()) { begin(id, m.optString("name", ""), m.optBoolean("video")); set(NativeCallFlow.State.WAITING) }
-            "call:answering" -> if (id.isNotEmpty()) { if (callId != id) begin(id, m.optString("name", "").ifEmpty { incoming?.takeIf { it.first == id }?.second.orEmpty() }, m.optBoolean("video")); set(NativeCallFlow.State.WAIT_INIT) }
+            "call:incoming" -> if (id.isNotEmpty()) { incoming = id to m.optString("name", ""); incomingPhoto = id to m.optString("photo", "") }
+            "call:outgoing" -> if (id.isNotEmpty()) { begin(id, m.optString("name", ""), m.optBoolean("video"), m.optString("photo", "")); set(NativeCallFlow.State.WAITING) }
+            "call:answering" -> if (id.isNotEmpty()) { if (callId != id) begin(id, m.optString("name", "").ifEmpty { incoming?.takeIf { it.first == id }?.second.orEmpty() }, m.optBoolean("video"), m.optString("photo", "").ifEmpty { incomingPhoto?.takeIf { it.first == id }?.second.orEmpty() }); set(NativeCallFlow.State.WAIT_INIT) }
             "call:connected" -> if (view != null && (id.isEmpty() || id == callId)) {
                 video = video || m.optBoolean("video")
                 set(NativeCallFlow.State.ESTABLISHED)
@@ -88,11 +88,12 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     fun onNativeVideo(on: Boolean) { nativeVideo = on; if (on) { video = true; camOn = true; if (hidden) { hidden = false; view?.visibility = View.VISIBLE } }; render() }
     private var hidden = false
     private var incoming: Pair<String, String>? = null
+    private var incomingPhoto: Pair<String, String>? = null
 
-    private fun begin(id: String, peer: String, v: Boolean) {
+    private fun begin(id: String, peer: String, v: Boolean, photo: String = "") {
         dismiss(); callId = id; video = v; camOn = v; muted = false; speakerOn = v; facing = "user"
         if (!Prefs.nativeCallUi(act)) { callId = null; return }
-        build(); name.text = peer.ifEmpty { act.getString(R.string.app_name) }
+        build(); name.text = peer.ifEmpty { act.getString(R.string.app_name) }; loadPhoto(id, photo)
     }
 
     private fun set(s: NativeCallFlow.State) { if (view == null) return; state = s
@@ -134,6 +135,22 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     }
 
     private lateinit var avatar: TextView
+    private lateinit var avatarBox: FrameLayout
+    private lateinit var photoView: android.widget.ImageView
+
+    /** web AvatarPhoto.tsx: initials stay underneath, the photo fades in once decoded, a broken URL keeps the initials.
+     *  http(s) only, like server/calls/index.ts voipPayload callerPhoto. */
+    private fun loadPhoto(id: String, url: String) {
+        if (!url.startsWith("http://") && !url.startsWith("https://")) return
+        Thread {
+            val bmp = try {
+                val c = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+                c.connectTimeout = 8000; c.readTimeout = 8000
+                c.inputStream.use { android.graphics.BitmapFactory.decodeStream(it) }.also { c.disconnect() }
+            } catch (_: Throwable) { null } ?: return@Thread
+            ui.post { if (callId == id && view != null) { photoView.setImageBitmap(bmp); photoView.animate().alpha(1f).setDuration(200).withEndAction { avatar.text = "" }.start() } }
+        }.start()
+    }
     private lateinit var bFirst: Btn
     private lateinit var bVid: Btn
     private lateinit var bMic: Btn
@@ -143,11 +160,15 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         v.addView(View(act).apply { background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0x40000000, 0x0D000000, 0x8C000000.toInt())) }, FrameLayout.LayoutParams(-1, -1))
         val top = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding(dp(24), 0, dp(24), 0) }
         avatar = TextView(act).apply { setTextColor(Color.WHITE); textSize = 30f; gravity = Gravity.CENTER; typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
-            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0xFF64748B.toInt()) } }
+            }
+        // squircle (web avatar-shape.ts, ~42% corner equivalent), clipped so the photo takes the same shape
+        avatarBox = FrameLayout(act).apply { background = GradientDrawable().apply { cornerRadius = dp(47).toFloat(); setColor(0xFF64748B.toInt()) }; clipToOutline = true }
+        photoView = android.widget.ImageView(act).apply { scaleType = android.widget.ImageView.ScaleType.CENTER_CROP; alpha = 0f }
+        avatarBox.addView(avatar, FrameLayout.LayoutParams(-1, -1)); avatarBox.addView(photoView, FrameLayout.LayoutParams(-1, -1))
         name = TextView(act).apply { setTextColor(Color.WHITE); textSize = 28f; gravity = Gravity.CENTER; maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
             typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.BOLD); letterSpacing = -0.01f }
         status = TextView(act).apply { setTextColor(0xCCFFFFFF.toInt()); textSize = 15f; gravity = Gravity.CENTER; fontFeatureSettings = "tnum" }
-        top.addView(avatar, LinearLayout.LayoutParams(dp(112), dp(112)).apply { bottomMargin = dp(12) })
+        top.addView(avatarBox, LinearLayout.LayoutParams(dp(112), dp(112)).apply { bottomMargin = dp(12) })
         top.addView(name, LinearLayout.LayoutParams(-1, -2)); top.addView(status, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
         v.addView(top, FrameLayout.LayoutParams(-1, -2, Gravity.CENTER).apply { bottomMargin = dp(80) })
         val row = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER or Gravity.BOTTOM; setPadding(dp(16), 0, dp(16), 0) }
@@ -166,8 +187,8 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     private fun render() {
         val v = view ?: return
         v.setBackgroundColor(if (nativeVideo) Color.TRANSPARENT else 0xFF0B1220.toInt())
-        avatar.visibility = if (nativeVideo) View.GONE else View.VISIBLE
-        avatar.text = initials(name.text?.toString().orEmpty())
+        avatarBox.visibility = if (nativeVideo) View.GONE else View.VISIBLE
+        if (photoView.alpha < 1f) avatar.text = initials(name.text?.toString().orEmpty())
         if (state != NativeCallFlow.State.ESTABLISHED) status.text = NativeCallFlow.statusText(state)
         if (camOn) bFirst.set("Flip", R.drawable.ol_call_refresh_cw)
         else bFirst.set(if (speakerOn) "Speaker" else "Phone", if (speakerOn) R.drawable.ol_call_volume2 else R.drawable.ol_call_ear, active = speakerOn)
