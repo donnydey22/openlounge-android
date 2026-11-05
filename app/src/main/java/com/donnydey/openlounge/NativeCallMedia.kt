@@ -155,6 +155,7 @@ object NativeCallMedia {
         val l = leg ?: return@post
         if (!active) return@post
         if (p2pState == P2P_LIVE) runCatching { PjsipEngine.nativeP2pActivate(false) }
+        if (videoP2p) { videoP2p = false; runCatching { PjsipEngine.nativeP2pVideoLive(false) } }
         PjsipEngine.nativeSfuStop()
         val r = PjsipEngine.nativeSfuAudioStart(l.ip, l.port, l.tx, l.rx, l.ssrc, l.txPt, l.rxPt, 0, false)
         if (muted) runCatching { PjsipEngine.nativeSfuSetMute(true) }
@@ -213,6 +214,7 @@ object NativeCallMedia {
                 '3' -> return p2pFail(text)
             } }
         if (p2pState == P2P_TRYING) maybeSwitch()
+        if (p2pState == P2P_LIVE && videoOn && !videoP2p) maybeSwitchVideo()
         main.postDelayed({ poll(g) }, if (p2pState == P2P_LIVE) 500L else 50L)
         if (p2pState == P2P_LIVE) watchLive()
     }
@@ -224,6 +226,15 @@ object NativeCallMedia {
         runCatching { PjsipEngine.nativeSfuStop() } // drop the server route; leg kept for fallback / network change
         host?.emit(JSONObject().put("type", "pjsip:p2p").put("state", "direct").toString())
     }
+    /** Video follows the same rule (tgcalls bundles it on the audio transport, InstanceV2Impl.cpp:460/:1135): the top
+     *  layer is sent on both routes until H.264 packets flow both ways on the direct leg, then the server video send stops. */
+    @Volatile private var videoP2p = false
+    private fun maybeSwitchVideo() {
+        val v = runCatching { PjsipEngine.nativeP2pVideoStats() }.getOrNull() ?: return
+        if (v[0] < 10 || v[1] < 10) return
+        if (PjsipEngine.nativeP2pVideoLive(true) == 0) { videoP2p = true
+            host?.emit(JSONObject().put("type", "pjsip:p2p").put("state", "direct-video").toString()) }
+    }
     private var lastRx = 0; private var lastRxAt = 0L
     /** direct leg went silent (no RTP for 3 s): back to the server route, then retry the direct leg */
     private fun watchLive() {
@@ -233,6 +244,7 @@ object NativeCallMedia {
         if (now - lastRxAt > 3_000) { backToServer("rx stall"); restartP2p(true) }
     }
     private fun backToServer(why: String) {
+        if (videoP2p) { videoP2p = false; runCatching { PjsipEngine.nativeP2pVideoLive(false) } }
         if (p2pState == P2P_LIVE) { runCatching { PjsipEngine.nativeP2pActivate(false) }
             leg?.let { l -> PjsipEngine.nativeSfuAudioStart(l.ip, l.port, l.tx, l.rx, l.ssrc, l.txPt, l.rxPt, 0, false); if (muted) runCatching { PjsipEngine.nativeSfuSetMute(true) } } }
         host?.emit(JSONObject().put("type", "pjsip:p2p").put("state", "server").put("why", why).toString())
@@ -259,7 +271,7 @@ object NativeCallMedia {
         if (p2pState == P2P_OFF) { p2pPendingOffer = sdp; return } // connect not reached yet; startP2p picks it up
         p2pPendingOffer = sdp; beginP2p(cfg)
     }
-    private fun stopP2p() { p2pGen++; p2pState = P2P_OFF; p2pCfg = null; p2pPendingOffer = null; runCatching { PjsipEngine.nativeP2pStop() } }
+    private fun stopP2p() { videoP2p = false; p2pGen++; p2pState = P2P_OFF; p2pCfg = null; p2pPendingOffer = null; runCatching { PjsipEngine.nativeP2pStop() } }
 
     @JvmStatic fun closeAll() = main.post { stopP2p(); if (videoOn) { videoOn = false; NativeCallVideo.stop(); host?.nativeCallVideo(false) }; leg = null; runCatching { PjsipEngine.nativeSfuStop() }; PjsipEngine.teardown(); if (active) { active = false; host?.nativeCallAudio(false) } }
     @JvmStatic fun isActive(): Boolean = active

@@ -10,12 +10,42 @@
 #include <string.h>
 #include <stdlib.h>
 #include "ol_p2p.h"
+#include "ol_sfu_video.h"
 
 static pj_pool_t *pool; static pjmedia_transport *ice, *srtp; static pjmedia_stream *stream;
 static pjsua_conf_port_id slot = -1, tone_slot = -1; static pjmedia_port *tone;
 static pjmedia_sdp_session *local_sdp, *remote_sdp; static int gathered, started, live; /* live = wired to mic/speaker (only after the switch) */
 static ol_p2p_cfg cfg; static char s_stun[128], s_turn[128], s_tu[128], s_tp[256];
 static ol_p2p_cb cb; static void *cb_user;
+
+/* Bundle demux (tgcalls v2: audio and video share one RTP transport, InstanceV2Impl.cpp:154/:460 + :1135). A thin
+   pjmedia transport between the audio stream and SRTP-over-ICE: PT 102 (H.264) goes to the video path, everything else
+   to the Opus stream; RTCP goes to both (PLI/FIR for video, SR/RR for audio). */
+#define OL_P2P_VIDEO_PT 102
+typedef struct { pjmedia_transport base; void *ud; void (*rtp_cb2)(pjmedia_tp_cb_param *); void (*rtp_cb)(void *, void *, pj_ssize_t);
+  void (*rtcp_cb)(void *, void *, pj_ssize_t); } ol_dmx;
+static ol_dmx dmx; static pjmedia_transport *srtp_tp(void);
+static void dmx_rtp(pjmedia_tp_cb_param *p) { const pj_uint8_t *b = (const pj_uint8_t *)p->pkt;
+  if (p->size >= 12 && (b[1] & 0x7f) == OL_P2P_VIDEO_PT) { ol_sfu_video_p2p_rx(p->pkt, (int)p->size); return; }
+  if (dmx.rtp_cb2) { pjmedia_tp_cb_param q = *p; q.user_data = dmx.ud; dmx.rtp_cb2(&q); } else if (dmx.rtp_cb) dmx.rtp_cb(dmx.ud, p->pkt, p->size); }
+static void dmx_rtcp(void *u, void *pkt, pj_ssize_t n) { (void)u; ol_sfu_video_p2p_rtcp(pkt, (int)n); if (dmx.rtcp_cb) dmx.rtcp_cb(dmx.ud, pkt, n); }
+static pj_status_t d_info(pjmedia_transport *t, pjmedia_transport_info *i) { (void)t; return pjmedia_transport_get_info(srtp_tp(), i); }
+static pj_status_t d_attach2(pjmedia_transport *t, pjmedia_transport_attach_param *a) { (void)t;
+  dmx.ud = a->user_data; dmx.rtp_cb2 = a->rtp_cb2; dmx.rtp_cb = a->rtp_cb; dmx.rtcp_cb = a->rtcp_cb;
+  pjmedia_transport_attach_param s = *a; s.user_data = &dmx; s.rtp_cb = NULL; s.rtp_cb2 = &dmx_rtp; s.rtcp_cb = &dmx_rtcp;
+  return pjmedia_transport_attach2(srtp_tp(), &s); }
+static pj_status_t d_attach(pjmedia_transport *t, void *ud, const pj_sockaddr_t *ra, const pj_sockaddr_t *rc, unsigned al,
+  void (*rtp)(void *, void *, pj_ssize_t), void (*rtcp)(void *, void *, pj_ssize_t)) {
+  pjmedia_transport_attach_param a; pj_bzero(&a, sizeof a); a.user_data = ud; pj_memcpy(&a.rem_addr, ra, al); pj_memcpy(&a.rem_rtcp, rc, al);
+  a.addr_len = al; a.rtp_cb = rtp; a.rtcp_cb = rtcp; return d_attach2(t, &a); }
+static void d_detach(pjmedia_transport *t, void *ud) { (void)t; (void)ud; pjmedia_transport_detach(srtp_tp(), &dmx); dmx.rtp_cb2 = NULL; dmx.rtp_cb = NULL; dmx.rtcp_cb = NULL; }
+static pj_status_t d_rtp(pjmedia_transport *t, const void *p, pj_size_t n) { (void)t; return pjmedia_transport_send_rtp(srtp_tp(), p, n); }
+static pj_status_t d_rtcp(pjmedia_transport *t, const void *p, pj_size_t n) { (void)t; return pjmedia_transport_send_rtcp(srtp_tp(), p, n); }
+static pj_status_t d_rtcp2(pjmedia_transport *t, const pj_sockaddr_t *a, unsigned l, const void *p, pj_size_t n) { (void)t; return pjmedia_transport_send_rtcp2(srtp_tp(), a, l, p, n); }
+static pj_status_t d_ok(pjmedia_transport *t) { (void)t; return PJ_SUCCESS; }
+static pjmedia_transport_op dmx_op = { &d_info, &d_attach, &d_detach, &d_rtp, &d_rtcp, &d_rtcp2, NULL, NULL, NULL, &d_ok, NULL, &d_ok, &d_attach2 };
+static int p2p_vrtp(const void *p, int n) { pjmedia_transport *t = srtp_tp(); return t && pjmedia_transport_send_rtp(t, p, n) == PJ_SUCCESS ? 0 : -1; }
+static int p2p_vrtcp(const void *p, int n) { pjmedia_transport *t = srtp_tp(); return t && pjmedia_transport_send_rtcp(t, p, n) == PJ_SUCCESS ? 0 : -1; }
 
 static void emit(int ev, const char *t) { if (cb) cb(ev, t, cb_user); }
 static void hostport(const char *hp, pj_str_t *host, int *port) {
@@ -44,7 +74,9 @@ static int start_media(void) { /* both SDPs known; ICE checks begin, stream ride
   if (pjmedia_transport_media_start(srtp, pool, local_sdp, remote_sdp, 0) != PJ_SUCCESS) return -1;
   pjmedia_stream_info si; if (pjmedia_stream_info_from_sdp(&si, pool, ep, local_sdp, remote_sdp, 0) != PJ_SUCCESS) return -2;
   pin_opus(&si);
-  if (pjmedia_stream_create(ep, pool, &si, srtp, NULL, &stream) != PJ_SUCCESS) return -3;
+  pj_bzero(&dmx, sizeof dmx); pj_ansi_strxcpy(dmx.base.name, "oldmx", sizeof dmx.base.name); dmx.base.op = &dmx_op; dmx.base.type = PJMEDIA_TRANSPORT_TYPE_USER;
+  if (pjmedia_stream_create(ep, pool, &si, &dmx.base, NULL, &stream) != PJ_SUCCESS) return -3;
+  ol_sfu_video_p2p_route(&p2p_vrtp, &p2p_vrtcp); /* video rides this same transport (trying mode until switched) */
   if (pjmedia_stream_start(stream) != PJ_SUCCESS) return -4;
   pjmedia_port *sp; pjmedia_stream_get_port(stream, &sp); if (pjsua_conf_add_port(pool, sp, &slot) != PJ_SUCCESS) return -5;
   if (cfg.test_tone_hz > 0) {
@@ -118,7 +150,11 @@ int ol_p2p_rx_level(void) { unsigned tx = 0, rx = 0; if (slot < 0) return -1; pj
 int ol_p2p_stats(unsigned *rp, unsigned *rl, unsigned *tp) { pjmedia_rtcp_stat st; if (!stream || pjmedia_stream_get_stat(stream, &st) != PJ_SUCCESS) return -1;
   *rp = st.rx.pkt; *rl = st.rx.loss; *tp = st.tx.pkt; return 0; }
 int ol_p2p_set_mute(int m) { if (slot < 0) return -1; return m ? (int)pjsua_conf_disconnect(0, slot) : (int)pjsua_conf_connect(0, slot); }
+static pjmedia_transport *srtp_tp(void) { return srtp; }
+int ol_p2p_video_live(int on) { return ol_sfu_video_p2p_live(on); }
+void ol_p2p_video_stats(unsigned *rx, unsigned *tx) { ol_sfu_video_p2p_stats(rx, tx); }
 void ol_p2p_stop(void) {
+  ol_sfu_video_p2p_route(NULL, NULL); /* video back on the server route */
   if (tone_slot >= 0) { pjsua_conf_remove_port(tone_slot); tone_slot = -1; } if (tone) { pjmedia_port_destroy(tone); tone = NULL; }
   if (slot >= 0) { pjsua_conf_remove_port(slot); slot = -1; }
   if (stream) { pjmedia_stream_destroy(stream); stream = NULL; }

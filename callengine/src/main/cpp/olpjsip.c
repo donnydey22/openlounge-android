@@ -111,3 +111,6 @@ JNIEXPORT jintArray JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativ
 JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeP2pSetMute(JNIEnv*e,jclass o,jboolean m){ REG(); return ol_p2p_set_mute(m?1:0); }
 JNIEXPORT void JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeP2pStop(JNIEnv*e,jclass o){ REG(); ol_p2p_stop(); }
 JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeP2pActivate(JNIEnv*e,jclass o,jboolean on){ REG(); return ol_p2p_activate(on?1:0); }
+JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeP2pVideoLive(JNIEnv*e,jclass o,jboolean on){ REG(); return ol_p2p_video_live(on?1:0); }
+JNIEXPORT jintArray JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeP2pVideoStats(JNIEnv*e,jclass o){
+  REG(); unsigned rx=0,tx=0; ol_p2p_video_stats(&rx,&tx); jint v[2]={(jint)rx,(jint)tx}; jintArray a=(*e)->NewIntArray(e,2); (*e)->SetIntArrayRegion(e,a,0,2,v); return a; }

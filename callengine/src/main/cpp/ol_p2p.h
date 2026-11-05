@@ -22,6 +22,8 @@ int ol_p2p_rx_level(void);
 int ol_p2p_stats(unsigned *rx_pkt, unsigned *rx_lost, unsigned *tx_pkt);
 int ol_p2p_set_mute(int muted);
 int ol_p2p_activate(int on);         /* 1 = put this leg on mic/speaker (after it is connected both ways) */
+int ol_p2p_video_live(int on);       /* 1 = video onto the direct leg (after both ways proven), 0 = server route */
+void ol_p2p_video_stats(unsigned *rx, unsigned *tx); /* H.264 packets on the direct leg */
 void ol_p2p_stop(void);
 #ifdef __cplusplus
 }

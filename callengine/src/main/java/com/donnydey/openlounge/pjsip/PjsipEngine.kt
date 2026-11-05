@@ -30,6 +30,8 @@ object PjsipEngine {
     @JvmStatic external fun nativeP2pStats(): IntArray // rxPkt, rxLost, txPkt, rxLevel
     @JvmStatic external fun nativeP2pSetMute(muted: Boolean): Int
     @JvmStatic external fun nativeP2pActivate(on: Boolean): Int // switch call audio onto the P2P leg
+    @JvmStatic external fun nativeP2pVideoLive(on: Boolean): Int // video onto the direct leg (bundled, top layer)
+    @JvmStatic external fun nativeP2pVideoStats(): IntArray // rxPkt, txPkt (H.264 on the direct leg)
     @JvmStatic external fun nativeP2pStop()
     fun ensureLoaded() = load()
     /** QuickHD: 1080p/2.5 Mbps for the first 4 s of a video call, then 720p/1.2 Mbps. */
