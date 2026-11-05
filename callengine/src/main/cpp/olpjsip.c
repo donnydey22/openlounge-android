@@ -83,3 +83,30 @@ JNIEXPORT void JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeSfuV
 JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeSfuVideoTakeKeyReq(JNIEnv*e,jclass o){ (void)e;(void)o; return (jint)ol_sfu_video_take_keyreq(); }
 JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeSfuSetMute(JNIEnv*e,jclass o,jboolean m){
   static __thread pj_thread_desc d; pj_thread_t*t; if(!pj_thread_is_registered()) pj_thread_register("jni",d,&t); return ol_sfu_set_mute(m?1:0); }
+/* Phone-to-phone P2P leg (ol_p2p.c): pjnath ICE + pjmedia SRTP SDES. ICE callbacks run on pjsua threads, so events
+   (local SDP / connected / failed) are queued here and taken by Kotlin, same pattern as the video AU queue. */
+#include "ol_p2p.h"
+#define OLPQ 8
+static struct { int ev; char *t; } pq[OLPQ]; static int pq_h, pq_t; static pj_mutex_t *pq_mx;
+static void p2p_ev(int ev, const char *t, void *u) { (void)u; pj_mutex_lock(pq_mx); int nx = (pq_t + 1) % OLPQ;
+  if (nx != pq_h) { pq[pq_t].ev = ev; pq[pq_t].t = strdup(t ? t : ""); pq_t = nx; } pj_mutex_unlock(pq_mx); }
+JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeP2pBegin(JNIEnv*e,jclass o,jboolean offerer,jstring stun,jstring turn,jstring tu,jstring tp,jboolean tcp,jboolean relayOnly,jint toneHz,jboolean nullSnd){
+  REG(); if (!pq_mx) pj_mutex_create_simple(pjsua_pool_create("olpq", 512, 512), "olpq", &pq_mx);
+  const char*a=(*e)->GetStringUTFChars(e,stun,0),*b=(*e)->GetStringUTFChars(e,turn,0),*c=(*e)->GetStringUTFChars(e,tu,0),*d=(*e)->GetStringUTFChars(e,tp,0);
+  if(nullSnd) pjsua_set_null_snd_dev();
+  ol_p2p_cfg g = { offerer?1:0, a, b, c, d, tcp?1:0, relayOnly?1:0, toneHz };
+  jint r=ol_p2p_begin(&g,p2p_ev,NULL);
+  (*e)->ReleaseStringUTFChars(e,stun,a); (*e)->ReleaseStringUTFChars(e,turn,b); (*e)->ReleaseStringUTFChars(e,tu,c); (*e)->ReleaseStringUTFChars(e,tp,d); return r; }
+JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeP2pRemote(JNIEnv*e,jclass o,jstring sdp){
+  REG(); const char*s=(*e)->GetStringUTFChars(e,sdp,0); jint r=ol_p2p_remote(s); (*e)->ReleaseStringUTFChars(e,sdp,s); return r; }
+/* Next event as "ev\ntext" or null. */
+JNIEXPORT jstring JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeP2pTake(JNIEnv*e,jclass o){
+  if (!pq_mx) return NULL; pj_mutex_lock(pq_mx); if (pq_h == pq_t) { pj_mutex_unlock(pq_mx); return NULL; }
+  size_t n = strlen(pq[pq_h].t); char *s = malloc(n + 4); s[0] = (char)('0' + pq[pq_h].ev); s[1] = '\n'; memcpy(s + 2, pq[pq_h].t, n + 1);
+  free(pq[pq_h].t); pq_h = (pq_h + 1) % OLPQ; pj_mutex_unlock(pq_mx); jstring r = (*e)->NewStringUTF(e, s); free(s); return r; }
+JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeP2pRestart(JNIEnv*e,jclass o){ REG(); return ol_p2p_restart(); }
+JNIEXPORT jintArray JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeP2pStats(JNIEnv*e,jclass o){
+  REG(); unsigned rx=0,lost=0,tx=0; ol_p2p_stats(&rx,&lost,&tx); jint v[4]={(jint)rx,(jint)lost,(jint)tx,ol_p2p_rx_level()};
+  jintArray a=(*e)->NewIntArray(e,4); (*e)->SetIntArrayRegion(e,a,0,4,v); return a; }
+JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeP2pSetMute(JNIEnv*e,jclass o,jboolean m){ REG(); return ol_p2p_set_mute(m?1:0); }
+JNIEXPORT void JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeP2pStop(JNIEnv*e,jclass o){ REG(); ol_p2p_stop(); }

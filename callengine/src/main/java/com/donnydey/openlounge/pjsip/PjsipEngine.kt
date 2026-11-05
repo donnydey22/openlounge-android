@@ -22,6 +22,14 @@ object PjsipEngine {
     @JvmStatic external fun nativeSfuVideoStats(): IntArray // rxPkt, rxAu, rxKey, rxGap, txPkt, txAu0..2, txKey0..2, queueDrop
     @JvmStatic external fun nativeSfuVideoStop()
     @JvmStatic external fun nativeSfuVideoTakeKeyReq(): Int
+    // Phone-to-phone P2P leg (ol_p2p.c): ICE direct first, our coturn relay fallback; SDP (ICE + a=crypto) over call:p2p
+    @JvmStatic external fun nativeP2pBegin(offerer: Boolean, stun: String, turn: String, turnUser: String, turnPass: String, turnTcp: Boolean, relayOnly: Boolean, toneHz: Int, nullSnd: Boolean): Int
+    @JvmStatic external fun nativeP2pRemote(sdp: String): Int
+    @JvmStatic external fun nativeP2pTake(): String? // "1\n<local sdp>" | "2\nice" (connected) | "3\n<reason>" (failed -> keep SFU leg)
+    @JvmStatic external fun nativeP2pRestart(): Int  // OS network change (tgcalls NativeNetworkingImpl.cpp:635-637)
+    @JvmStatic external fun nativeP2pStats(): IntArray // rxPkt, rxLost, txPkt, rxLevel
+    @JvmStatic external fun nativeP2pSetMute(muted: Boolean): Int
+    @JvmStatic external fun nativeP2pStop()
     fun ensureLoaded() = load()
     /** QuickHD: 1080p/2.5 Mbps for the first 4 s of a video call, then 720p/1.2 Mbps. */
     @JvmStatic fun startVideoBurst() { start(); nativeVideoQuickHd()
