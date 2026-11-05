@@ -70,8 +70,9 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     fun onPageCall(type: String, m: JSONObject) {
         val id = m.optString("callId", "")
         when (type) {
+            "call:incoming" -> if (id.isNotEmpty()) incoming = id to m.optString("name", "")
             "call:outgoing" -> if (id.isNotEmpty()) { begin(id, m.optString("name", ""), m.optBoolean("video")); set(NativeCallFlow.State.WAITING) }
-            "call:answering" -> if (id.isNotEmpty()) { if (callId != id) begin(id, m.optString("name", ""), m.optBoolean("video")); set(NativeCallFlow.State.WAIT_INIT) }
+            "call:answering" -> if (id.isNotEmpty()) { if (callId != id) begin(id, m.optString("name", "").ifEmpty { incoming?.takeIf { it.first == id }?.second.orEmpty() }, m.optBoolean("video")); set(NativeCallFlow.State.WAIT_INIT) }
             "call:connected" -> if (view != null && (id.isEmpty() || id == callId)) {
                 video = video || m.optBoolean("video")
                 set(NativeCallFlow.State.ESTABLISHED)
@@ -88,6 +89,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     /** MainActivity.nativeCallVideo: native tiles are up (remote full screen, self-view PiP) -> transparent screen. */
     fun onNativeVideo(on: Boolean) { nativeVideo = on; if (on) { video = true; camOn = true; if (hidden) { hidden = false; view?.visibility = View.VISIBLE } }; render() }
     private var hidden = false
+    private var incoming: Pair<String, String>? = null
 
     private fun begin(id: String, peer: String, v: Boolean) {
         dismiss(); callId = id; video = v; camOn = v; muted = false; speakerOn = v; facing = "user"
