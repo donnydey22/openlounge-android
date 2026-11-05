@@ -34,7 +34,7 @@ android {
         ndk { abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64' } // ABIs in the pjproject prefab AAR
         targetSdk 36
         versionCode 44
-        versionName "0.3.26"
+        versionName "0.3.27"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField "boolean", "STAGING", "false"
         buildConfigField "String", "STAGING_HOST", "\"\""
