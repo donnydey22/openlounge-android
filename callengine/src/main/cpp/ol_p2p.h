@@ -1,4 +1,4 @@
-// Phone-to-phone P2P audio leg: pjnath ICE (host/srflx/relay candidates) under pjmedia SRTP SDES, SDP over call:p2p.
+// Phone-to-phone P2P audio leg: pjnath ICE (host/srflx/relay candidates), plain RTP (NO encryption), SDP over call:p2p.
 #pragma once
 #ifdef __cplusplus
 extern "C" {

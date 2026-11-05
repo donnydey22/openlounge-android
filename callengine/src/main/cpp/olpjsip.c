@@ -83,7 +83,7 @@ JNIEXPORT void JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeSfuV
 JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeSfuVideoTakeKeyReq(JNIEnv*e,jclass o){ (void)e;(void)o; return (jint)ol_sfu_video_take_keyreq(); }
 JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeSfuSetMute(JNIEnv*e,jclass o,jboolean m){
   static __thread pj_thread_desc d; pj_thread_t*t; if(!pj_thread_is_registered()) pj_thread_register("jni",d,&t); return ol_sfu_set_mute(m?1:0); }
-/* Phone-to-phone P2P leg (ol_p2p.c): pjnath ICE + pjmedia SRTP SDES. ICE callbacks run on pjsua threads, so events
+/* Phone-to-phone P2P leg (ol_p2p.c): pjnath ICE, plain RTP (no encryption). ICE callbacks run on pjsua threads, so events
    (local SDP / connected / failed) are queued here and taken by Kotlin, same pattern as the video AU queue. */
 #include "ol_p2p.h"
 #define OLPQ 8
