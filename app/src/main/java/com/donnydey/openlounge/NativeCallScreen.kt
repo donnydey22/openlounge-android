@@ -25,7 +25,8 @@ import org.json.JSONObject
  *   call:answering -> STATE_WAIT_INIT      ("Connecting…")
  *   call:connected -> STATE_ESTABLISHED    (showTimer; = engine reported connected, VoIPService.onConnectionStateChanged)
  *   call:ended     -> STATE_ENDED          (no rating -> windowView.finish(): screen removed)
- * Controls row = VoIPFragment.updateButtons: [speaker | flip camera when my video is on] [video] [mute] [end].
+ * Placement = VoIPFragment.updateButtons: [speaker | flip camera when my video is on] [video] [mute] [end].
+ * Look = Open Lounge's own call screen (web CallOverlay.tsx), not Telegram's.
  * Refs: DrKLO/Telegram@3de37c8 TMessagesProj/.../ui/VoIPFragment.java, .../messenger/voip/VoIPService.java.
  *
  * Gate (fallback = the page's own call screen underneath, unchanged): shown only for calls the page announced with a
@@ -53,9 +54,6 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     private var view: FrameLayout? = null
     private lateinit var name: TextView
     private lateinit var status: TextView
-    private lateinit var b0: TextView
-    private lateinit var bVideo: TextView
-    private lateinit var bMute: TextView
 
     private val tick = object : Runnable {
         override fun run() {
@@ -105,41 +103,77 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
 
     private fun dp(v: Int) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), act.resources.displayMetrics).toInt()
 
-    private fun round(label: String, bg: Int, click: () -> Unit) = TextView(act).apply {
-        text = label; setTextColor(Color.WHITE); textSize = 11f; gravity = Gravity.CENTER
-        background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(bg) }
-        setOnClickListener { click() }
-        layoutParams = LinearLayout.LayoutParams(dp(60), dp(60)).apply { setMargins(dp(10), 0, dp(10), 0) }
+    // Open Lounge call screen look (web CallOverlay.tsx / calls.module.css / Avatar.tsx): #0b1220 stage + shade,
+    // xl initials avatar, 28sp semibold name, 15sp white/80 status, RoundBtn 56dp white/15 (active = white, zinc-900
+    // icon), End call 56dp red-500, 12sp white/85 label under each button. lucide icons rendered to ol_call_*.png.
+    private class Btn(val box: LinearLayout, val disc: FrameLayout, val icon: android.widget.ImageView, val label: TextView)
+    private fun btn(big: Boolean, danger: Boolean, click: () -> Unit): Btn {
+        val size = dp(if (big) 68 else 56)
+        val disc = FrameLayout(act).apply { background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(if (danger) 0xFFEF4444.toInt() else 0x26FFFFFF) } }
+        val icon = android.widget.ImageView(act)
+        disc.addView(icon, FrameLayout.LayoutParams(dp(24), dp(24), Gravity.CENTER))
+        val label = TextView(act).apply { setTextColor(0xD9FFFFFF.toInt()); textSize = 12f; typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL); gravity = Gravity.CENTER; maxLines = 1 }
+        val box = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setOnClickListener { click() } }
+        box.addView(disc, LinearLayout.LayoutParams(size, size))
+        box.addView(label, LinearLayout.LayoutParams(dp(76), -2).apply { topMargin = dp(6) })
+        box.layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+        return Btn(box, disc, icon, label)
     }
+    private fun Btn.set(text: String, iconRes: Int, active: Boolean = false, enabled: Boolean = true) {
+        label.text = text; icon.setImageResource(iconRes)
+        icon.setColorFilter(if (active) 0xFF18181B.toInt() else Color.WHITE)
+        (disc.background as GradientDrawable).setColor(if (active) Color.WHITE else 0x26FFFFFF)
+        box.alpha = if (enabled) 1f else 0.4f; box.isEnabled = enabled
+    }
+
+    private fun initials(n: String): String {
+        val parts = n.trim().split(Regex("\\s+")).filter { it.isNotEmpty() && Character.isLetterOrDigit(it.codePointAt(0)) }
+        if (parts.isEmpty()) return n.trim().take(1).ifEmpty { "?" }
+        if (parts.size == 1) return parts[0].take(2).uppercase()
+        return (parts.first().take(1) + parts.last().take(1)).uppercase()
+    }
+
+    private lateinit var avatar: TextView
+    private lateinit var bFirst: Btn
+    private lateinit var bVid: Btn
+    private lateinit var bMic: Btn
 
     private fun build() {
         val v = FrameLayout(act).apply { isClickable = true } // the page under it never gets touches while shown
-        val top = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL }
-        name = TextView(act).apply { setTextColor(Color.WHITE); textSize = 26f; gravity = Gravity.CENTER; maxLines = 1 }
-        status = TextView(act).apply { setTextColor(0xCCFFFFFF.toInt()); textSize = 15f; gravity = Gravity.CENTER }
-        top.addView(name); top.addView(status)
-        v.addView(top, FrameLayout.LayoutParams(-1, -2, Gravity.TOP).apply { topMargin = dp(96) })
-        val row = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
-        val grey = 0x40FFFFFF
-        b0 = round("", grey) {
+        v.addView(View(act).apply { background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0x40000000, 0x0D000000, 0x8C000000.toInt())) }, FrameLayout.LayoutParams(-1, -1))
+        val top = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding(dp(24), 0, dp(24), 0) }
+        avatar = TextView(act).apply { setTextColor(Color.WHITE); textSize = 30f; gravity = Gravity.CENTER; typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0xFF64748B.toInt()) } }
+        name = TextView(act).apply { setTextColor(Color.WHITE); textSize = 28f; gravity = Gravity.CENTER; maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
+            typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.BOLD); letterSpacing = -0.01f }
+        status = TextView(act).apply { setTextColor(0xCCFFFFFF.toInt()); textSize = 15f; gravity = Gravity.CENTER; fontFeatureSettings = "tnum" }
+        top.addView(avatar, LinearLayout.LayoutParams(dp(112), dp(112)).apply { bottomMargin = dp(12) })
+        top.addView(name, LinearLayout.LayoutParams(-1, -2)); top.addView(status, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
+        v.addView(top, FrameLayout.LayoutParams(-1, -2, Gravity.CENTER).apply { bottomMargin = dp(80) })
+        val row = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER or Gravity.BOTTOM; setPadding(dp(16), 0, dp(16), 0) }
+        bFirst = btn(false, false) {
             if (camOn) { facing = if (facing == "user") "environment" else "user"; actions.camera(true, facing) }
             else { speakerOn = !speakerOn; actions.speaker(speakerOn); render() } }
-        bVideo = round("", grey) { if (!video) return@round; camOn = !camOn; actions.camera(camOn, facing); render() }
-        bMute = round("", grey) { actions.pageCall(JSONObject().put("type", "call:mute").put("muted", !muted).toString()) }
-        val end = round("End", 0xFFF4473A.toInt()) { actions.pageCall(JSONObject().put("type", "call:hangup").toString()) }
-        row.addView(b0); row.addView(bVideo); row.addView(bMute); row.addView(end)
-        v.addView(row, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply { bottomMargin = dp(56) })
+        bVid = btn(false, false) { if (!video) return@btn; camOn = !camOn; actions.camera(camOn, facing); render() }
+        bMic = btn(false, false) { actions.pageCall(JSONObject().put("type", "call:mute").put("muted", !muted).toString()) }
+        val end = btn(false, true) { actions.pageCall(JSONObject().put("type", "call:hangup").toString()) }
+        end.label.text = "End call"; end.icon.setImageResource(R.drawable.ol_call_phone_off)
+        row.addView(bFirst.box); row.addView(bVid.box); row.addView(bMic.box); row.addView(end.box)
+        v.addView(row, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply { bottomMargin = dp(40) })
         root.addView(v, FrameLayout.LayoutParams(-1, -1)); view = v
     }
 
     private fun render() {
         val v = view ?: return
-        v.setBackgroundColor(if (nativeVideo) Color.TRANSPARENT else 0xFF1C2B3A.toInt())
+        v.setBackgroundColor(if (nativeVideo) Color.TRANSPARENT else 0xFF0B1220.toInt())
+        avatar.visibility = if (nativeVideo) View.GONE else View.VISIBLE
+        avatar.text = initials(name.text?.toString().orEmpty())
         if (state != NativeCallFlow.State.ESTABLISHED) status.text = NativeCallFlow.statusText(state)
-        b0.text = if (camOn) "Flip" else if (speakerOn) "Speaker\non" else "Speaker"
-        bVideo.text = if (camOn) "Video\non" else "Video"; bVideo.alpha = if (video) 1f else 0.4f
-        bMute.text = if (muted) "Muted" else "Mute"
-        b0.isSelected = speakerOn; bMute.isSelected = muted
+        if (camOn) bFirst.set("Flip", R.drawable.ol_call_refresh_cw)
+        else bFirst.set(if (speakerOn) "Speaker" else "Phone", if (speakerOn) R.drawable.ol_call_volume2 else R.drawable.ol_call_ear, active = speakerOn)
+        bVid.box.visibility = if (video) View.VISIBLE else View.GONE // web: native voice calls keep their audio-only policy
+        bVid.set(if (camOn) "Stop video" else "Video", if (camOn) R.drawable.ol_call_video else R.drawable.ol_call_video_off, active = camOn)
+        bMic.set(if (muted) "Unmute" else "Mute", if (muted) R.drawable.ol_call_mic_off else R.drawable.ol_call_mic, active = muted)
     }
 
     val showing: Boolean get() = view != null && !hidden

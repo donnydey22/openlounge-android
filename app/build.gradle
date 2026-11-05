@@ -26,6 +26,7 @@ def hasSigning = envSigning || keystorePropsFile.exists()
 android {
     namespace 'com.donnydey.openlounge'
     compileSdk 36
+    testOptions { unitTests { includeAndroidResources = true } }
 
     defaultConfig {
         applicationId "com.donnydey.openlounge"
@@ -137,6 +138,7 @@ dependencies {
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'
 
     testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.14.1' // NativeCallScreenRenderTest: renders the call screen states on the JVM; test-only
     testImplementation 'org.json:json:20240303' // JVM org.json for MsJsonTest (android.jar's org.json is a stub in unit tests); test-only, not in the APK
     androidTestImplementation 'androidx.test:runner:1.6.2'
     androidTestImplementation 'androidx.test.ext:junit:1.2.1'
