@@ -5,6 +5,7 @@ import android.os.Handler
 import android.os.Looper
 import com.donnydey.openlounge.pjsip.CallSignalClient
 import com.donnydey.openlounge.pjsip.PjsipEngine
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -26,11 +27,12 @@ object NativeCallMedia {
     @Volatile private var active = false
 
     private var appCtx: Context? = null
-    @JvmStatic fun init(ctx: Context) { appCtx = ctx.applicationContext }
+    @JvmStatic fun init(ctx: Context) { appCtx = ctx.applicationContext; CallDiskLog.init(ctx) }
     @Volatile private var videoOn = false
 
     @JvmStatic fun handle(cmdJson: String, done: (Boolean, String?, String?) -> Unit) {
         val op = runCatching { JSONObject(cmdJson).optString("op") }.getOrDefault("")
+        CallDiskLog.mark("op", op)
         when (op) {
             "close" -> { closeAll(); done(true, "true", null) }
             "prewarm" -> main.post { done(true, JSONObject().put("engine", "pjsip").put("start", PjsipEngine.start()).toString(), null) } // pjsua on main only (was JavaBridge thread -> unregistered pjlib thread)
@@ -46,14 +48,18 @@ object NativeCallMedia {
             // at answer the call screen sends {op:"connect", callId} with the ms:* relay installed -> SFU audio leg.
             "connect" -> { val c = JSONObject(cmdJson); val id = c.optString("callId"); if (id.isEmpty()) return done(false, null, "callId required")
                 val wantVideo = c.optBoolean("video") && c.optBoolean("nativeVideo")
-                callId = id; p2pCfg = P2pCfg.from(c); direct = c.optBoolean("direct")
-                // ONE path per call (Donny, 9:10 AM Nov 5 2026): phone<->phone = the direct ICE link only (our coturn is
-                // just one ICE candidate); phone<->browser = the SFU only. No parallel route, no switchover.
-                if (direct) { main.post { startDirect(wantVideo, done) }; return }
+                callId = id; p2pCfg = null; direct = false
+                CallDiskLog.begin(id); CallDiskLog.mark("connect", "video=$wantVideo pageDirect=${c.optBoolean("direct")} -> server route")
+                // ONE path per call (Donny 9:10/9:12 AM Nov 5 2026; b107/46 scope): the server route (SFU) for EVERY
+                // pairing, phone<->phone included. The page's "direct" hint is logged and ignored; no direct leg is layered on.
+                host?.emit(JSONObject().put("type", "pjsip:calllog").put("callId", id).put("lines", JSONArray(CallDiskLog.tailJson())).toString())
                 requestSfu(id) { r, err ->
                     if (r != 0) return@requestSfu done(false, null, err ?: "pjsip start $r")
-                    done(true, JSONObject().put("engine", "pjsip").put("video", wantVideo).toString(), null)
-                    if (wantVideo) requestVideo(id, true) } }
+                    // connected means audio: resolve only once RTP flows both ways on the leg
+                    awaitTwoWay { ok, why ->
+                        if (!ok) return@awaitTwoWay fail("two-way", why) { _, e -> done(false, null, e) }
+                        done(true, JSONObject().put("engine", "pjsip").put("video", wantVideo).put("path", "server").toString(), null)
+                        if (wantVideo) requestVideo(id, true) } } }
             // camera on/off/flip; the first "on" in an audio call upgrades it (opens the video leg)
             "camera" -> { val c = JSONObject(cmdJson); val on = c.optBoolean("on"); val face = c.optString("facing", "user")
                 val id = callId
@@ -61,11 +67,11 @@ object NativeCallMedia {
                 if (on && !videoOn && id != null) { requestVideo(id, true, face); return done(true, "true", null) }
                 main.post { NativeCallVideo.camera(on, face) { ok, e -> done(ok, ok.toString(), e) } } }
             // the other phone's call:p2p message (page forwards it from the server socket)
-            "p2p" -> { val c = JSONObject(cmdJson); main.post { onP2pMsg(c.optString("callId"), c.optJSONObject("msg")) }; done(true, "true", null) }
+            "p2p" -> { CallDiskLog.mark("p2p-ignored"); done(true, "true", null) } // no direct leg in this build
             "mute" -> { val m = runCatching { JSONObject(cmdJson).optBoolean("muted") }.getOrDefault(false)
                 muted = m; if (p2pState != P2P_OFF) runCatching { PjsipEngine.nativeP2pSetMute(m) }
                 if (direct) return done(true, "true", null)
-                val r = runCatching { PjsipEngine.nativeSfuSetMute(m) }.getOrDefault(-1); done(r >= 0, (r >= 0).toString(), if (r < 0) "mute failed" else null) }
+                main.post { val r = runCatching { PjsipEngine.nativeSfuSetMute(m) }.getOrDefault(-1); done(r >= 0, (r >= 0).toString(), if (r < 0) "mute failed" else null) } }
             "end" -> { callId = null; closeAll(); done(true, "true", null) }
             else -> done(false, null, "unknown op: $op")
         }
@@ -73,17 +79,25 @@ object NativeCallMedia {
 
     @JvmStatic fun onMsReply(id: String, ok: Boolean, resultJson: String?, error: String?) {
         val cb = pending.remove(id) ?: return
-        cb(ok, resultJson?.let { runCatching { JSONObject(it) }.getOrNull() }, error)
+        val res = resultJson?.let { runCatching { JSONObject(it) }.getOrNull() }
+        val srvErr = res?.optString("error")?.takeIf { it.isNotEmpty() && it != "null" }
+        val okReal = ok && srvErr == null // e.g. plain:produce "need 3 ssrcs" arrived as ok=true
+        CallDiskLog.mark("rpc-reply", "id=$id ok=$ok okReal=$okReal err=${error ?: srvErr ?: ""}")
+        cb(okReal, res, error ?: srvErr)
     }
     private data class Leg(val ip: String, val port: Int, val tx: String, val rx: String, val ssrc: Long, val txPt: Int, val rxPt: Int)
     @Volatile private var leg: Leg? = null
     private fun startLeg(l: Leg): Int {
         // Telegram answer order (DrKLO/Telegram@3de37c8 VoIPService.java:4300-4306 acceptIncomingCall: stopRinging -> configureDeviceForCall,
         // whose :4865 sets MODE_IN_COMMUNICATION + :4870 voice-call focus) -> engine start (:3473 makeInstance). Audio mode first, then pjsua.
+        CallDiskLog.mark("audio-session", "communication mode on (before engine)")
         host?.nativeCallAudio(true)
-        val s0 = PjsipEngine.start(); if (s0 != 0) return s0 - 100
+        CallDiskLog.mark("engine-start")
+        val s0 = PjsipEngine.start(); if (s0 != 0) { CallDiskLog.mark("engine-start-fail", "$s0"); return s0 - 100 }
+        CallDiskLog.mark("open-sound")
         val snd = PjsipEngine.openSound()
-        if (snd != 0) host?.emit(JSONObject().put("type", "pjsip:error").put("step", "sound").put("error", "pj $snd").toString())
+        CallDiskLog.mark("open-sound-result", "$snd")
+        if (snd != 0) { host?.emit(JSONObject().put("type", "pjsip:error").put("step", "sound").put("error", "pj $snd").toString()); return snd.coerceAtMost(-1) - 200 }
         leg = l
         return PjsipEngine.nativeSfuAudioStart(l.ip, l.port, l.tx, l.rx, l.ssrc, l.txPt, l.rxPt, 0, false) }
 
@@ -104,11 +118,32 @@ object NativeCallMedia {
     // SFU PlainTransport RPCs ride the page's authenticated socket: host.relay(id, "ms:...", data) -> onMsReply.
     private val pending = java.util.concurrent.ConcurrentHashMap<String, (Boolean, JSONObject?, String?) -> Unit>()
     private val seq = java.util.concurrent.atomic.AtomicInteger()
+    private const val RPC_TIMEOUT_MS = 8_000L
+    private const val TWO_WAY_TIMEOUT_MS = 15_000L
+    /** "Connected" = audio both ways on the leg: >=10 RTP packets received AND sent (ol_sfu stats), else fail. */
+    private fun awaitTwoWay(cb: (Boolean, String?) -> Unit) {
+        val t0 = android.os.SystemClock.elapsedRealtime()
+        fun check() {
+            if (!active) return cb(false, "leg closed")
+            val st = runCatching { PjsipEngine.nativeSfuStats() }.getOrNull()
+            if (st != null && st[0] >= 10 && st[2] >= 10) {
+                CallDiskLog.mark("two-way", "rx=${st[0]} tx=${st[2]}")
+                host?.emit(JSONObject().put("type", "pjsip:two-way").put("src", "rtp-stats").put("rx", st[0]).put("tx", st[2]).toString())
+                return cb(true, null) }
+            if (android.os.SystemClock.elapsedRealtime() - t0 > TWO_WAY_TIMEOUT_MS) {
+                CallDiskLog.mark("two-way-timeout", "rx=${st?.get(0)} tx=${st?.get(2)}")
+                return cb(false, "no two-way audio rx=${st?.get(0)} tx=${st?.get(2)}") }
+            main.postDelayed({ check() }, 100L)
+        }
+        main.post { check() }
+    }
     private fun rpc(event: String, data: JSONObject, cb: (Boolean, JSONObject?, String?) -> Unit) {
         val id = "pj${seq.incrementAndGet()}"; pending[id] = cb
-        if (host?.relay(id, event, data.toString()) != true) { pending.remove(id); cb(false, null, "no relay") }
+        CallDiskLog.mark("rpc", "id=$id $event")
+        if (host?.relay(id, event, data.toString()) != true) { pending.remove(id); cb(false, null, "no relay"); return }
+        main.postDelayed({ pending.remove(id)?.let { CallDiskLog.mark("rpc-timeout", "id=$id $event"); it(false, null, "timeout $event") } }, RPC_TIMEOUT_MS)
     }
-    private fun fail(step: String, e: String?, result: (Int, String?) -> Unit = { _, _ -> }) { result(-1, "$step: $e"); host?.emit(JSONObject().put("type", "pjsip:error").put("step", step).put("error", e ?: "").toString()) }
+    private fun fail(step: String, e: String?, result: (Int, String?) -> Unit = { _, _ -> }) { CallDiskLog.mark("fail", "$step: $e"); result(-1, "$step: $e"); host?.emit(JSONObject().put("type", "pjsip:error").put("step", step).put("error", e ?: "").toString()) }
 
     /** join -> plain:create (SFU ip/port/key) -> plain:connect (our key) -> plain:produce (our ssrc) -> plain:consume -> start leg. */
     private fun requestSfu(id: String, result: (Int, String?) -> Unit = { _, _ -> }) {
@@ -121,10 +156,11 @@ object NativeCallMedia {
               if (!ok2) return@rpc fail("connect", e2, result)
               rpc("ms:plain:produce", d().put("kind", "audio").put("ssrc", ssrc).put("payloadType", 111)) { ok3, _, e3 ->
                 if (!ok3) return@rpc fail("produce", e3, result)
-                rpc("ms:plain:consume", d()) { _, cons, _ ->
+                rpc("ms:plain:consume", d()) { ok4, cons, e4 ->
+                  if (!ok4) return@rpc fail("consume", e4, result)
                   val rxPt = cons?.optJSONArray("consumers")?.optJSONObject(0)?.optInt("payloadType", 111) ?: 111
                   main.post { val r = startLeg(Leg(ip, port, txKey, rx, ssrc, 111, rxPt))
-                    if (r == 0) { active = true; host?.nativeCallAudio(true) }; result(r, null)
+                    if (r == 0) { active = true; host?.nativeCallAudio(true) }; result(r, if (r != 0) "leg start $r" else null)
                     host?.emit(JSONObject().put("type", "pjsip:audio").put("start", r).toString()) } } } } } }
     }
 
@@ -148,7 +184,7 @@ object NativeCallMedia {
               rpc("ms:plain:produce", d().put("kind", "video").put("ssrcs", ssrcArr).put("payloadType", 102).put("codec", "h264").put("platform", "android")) { ok3, _, e3 ->
                 if (!ok3) return@rpc vfail("produce", e3)
                 if (camOn) main.post { NativeCallVideo.camera(true, face) { cok, ce -> if (!cok) fail("camera", ce) } }
-                rpc("ms:plain:consume", d()) { _, _, _ -> } // remote video arrives on the same leg; the SFU PLIs for a keyframe
+                rpc("ms:plain:consume", d()) { ok4, _, e4 -> if (!ok4) vfail("consume", e4) } // remote video arrives on the same leg; the SFU PLIs for a keyframe
               } } } }
     }
 
@@ -330,7 +366,7 @@ object NativeCallMedia {
     }
     private fun stopP2p() { direct = false; directDone?.invoke(false, null, "ended"); directDone = null; videoP2p = false; p2pGen++; p2pState = P2P_OFF; p2pCfg = null; p2pPendingOffer = null; runCatching { PjsipEngine.nativeP2pStop() } }
 
-    @JvmStatic fun closeAll() = main.post { stopP2p(); if (videoOn) { videoOn = false; NativeCallVideo.stop(); host?.nativeCallVideo(false) }; leg = null; runCatching { PjsipEngine.nativeSfuStop() }; PjsipEngine.teardown(); if (active) { active = false; host?.nativeCallAudio(false) } }
+    @JvmStatic fun closeAll() = main.post { CallDiskLog.mark("close-all"); stopP2p(); if (videoOn) { videoOn = false; NativeCallVideo.stop(); host?.nativeCallVideo(false) }; leg = null; runCatching { PjsipEngine.nativeSfuStop() }; PjsipEngine.teardown(); if (active) { active = false; host?.nativeCallAudio(false) } }
     @JvmStatic fun isActive(): Boolean = active
-    @JvmStatic fun releaseIdle() { PjsipEngine.teardown() }
+    @JvmStatic fun releaseIdle() { main.post { CallDiskLog.mark("release-idle"); PjsipEngine.teardown() } }
 }

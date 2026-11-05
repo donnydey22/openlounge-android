@@ -516,7 +516,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             showLoading();
             String target = withPendingPath(url);
             sessionBridge.setCurrentUrl(target);
-            webView.loadUrl(target);
+            CallDiskLog.mark("reload", "loadUrl site 1"); webView.loadUrl(target);
         });
     }
 
@@ -532,7 +532,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         showLoading();
         String legacy = Prefs.LEGACY_RAILWAY_URL + "/api/health";
         sessionBridge.setCurrentUrl(legacy);
-        webView.loadUrl(legacy);
+        CallDiskLog.mark("reload", "loadUrl site 2"); webView.loadUrl(legacy);
         handler.postDelayed(() -> {
             if (migrating) finishMigration(false);
         }, 8_000);
@@ -571,7 +571,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             showLoading();
             String target = withPendingPath(url);
             sessionBridge.setCurrentUrl(target);
-            webView.loadUrl(target);
+            CallDiskLog.mark("reload", "loadUrl site 3"); webView.loadUrl(target);
         });
     }
 
@@ -1133,6 +1133,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     }
 
     private void onPageCall(String json) {
+        try { CallDiskLog.mark("page-call", new JSONObject(json).optString("type")); } catch (Exception ignored) {}
         JSONObject m;
         try {
             m = new JSONObject(json);
@@ -1244,6 +1245,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     }
 
     private void callAudio(boolean on) {
+        CallDiskLog.mark("audio-session", "callAudio on=" + on);
         AudioManager am = callAudioManager;
         if (am == null) callAudioManager = am = (AudioManager) getSystemService(AUDIO_SERVICE);
         if (am == null) return;
