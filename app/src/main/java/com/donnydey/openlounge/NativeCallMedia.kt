@@ -138,7 +138,7 @@ object NativeCallMedia {
         fun check() {
             if (!active) return cb(false, "leg closed")
             val st = runCatching { PjsipEngine.nativeSfuStats() }.getOrNull()
-            if (st != null && st[0] >= 10 && st[2] >= 10) {
+            if (st != null && st[0] >= 10 && (st[2] >= 10 || muted)) { // muted during setup: conf disconnected, rx alone proves the path
                 CallDiskLog.mark("two-way", "rx=${st[0]} tx=${st[2]}")
                 host?.emit(JSONObject().put("type", "pjsip:two-way").put("src", "rtp-stats").put("rx", st[0]).put("tx", st[2]).toString())
                 return cb(true, null) }
