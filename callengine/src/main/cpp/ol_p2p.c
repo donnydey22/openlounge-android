@@ -3,7 +3,7 @@
    - :576-606  one allocator with host + STUN(srflx) + TURN(relay) candidates; :596-601 relay-only when P2P is off
    - :610-626  TURN servers from config (here: our coturn on the droplet)
    - :635-637  keep gathering / regather when networks change -> here ol_p2p_restart() on an OS network-change event
-   ICE = pjnath via pjmedia_transport_ice; encryption = pjmedia SRTP SDES (a=crypto in the same SDP), no own crypto.
+   ICE = pjnath via pjmedia_transport_ice; NO encryption: plain RTP straight on the ICE transport (Donny: no encryption).
    Same Opus pin as ol_sfu.c. If ICE fails, ev 3 tells the app to keep the SFU leg (existing path). */
 #include <pjsua-lib/pjsua.h>
 #include <pjmedia-codec/opus.h>
@@ -19,7 +19,7 @@ static ol_p2p_cfg cfg; static char s_stun[128], s_turn[128], s_tu[128], s_tp[256
 static ol_p2p_cb cb; static void *cb_user;
 
 /* Bundle demux (tgcalls v2: audio and video share one RTP transport, InstanceV2Impl.cpp:154/:460 + :1135). A thin
-   pjmedia transport between the audio stream and SRTP-over-ICE: PT 102 (H.264) goes to the video path, everything else
+   pjmedia transport between the audio stream and plain-RTP-over-ICE: PT 102 (H.264) goes to the video path, everything else
    to the Opus stream; RTCP goes to both (PLI/FIR for video, SR/RR for audio). */
 #define OL_P2P_VIDEO_PT 102
 typedef struct { pjmedia_transport base; void *ud; void (*rtp_cb2)(pjmedia_tp_cb_param *); void (*rtp_cb)(void *, void *, pj_ssize_t);
@@ -69,7 +69,7 @@ static int make_local_sdp(void) {
 static void send_local(void) { char buf[8000]; int n = pjmedia_sdp_print(local_sdp, buf, sizeof buf - 1);
   if (n <= 0) { emit(3, "sdp print"); return; } buf[n] = 0; emit(1, buf); }
 
-static int start_media(void) { /* both SDPs known; ICE checks begin, stream rides SRTP over ICE */
+static int start_media(void) { /* both SDPs known; ICE checks begin, stream rides plain RTP over ICE */
   pjmedia_endpt *ep = pjsua_get_pjmedia_endpt();
   if (pjmedia_transport_media_start(srtp, pool, local_sdp, remote_sdp, 0) != PJ_SUCCESS) return -1;
   pjmedia_stream_info si; if (pjmedia_stream_info_from_sdp(&si, pool, ep, local_sdp, remote_sdp, 0) != PJ_SUCCESS) return -2;
@@ -123,9 +123,7 @@ static int create_transports(void) {
   }
   pjmedia_ice_cb icb; pj_bzero(&icb, sizeof icb); icb.on_ice_complete = &on_ice_complete;
   if (pjmedia_ice_create3(ep, "olp2p", 1 /* rtcp-mux: one component */, &ic, &icb, 0, NULL, &ice) != PJ_SUCCESS) return -2;
-  pjmedia_srtp_setting ss; pjmedia_srtp_setting_default(&ss); ss.use = PJMEDIA_SRTP_MANDATORY; ss.close_member_tp = PJ_TRUE;
-  ss.crypto_count = 1; ss.crypto[0].name = pj_str("AES_CM_128_HMAC_SHA1_80");                 /* same suite as the SFU leg */
-  if (pjmedia_transport_srtp_create(ep, ice, &ss, &srtp) != PJ_SUCCESS) return -3;
+  srtp = ice; /* no SRTP wrapper: media rides the ICE transport as plain RTP */
   return 0; }
 
 int ol_p2p_begin(const ol_p2p_cfg *c, ol_p2p_cb f, void *user) {
