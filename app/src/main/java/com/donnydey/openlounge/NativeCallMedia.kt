@@ -59,8 +59,6 @@ object NativeCallMedia {
             "mute" -> { val m = runCatching { JSONObject(cmdJson).optBoolean("muted") }.getOrDefault(false)
                 val r = runCatching { PjsipEngine.nativeSfuSetMute(m) }.getOrDefault(-1); done(r >= 0, (r >= 0).toString(), if (r < 0) "mute failed" else null) }
             "end" -> { callId = null; closeAll(); done(true, "true", null) }
-            "stats" -> { val s = runCatching { PjsipEngine.nativeSfuStats() }.getOrNull()
-                done(true, JSONObject().put("rxPkt", s?.getOrNull(0)).put("rxLost", s?.getOrNull(1)).put("txPkt", s?.getOrNull(2)).toString(), null) }
             else -> done(false, null, "unknown op: $op")
         }
     }
