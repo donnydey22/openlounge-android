@@ -119,6 +119,18 @@ object NativeCallMedia {
     private val pending = java.util.concurrent.ConcurrentHashMap<String, (Boolean, JSONObject?, String?) -> Unit>()
     private val seq = java.util.concurrent.atomic.AtomicInteger()
     private const val RPC_TIMEOUT_MS = 8_000L
+    private const val CONSUME_WAIT_MS = 20_000L
+    /** ms:plain:consume every 500 ms until a consumer of [kind] comes back (peer produced) or the deadline passes. */
+    private fun consumeUntil(d: () -> JSONObject, kind: String, deadline: Long, cb: (Boolean, JSONObject?, String?) -> Unit) {
+        rpc("ms:plain:consume", d()) { ok, res, e ->
+            if (!ok) return@rpc cb(false, null, e)
+            val arr = res?.optJSONArray("consumers")
+            for (i in 0 until (arr?.length() ?: 0)) { val c = arr!!.optJSONObject(i); if (c?.optString("kind") == kind) return@rpc cb(true, c, null) }
+            if (callId == null) return@rpc cb(false, null, "ended")
+            if (android.os.SystemClock.elapsedRealtime() > deadline) return@rpc cb(false, null, "peer $kind never produced")
+            main.postDelayed({ consumeUntil(d, kind, deadline, cb) }, 500L)
+        }
+    }
     private const val TWO_WAY_TIMEOUT_MS = 15_000L
     /** "Connected" = audio both ways on the leg: >=10 RTP packets received AND sent (ol_sfu stats), else fail. */
     private fun awaitTwoWay(cb: (Boolean, String?) -> Unit) {
@@ -156,9 +168,14 @@ object NativeCallMedia {
               if (!ok2) return@rpc fail("connect", e2, result)
               rpc("ms:plain:produce", d().put("kind", "audio").put("ssrc", ssrc).put("payloadType", 111)) { ok3, _, e3 ->
                 if (!ok3) return@rpc fail("produce", e3, result)
-                rpc("ms:plain:consume", d()) { ok4, cons, e4 ->
-                  if (!ok4) return@rpc fail("consume", e4, result)
-                  val rxPt = cons?.optJSONArray("consumers")?.optJSONObject(0)?.optInt("payloadType", 111) ?: 111
+                // The SFU returns only producers that already exist (plain.mjs plain:consume); a later producer is only
+                // announced as ms:consumer:available, which no native client handled -> the first phone to join never
+                // consumed the other side = one-way audio. Poll consume until the peer's audio consumer exists, then
+                // start the leg with its real payload type.
+                consumeUntil(d, "audio", android.os.SystemClock.elapsedRealtime() + CONSUME_WAIT_MS) { ok4, cons, e4 ->
+                  if (!ok4) return@consumeUntil fail("consume", e4, result)
+                  val rxPt = cons?.optInt("payloadType", 111) ?: 111
+                  CallDiskLog.mark("consume", "audio pt=$rxPt")
                   main.post { val r = startLeg(Leg(ip, port, txKey, rx, ssrc, 111, rxPt))
                     if (r == 0) { active = true; host?.nativeCallAudio(true) }; result(r, if (r != 0) "leg start $r" else null)
                     host?.emit(JSONObject().put("type", "pjsip:audio").put("start", r).toString()) } } } } } }
@@ -184,7 +201,7 @@ object NativeCallMedia {
               rpc("ms:plain:produce", d().put("kind", "video").put("ssrcs", ssrcArr).put("payloadType", 102).put("codec", "h264").put("platform", "android")) { ok3, _, e3 ->
                 if (!ok3) return@rpc vfail("produce", e3)
                 if (camOn) main.post { NativeCallVideo.camera(true, face) { cok, ce -> if (!cok) fail("camera", ce) } }
-                rpc("ms:plain:consume", d()) { ok4, _, e4 -> if (!ok4) vfail("consume", e4) } // remote video arrives on the same leg; the SFU PLIs for a keyframe
+                consumeUntil(d, "video", android.os.SystemClock.elapsedRealtime() + CONSUME_WAIT_MS) { ok4, _, e4 -> if (!ok4) CallDiskLog.mark("video-consume", e4 ?: "") } // remote video arrives on the same leg; the SFU PLIs for a keyframe
               } } } }
     }
 

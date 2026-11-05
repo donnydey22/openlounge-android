@@ -62,18 +62,10 @@ object CallDiskLog {
             if (list.isEmpty()) return
             p.edit().putLong("lastExitTs", list.maxOf { it.timestamp }).apply()
             for (x in list.sortedBy { it.timestamp }) {
-                var trace = ""
-                if (x.reason == ApplicationExitInfo.REASON_CRASH_NATIVE || x.reason == ApplicationExitInfo.REASON_ANR) {
-                    trace = runCatching { x.traceInputStream?.use { s -> String(s.readBytes(64 * 1024)) } }.getOrNull().orEmpty()
-                }
                 mark("prev-exit", "ts=${x.timestamp} pid=${x.pid} reason=${x.reason} status=${x.status} imp=${x.importance} desc=${x.description ?: ""}")
-                if (trace.isNotEmpty()) mark("prev-exit-trace", trace.take(4000).replace('\n', '|'))
             }
         } catch (_: Throwable) { }
     }
-
-    private fun java.io.InputStream.readBytes(cap: Int): ByteArray { val b = java.io.ByteArrayOutputStream(); val buf = ByteArray(8192)
-        while (b.size() < cap) { val n = read(buf); if (n <= 0) break; b.write(buf, 0, n) }; return b.toByteArray() }
 
     /** Tail of current + previous call log for upload through the page's diag channel. */
     @JvmStatic fun tailJson(maxLines: Int = 200): String = synchronized(lock) {
