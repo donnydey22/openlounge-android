@@ -148,17 +148,36 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
                 c.connectTimeout = 8000; c.readTimeout = 8000
                 c.inputStream.use { android.graphics.BitmapFactory.decodeStream(it) }.also { c.disconnect() }
             } catch (_: Throwable) { null } ?: return@Thread
-            ui.post { if (callId == id && view != null) { photoView.setImageBitmap(bmp); photoView.animate().alpha(1f).setDuration(200).withEndAction { avatar.text = "" }.start() } }
+            ui.post { if (callId == id && view != null) { photoView.setImageBitmap(bmp); bgPhoto.setImageBitmap(bmp); bgPhoto.animate().alpha(1f).setDuration(200).start(); photoView.animate().alpha(1f).setDuration(200).withEndAction { avatar.text = "" }.start() } }
         }.start()
     }
     private lateinit var bFirst: Btn
+    private lateinit var bFlip: Btn
+    private val rings = ArrayList<View>()
+    private lateinit var top: LinearLayout
+    private lateinit var bg: FrameLayout
+    private lateinit var bgPhoto: android.widget.ImageView
     private lateinit var bVid: Btn
     private lateinit var bMic: Btn
 
     private fun build() {
         val v = FrameLayout(act).apply { isClickable = true } // the page under it never gets touches while shown
+        bg = FrameLayout(act)
+        val dm = act.resources.displayMetrics; val vmax = maxOf(dm.widthPixels, dm.heightPixels)
+        fun blob(color: Int, gravity: Int, dx: Float, dy: Float): View = View(act).apply {
+            background = GradientDrawable().apply { gradientType = GradientDrawable.RADIAL_GRADIENT; gradientRadius = vmax * 0.35f; colors = intArrayOf((0x8C shl 24) or (color and 0xFFFFFF), color and 0xFFFFFF) }
+            layoutParams = FrameLayout.LayoutParams((vmax * 0.7).toInt(), (vmax * 0.7).toInt(), gravity).apply { if (gravity and Gravity.START == Gravity.START) { leftMargin = (-vmax * 0.25).toInt(); topMargin = (-vmax * 0.2).toInt() } else { rightMargin = (-vmax * 0.3).toInt(); bottomMargin = (-vmax * 0.25).toInt() } }
+            animate().translationX(dx * vmax).translationY(dy * vmax).setDuration(14000).start()
+        }
+        bg.addView(blob(0xFF64748B.toInt(), Gravity.TOP or Gravity.START, 0.18f, 0.14f))
+        bg.addView(blob(0xFF6366F1.toInt(), Gravity.BOTTOM or Gravity.END, -0.16f, -0.12f))
+        bgPhoto = android.widget.ImageView(act).apply { scaleType = android.widget.ImageView.ScaleType.CENTER_CROP; alpha = 0f; scaleX = 1.15f; scaleY = 1.15f
+            if (android.os.Build.VERSION.SDK_INT >= 31) setRenderEffect(android.graphics.RenderEffect.createBlurEffect(dp(36).toFloat(), dp(36).toFloat(), android.graphics.Shader.TileMode.CLAMP))
+            setColorFilter(0x73000000) }
+        bg.addView(bgPhoto, FrameLayout.LayoutParams(-1, -1))
+        v.addView(bg, FrameLayout.LayoutParams(-1, -1))
         v.addView(View(act).apply { background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0x40000000, 0x0D000000, 0x8C000000.toInt())) }, FrameLayout.LayoutParams(-1, -1))
-        val top = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding(dp(24), 0, dp(24), 0) }
+        top = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding(dp(24), 0, dp(24), 0) }
         avatar = TextView(act).apply { setTextColor(Color.WHITE); textSize = 30f; gravity = Gravity.CENTER; typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
             }
         // squircle (web avatar-shape.ts, ~42% corner equivalent), clipped so the photo takes the same shape
@@ -168,18 +187,23 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         name = TextView(act).apply { setTextColor(Color.WHITE); textSize = 28f; gravity = Gravity.CENTER; maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
             typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.BOLD); letterSpacing = -0.01f }
         status = TextView(act).apply { setTextColor(0xCCFFFFFF.toInt()); textSize = 15f; gravity = Gravity.CENTER; fontFeatureSettings = "tnum" }
-        top.addView(avatarBox, LinearLayout.LayoutParams(dp(112), dp(112)).apply { bottomMargin = dp(12) })
+        val ringBox = FrameLayout(act).apply { clipChildren = false }
+        rings.clear()
+        repeat(3) { i -> val rv = View(act).apply { background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setStroke(dp(2), 0x59FFFFFF) }; alpha = 0f }
+            rings.add(rv); ringBox.addView(rv, FrameLayout.LayoutParams(dp(112), dp(112))) }
+        ringBox.addView(avatarBox, FrameLayout.LayoutParams(dp(112), dp(112)))
+        top.clipChildren = false; v.clipChildren = false
+        top.addView(ringBox, LinearLayout.LayoutParams(dp(112), dp(112)).apply { bottomMargin = dp(12) })
         top.addView(name, LinearLayout.LayoutParams(-1, -2)); top.addView(status, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
         v.addView(top, FrameLayout.LayoutParams(-1, -2, Gravity.CENTER).apply { bottomMargin = dp(80) })
         val row = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER or Gravity.BOTTOM; setPadding(dp(16), 0, dp(16), 0) }
-        bFirst = btn(false, false) {
-            if (camOn) { facing = if (facing == "user") "environment" else "user"; actions.camera(true, facing) }
-            else { speakerOn = !speakerOn; actions.speaker(speakerOn); render() } }
+        bFirst = btn(false, false) { speakerOn = !speakerOn; actions.speaker(speakerOn); render() }
+        bFlip = btn(false, false) { facing = if (facing == "user") "environment" else "user"; actions.camera(true, facing) }
         bVid = btn(false, false) { if (!video) return@btn; camOn = !camOn; actions.camera(camOn, facing); render() }
         bMic = btn(false, false) { actions.pageCall(JSONObject().put("type", "call:mute").put("muted", !muted).toString()) }
         val end = btn(false, true) { actions.pageCall(JSONObject().put("type", "call:hangup").toString()) }
         end.label.text = "End call"; end.icon.setImageResource(R.drawable.ol_call_phone_off)
-        row.addView(bFirst.box); row.addView(bVid.box); row.addView(bMic.box); row.addView(end.box)
+        row.addView(bFirst.box); row.addView(bFlip.box); row.addView(bVid.box); row.addView(bMic.box); row.addView(end.box)
         v.addView(row, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply { bottomMargin = dp(40) })
         root.addView(v, FrameLayout.LayoutParams(-1, -1)); view = v
     }
@@ -188,13 +212,28 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         val v = view ?: return
         v.setBackgroundColor(if (nativeVideo) Color.TRANSPARENT else 0xFF0B1220.toInt())
         avatarBox.visibility = if (nativeVideo) View.GONE else View.VISIBLE
+        bg.visibility = if (nativeVideo) View.GONE else View.VISIBLE
+        (avatarBox.parent as View).visibility = avatarBox.visibility
+        val ringing = state == NativeCallFlow.State.WAITING
+        rings.forEachIndexed { i, rv -> if (ringing && rv.tag == null) { rv.tag = 1; pulse(rv, i * 800L) } else if (!ringing) { rv.tag = null; rv.animate().cancel(); rv.alpha = 0f } }
+        name.textSize = if (nativeVideo) 20f else 28f
+        (top.layoutParams as FrameLayout.LayoutParams).apply { gravity = if (nativeVideo) Gravity.TOP else Gravity.CENTER; topMargin = if (nativeVideo) dp(64) else 0; bottomMargin = if (nativeVideo) 0 else dp(80) }
+        top.requestLayout()
         if (photoView.alpha < 1f) avatar.text = initials(name.text?.toString().orEmpty())
         if (state != NativeCallFlow.State.ESTABLISHED) status.text = NativeCallFlow.statusText(state)
-        if (camOn) bFirst.set("Flip", R.drawable.ol_call_refresh_cw)
-        else bFirst.set(if (speakerOn) "Speaker" else "Phone", if (speakerOn) R.drawable.ol_call_volume2 else R.drawable.ol_call_ear, active = speakerOn)
+        bFlip.box.visibility = if (camOn) View.VISIBLE else View.GONE
+        bFlip.set("Flip", R.drawable.ol_call_refresh_cw)
+        bFirst.set(if (speakerOn) "Speaker" else "Phone", if (speakerOn) R.drawable.ol_call_volume2 else R.drawable.ol_call_ear, active = speakerOn)
         bVid.box.visibility = if (video) View.VISIBLE else View.GONE // web: native voice calls keep their audio-only policy
         bVid.set(if (camOn) "Stop video" else "Video", if (camOn) R.drawable.ol_call_video else R.drawable.ol_call_video_off, active = camOn)
         bMic.set(if (muted) "Unmute" else "Mute", if (muted) R.drawable.ol_call_mic_off else R.drawable.ol_call_mic, active = muted)
+    }
+
+    private fun pulse(rv: View, delay: Long) {
+        if (rv.tag == null || view == null) return
+        rv.scaleX = 1f; rv.scaleY = 1f; rv.alpha = 0.8f
+        rv.animate().setStartDelay(delay).scaleX(1.9f).scaleY(1.9f).alpha(0f).setDuration(2400)
+            .setInterpolator(android.view.animation.PathInterpolator(0.2f, 0.6f, 0.35f, 1f)).withEndAction { pulse(rv, 0) }.start()
     }
 
     val showing: Boolean get() = view != null && !hidden

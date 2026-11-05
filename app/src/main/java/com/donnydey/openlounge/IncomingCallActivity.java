@@ -164,11 +164,11 @@ public class IncomingCallActivity extends Activity {
 
     private void buildUi(String name, boolean video, String photoUrl) {
         FrameLayout root = new FrameLayout(this);
-        root.setBackgroundColor(Color.parseColor("#0B0B0D"));
+        root.setBackgroundColor(Color.parseColor("#0B1220"));
 
         ImageView backdrop = new ImageView(this);
         backdrop.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        backdrop.setAlpha(0.45f);
+        backdrop.setAlpha(0.55f);
         root.addView(backdrop, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         LinearLayout col = new LinearLayout(this);
@@ -179,38 +179,38 @@ public class IncomingCallActivity extends Activity {
 
         FrameLayout avatar = new FrameLayout(this);
         GradientDrawable circle = new GradientDrawable();
-        circle.setShape(GradientDrawable.OVAL);
-        circle.setColor(Color.parseColor("#2C2C2E"));
+        circle.setCornerRadius(dp(47));
+        circle.setColor(Color.parseColor("#64748B"));
         avatar.setBackground(circle);
         avatar.setClipToOutline(true);
         TextView initial = new TextView(this);
-        initial.setText(name.isEmpty() ? "?" : name.substring(0, name.offsetByCodePoints(0, 1)).toUpperCase(java.util.Locale.getDefault()));
-        initial.setTextColor(Color.parseColor("#F2B366"));
-        initial.setTextSize(TypedValue.COMPLEX_UNIT_SP, 44);
+        initial.setText(initials(name));
+        initial.setTextColor(Color.WHITE);
+        initial.setTextSize(TypedValue.COMPLEX_UNIT_SP, 30);
         initial.setGravity(Gravity.CENTER);
         avatar.addView(initial, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         ImageView photo = new ImageView(this);
         photo.setScaleType(ImageView.ScaleType.CENTER_CROP);
         avatar.addView(photo, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        col.addView(avatar, new LinearLayout.LayoutParams(dp(120), dp(120)));
+        col.addView(avatar, new LinearLayout.LayoutParams(dp(112), dp(112)));
 
         TextView title = new TextView(this);
         title.setText(name);
         title.setTextColor(Color.WHITE);
-        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 30);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 28);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
         title.setGravity(Gravity.CENTER);
         title.setMaxLines(2);
         LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        tl.topMargin = dp(24);
+        tl.topMargin = dp(12);
         col.addView(title, tl);
 
         TextView sub = new TextView(this);
         sub.setText(getString(video ? R.string.call_incoming_video : R.string.call_incoming_audio));
-        sub.setTextColor(Color.parseColor("#A1A1A6"));
-        sub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        sub.setTextColor(0xCCFFFFFF);
+        sub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
         LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        sl.topMargin = dp(8);
+        sl.topMargin = dp(4);
         col.addView(sub, sl);
 
         View spacer = new View(this);
@@ -219,40 +219,49 @@ public class IncomingCallActivity extends Activity {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER);
-        row.addView(button(getString(R.string.call_decline), "#E5484D", v -> decline()), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        row.addView(button(getString(R.string.call_accept), "#30A46C", v -> accept()), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(button(getString(R.string.call_decline), "#EF4444", R.drawable.ol_call_phone_off, v -> decline()), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(button(getString(R.string.call_accept), "#10B981", video ? R.drawable.ol_call_video : R.drawable.ol_call_phone, v -> accept()), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         col.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         setContentView(root);
         loadPhoto(photoUrl, photo, backdrop);
     }
 
-    private View button(String label, String color, View.OnClickListener onClick) {
+    private View button(String label, String color, int iconRes, View.OnClickListener onClick) {
         LinearLayout b = new LinearLayout(this);
         b.setOrientation(LinearLayout.VERTICAL);
         b.setGravity(Gravity.CENTER_HORIZONTAL);
-        TextView disc = new TextView(this);
+        FrameLayout disc = new FrameLayout(this);
         GradientDrawable g = new GradientDrawable();
         g.setShape(GradientDrawable.OVAL);
         g.setColor(Color.parseColor(color));
         disc.setBackground(g);
-        disc.setText(label.equals(getString(R.string.call_accept)) ? "✓" : "✕");
-        disc.setTextColor(Color.WHITE);
-        disc.setTextSize(TypedValue.COMPLEX_UNIT_SP, 30);
-        disc.setGravity(Gravity.CENTER);
+        disc.setElevation(dp(8));
+        ImageView ic = new ImageView(this);
+        ic.setImageResource(iconRes);
+        disc.addView(ic, new FrameLayout.LayoutParams(dp(32), dp(32), Gravity.CENTER));
         disc.setContentDescription(label);
         disc.setOnClickListener(onClick);
-        b.addView(disc, new LinearLayout.LayoutParams(dp(76), dp(76)));
+        b.addView(disc, new LinearLayout.LayoutParams(dp(72), dp(72)));
         TextView t = new TextView(this);
         t.setText(label);
-        t.setTextColor(Color.WHITE);
-        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        t.setTextColor(0xD9FFFFFF);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         t.setGravity(Gravity.CENTER);
         t.setOnClickListener(onClick);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(10);
+        lp.topMargin = dp(8);
         b.addView(t, lp);
         return b;
+    }
+
+    /** web utils initials(): one word -> first two, 2+ words -> first + last. */
+    private static String initials(String n) {
+        String[] w = n.trim().split("\\s+");
+        if (n.trim().isEmpty()) return "?";
+        if (w.length == 1) return w[0].substring(0, w[0].offsetByCodePoints(0, Math.min(2, w[0].codePointCount(0, w[0].length())))).toUpperCase(java.util.Locale.getDefault());
+        return (w[0].substring(0, w[0].offsetByCodePoints(0, 1)) + w[w.length - 1].substring(0, w[w.length - 1].offsetByCodePoints(0, 1))).toUpperCase(java.util.Locale.getDefault());
     }
 
     /** https photo only, ≤ 2 MB, decoded downsampled off the main thread. */
@@ -288,7 +297,7 @@ public class IncomingCallActivity extends Activity {
                     if (isFinishing()) return;
                     photo.setImageBitmap(bmp);
                     backdrop.setImageBitmap(bmp);
-                    if (Build.VERSION.SDK_INT >= 31) backdrop.setRenderEffect(RenderEffect.createBlurEffect(60f, 60f, Shader.TileMode.CLAMP));
+                    if (Build.VERSION.SDK_INT >= 31) backdrop.setRenderEffect(RenderEffect.createBlurEffect(dp(36), dp(36), Shader.TileMode.CLAMP));
                     else backdrop.setAlpha(0.15f);
                 });
             } catch (Exception ignored) {
