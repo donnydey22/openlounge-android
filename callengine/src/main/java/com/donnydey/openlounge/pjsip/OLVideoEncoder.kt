@@ -56,6 +56,33 @@ object OLVideoSpecV2 {
     val top = if (supports1080(mime)) OLVideoLayer(1920, 1080, BPS[2], 30) else OLVideoLayer(1280, 720, BPS[2], 30)
     return listOf(OLVideoLayer(320, 180, BPS[0], 15), OLVideoLayer(1280, 720, BPS[1], 30).let { if (top.height == 720) OLVideoLayer(640, 360, BPS[1], 30) else it }, top)
   }
+
+  /**
+   * Capability-based ladder for the call path (Linphone CPU heuristic / LiveKit degradation).
+   * SFU still expects exactly 3 SSRCs; we lower resolution/fps/bps on weak hardware (A11-era, mid-range,
+   * no 1080p30 encoder, low CPU count) so 1080p×3 does not shake the encode path. Capable devices keep 1080p.
+   */
+  fun weakHardware(mime: String = MediaFormat.MIMETYPE_VIDEO_AVC): Boolean {
+    if (!supports1080(mime)) return true
+    if (Build.VERSION.SDK_INT <= 30) return true // A11 and older: 1080p×3 is shaky
+    if (Runtime.getRuntime().availableProcessors() <= 6) return true
+    // Encoder instance limit: if the best HW AVC encoder advertises <3 concurrent, treat as weak.
+    val hw = hwEncoders(mime).firstOrNull() ?: return true
+    val maxInst = runCatching {
+      if (Build.VERSION.SDK_INT >= 23) hw.getCapabilitiesForType(mime).maxSupportedInstances else 0
+    }.getOrDefault(0)
+    return maxInst in 1..2
+  }
+
+  fun layersForDevice(mime: String = MediaFormat.MIMETYPE_VIDEO_AVC): List<OLVideoLayer> {
+    if (!weakHardware(mime)) return layers(mime)
+    // Lower ladder, still 3 layers/SSRCs: 180p / 360p / 720p, capped fps
+    return listOf(
+      OLVideoLayer(320, 180, 100_000, 15),
+      OLVideoLayer(640, 360, 350_000, 24),
+      OLVideoLayer(1280, 720, 900_000, 24),
+    )
+  }
 }
 
 /** One hardware MediaCodec per layer, each with its own input Surface. Throws VideoConfigException -> fail the call. */
@@ -72,9 +99,35 @@ class OLSimulcastEncoder(val onEncoded: (layer: Int, buf: java.nio.ByteBuffer, i
   val surfaces = ArrayList<Surface>()
   private var drain: Thread? = null
   private var keyReq = 0
+  private val pendingKeys = java.util.concurrent.atomic.AtomicInteger()
+  fun requestKeyframes() { pendingKeys.set((1 shl layers.size) - 1) }
+  private val lastKeyReqMs = LongArray(3)
   /** Per-layer PLI/FIR bitmask source (default: the native SFU video leg). */
   var keyReqSource: () -> Int = { runCatching { PjsipEngine.nativeSfuVideoTakeKeyReq() }.getOrDefault(0) }
+  /** iOS parity (OLVideoCodec.keyReqMinMs): throttle unsolicited IDR storms per SSRC. */
+  var keyReqMinMs: Long = 500L
+  /** Fired once when a MediaCodec session dies mid-call (Android analogue of VT -12903). Caller rebuilds all layers. */
+  var onInvalidated: (() -> Unit)? = null
+  @Volatile private var invalidatedFired = false
   @Volatile private var running = false
+
+  /** Force IDR on layers in [mask] (bit i = layer i = SSRC index). throttle=false for local events (flip, foreground). */
+  fun forceKeyframe(mask: Int = -1, throttle: Boolean = true) {
+    val now = android.os.SystemClock.elapsedRealtime()
+    synchronized(this) {
+      for (i in layers.indices) {
+        if (mask and (1 shl i) == 0) continue
+        if (throttle && lastKeyReqMs[i] != 0L && now - lastKeyReqMs[i] < keyReqMinMs) continue
+        lastKeyReqMs[i] = now
+        keyReq = keyReq or (1 shl i)
+      }
+    }
+  }
+  private fun fireInvalidated() {
+    if (invalidatedFired) return
+    invalidatedFired = true
+    onInvalidated?.invoke()
+  }
   /** 3 = all encoder hints accepted; lower = hints the encoder rejected were dropped (reported by the harness). */
   var hintLevel = 3
 
@@ -116,17 +169,32 @@ class OLSimulcastEncoder(val onEncoded: (layer: Int, buf: java.nio.ByteBuffer, i
       // Software OMX.google.h264 (emulator) can't afford 3 IDRs/s at 30 fps; PLI still gets an immediate IDR there.
       val floorMs = if (encoderName.startsWith("OMX.google") || encoderName.startsWith("c2.android")) 2000L else OLVideoSpecV2.KEYFRAME_S * 1000L
       while (running) for ((i, c) in codecs.withIndex()) {
-        // Keyframes: answer SFU PLI/FIR with an IDR now, and force one every KEYFRAME_S as a floor (OMX.google.h264 and
-        // some HW encoders ignore KEY_I_FRAME_INTERVAL for Surface input; a new consumer would otherwise wait forever).
-        if (i == 0) keyReq = keyReq or keyReqSource()
+        // Keyframes: answer SFU PLI/FIR with an IDR now (per-SSRC bitmask, throttled), and force one every KEYFRAME_S
+        // as a floor (OMX.google.h264 and some HW encoders ignore KEY_I_FRAME_INTERVAL for Surface input).
+        if (i == 0) {
+          val incoming = keyReqSource()
+          if (incoming != 0) forceKeyframe(incoming, throttle = true)
+        }
         val now = android.os.SystemClock.elapsedRealtime()
-        if (keyReq and (1 shl i) != 0 || now - lastSync[i] >= floorMs) {
-          keyReq = keyReq and (1 shl i).inv(); lastSync[i] = now
+        val wantKey = synchronized(this@OLSimulcastEncoder) {
+          val w = keyReq and (1 shl i) != 0
+          if (w) keyReq = keyReq and (1 shl i).inv()
+          w
+        } || now - lastSync[i] >= floorMs
+        if (wantKey) {
+          lastSync[i] = now
           runCatching { c.setParameters(android.os.Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) }) }
         }
-        val ix = try { c.dequeueOutputBuffer(info, 2_000) } catch (_: IllegalStateException) { -1 }
+        val ix = try { c.dequeueOutputBuffer(info, 2_000) } catch (_: IllegalStateException) {
+          fireInvalidated(); -1
+        }
         if (ix == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED && csd[i] == null) csdFrom(c.outputFormat)?.let { csd[i] = it }
-        if (ix >= 0) { c.getOutputBuffer(ix)?.let { onEncoded(i, it, info); annexB(i, it, info) }; c.releaseOutputBuffer(ix, false) }
+        if (ix >= 0) {
+          try {
+            c.getOutputBuffer(ix)?.let { onEncoded(i, it, info); annexB(i, it, info) }
+            c.releaseOutputBuffer(ix, false)
+          } catch (_: IllegalStateException) { fireInvalidated() }
+        }
       }
     }, "ol-video-send").also { it.start() }
   }
@@ -159,10 +227,10 @@ class OLSimulcastEncoder(val onEncoded: (layer: Int, buf: java.nio.ByteBuffer, i
 
   /** Teardown on every call end. Any EGL fan-out writing into [surfaces] must be released first. */
   fun stop() {
-    running = false; drain?.join(500); drain = null
+    running = false; onInvalidated = null; drain?.join(500); drain = null
     for (c in codecs) runCatching { c.stop() }.also { runCatching { c.release() } }
     for (s in surfaces) runCatching { s.release() }
-    codecs.clear(); surfaces.clear()
+    codecs.clear(); surfaces.clear(); invalidatedFired = false
   }
 }
 

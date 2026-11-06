@@ -123,7 +123,7 @@ object NativeCallVideo {
         val preview = local?.surfaceTexture?.let { Surface(it) }
         cameraHandler.post {
             if (gen != camGen) { preview?.release(); return@post }
-            stopCamera()
+            stopCapture() // flip changes only Camera2; keep encoder/EGL state and RTP SSRCs intact
             setupCamera(gen, selectedFacing, preview)
         }
     }
@@ -149,28 +149,36 @@ object NativeCallVideo {
             val ch = mgr.getCameraCharacteristics(id)
             val top = LAYERS.last()
             val size = cameraSize(ch, top.width, top.height) ?: error("empty camera sizes")
-            val e = OLSimulcastEncoder(layersOverride = LAYERS, forceH264 = true, requireHardware = true)
-            enc = e // own partially-initialized instances too, so all failure paths can clean them up
-            e.onAnnexB = { layer, au, k, ts -> if (running && !closing) {
-                PjsipEngine.nativeSfuVideoSend(layer, au, au.size, ts, k)
-                if (layer == LAYERS.size - 1) txFrames++
-            } }
-            e.start()
-            val f = OLCameraFanout(size.width, size.height, e.fanoutTargets())
-            fan = f; f.start()
-            f.setPreview(preview, 1280, 720)
+            var e = enc
+            var f = fan
+            if (e == null || f == null) {
+                e = OLSimulcastEncoder(layersOverride = LAYERS, forceH264 = true, requireHardware = true)
+                enc = e // own partially-initialized instances too
+                e.onAnnexB = { layer, au, k, ts -> if (running && !closing) {
+                    PjsipEngine.nativeSfuVideoSend(layer, au, au.size, ts, k)
+                    if (layer == LAYERS.size - 1) txFrames++
+                } }
+                e.start()
+                f = OLCameraFanout(size.width, size.height, e.fanoutTargets())
+                fan = f; f.start()
+            } else {
+                f.resizeCameraInput(size.width, size.height)
+                e.requestKeyframes() // decoder refresh, not codec rebuild
+            }
+            val captureFan = f
+            captureFan.setPreview(preview, 1280, 720)
             mgr.openCamera(id, object : CameraDevice.StateCallback() {
                 override fun onOpened(d: CameraDevice) {
                     if (gen != camGen) { d.close(); return }
                     cam = d
                     @Suppress("DEPRECATION")
-                    try { d.createCaptureSession(listOf(f.cameraSurface), object : CameraCaptureSession.StateCallback() {
+                    try { d.createCaptureSession(listOf(captureFan.cameraSurface), object : CameraCaptureSession.StateCallback() {
                         override fun onConfigured(s: CameraCaptureSession) {
                             if (gen != camGen) { s.close(); return }
                             session = s
                             try {
                                 val rq = d.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-                                    addTarget(f.cameraSurface)
+                                    addTarget(captureFan.cameraSurface)
                                     fpsRange(ch)?.let { set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
                                 }
                                 s.setRepeatingRequest(rq.build(), null, cameraHandler)
@@ -212,11 +220,15 @@ object NativeCallVideo {
     }
 
     /** ol-camera only. Close the producer before the EGL consumers and codec input surfaces. */
-    private fun stopCamera() {
+    private fun stopCapture() {
         runCatching { session?.stopRepeating() }
         runCatching { session?.abortCaptures() }
         runCatching { session?.close() }; session = null
         runCatching { cam?.close() }; cam = null
+    }
+
+    private fun stopCamera() {
+        stopCapture()
         runCatching { fan?.release() }; fan = null
         runCatching { enc?.stop() }; enc = null
     }

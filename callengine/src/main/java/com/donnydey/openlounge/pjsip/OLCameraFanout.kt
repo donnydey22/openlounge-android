@@ -82,6 +82,15 @@ class OLCameraFanout(private val camW: Int, private val camH: Int, private val e
     st = s; cameraSurface = Surface(s)
   }
 
+  /** Flip only rebinds Camera2 to this same input Surface; codec/EGL outputs survive. */
+  fun resizeCameraInput(w: Int, h0: Int) {
+    val done = CountDownLatch(1)
+    var error: Throwable? = null
+    h.post { try { check(!released); st?.setDefaultBufferSize(w, h0) } catch (t: Throwable) { error = t } finally { done.countDown() } }
+    check(done.await(2, TimeUnit.SECONDS)) { "camera input resize timeout" }
+    error?.let { throw IllegalStateException("camera input resize", it) }
+  }
+
   /** Attach/detach the native local preview independently of capture and encoders (null = detach). */
   fun setPreview(surface: Surface?, w: Int, h0: Int) = h.post {
     if (released) return@post
