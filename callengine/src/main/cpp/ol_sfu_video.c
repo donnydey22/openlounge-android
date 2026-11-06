@@ -8,6 +8,7 @@
 #include <pjlib-util/base64.h>
 #include <string.h>
 #include "ol_sfu_video.h"
+#include "ol_rtcp_feedback.h"
 #define OL_MTU 1100
 #define OL_AU_MAX (1 << 21)
 /* Callers (VideoToolbox/MediaCodec callback threads, XCTest) may be foreign to pjlib: register before pj_mutex/pjmedia use. */
@@ -73,10 +74,11 @@ static void send_pli(pj_uint32_t media) {
 static void on_rtcp(void *u, void *p, pj_ssize_t n) { (void)u; const pj_uint8_t *b = (const pj_uint8_t *)p; int o = 0;
   while (o + 4 <= n) { int len = 4 * ((b[o + 2] << 8 | b[o + 3]) + 1); if (o + len > n) break;
     int pt = b[o + 1], fmt = b[o] & 0x1f;
-    if (pt == 206 && (fmt == 1 || fmt == 4) && len >= 12) {
-      pj_uint32_t m = fmt == 1 ? ((pj_uint32_t)b[o + 8] << 24 | b[o + 9] << 16 | b[o + 10] << 8 | b[o + 11])
-                               : (len >= 20 ? ((pj_uint32_t)b[o + 12] << 24 | b[o + 13] << 16 | b[o + 14] << 8 | b[o + 15]) : 0);
-      for (unsigned i = 0; i < vnl; i++) if (vssrc[i] == m || m == 0) { st_pli_rx++; keyreq |= 1u << i; if (kfcb) kfcb(kf_user, (int)i); } }
+    if ((b[o] >> 6) == 2 && pt == 206 && (fmt == 1 || fmt == 4)) {
+      unsigned mask = ol_rtcp_keyframe_mask(b + o, len, vssrc, vnl);
+      __atomic_fetch_or(&keyreq, mask, __ATOMIC_SEQ_CST);
+      for (unsigned i = 0; i < vnl; i++) if (mask & (1u << i)) { st_pli_rx++; if (kfcb) kfcb(kf_user, (int)i); }
+    }
     o += len; } }
 
 void ol_sfu_video_set_sink(ol_video_sink_cb cb, void *user) { OLV_REG(); sink = cb; sink_user = user; }
@@ -185,5 +187,5 @@ void ol_sfu_video_p2p_rtcp(void *pkt, int len) { if (vnl) on_rtcp(NULL, pkt, len
 /* 1 = switch video onto P2P (caller checks both directions first); 0 = back to the server route. */
 int ol_sfu_video_p2p_live(int on) { OLV_REG(); if (!p2p_rtp) return -1;
   if (vmx) pj_mutex_lock(vmx); p2pmode = on ? 2 : 1; needKey = 1; last_pli.u64 = 0; if (vmx) pj_mutex_unlock(vmx);
-  keyreq |= vnl ? 1u << (vnl - 1) : 0; /* fresh IDR on the new route */ return 0; }
+  __atomic_fetch_or(&keyreq, vnl ? 1u << (vnl - 1) : 0, __ATOMIC_SEQ_CST); /* fresh IDR on the new route */ return 0; }
 void ol_sfu_video_p2p_stats(unsigned *rx, unsigned *tx) { *rx = st_p2p_rx; *tx = st_p2p_tx; }
