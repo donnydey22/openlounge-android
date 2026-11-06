@@ -38,6 +38,8 @@ object CallMediaCoordinator {
         CallDiskLog.mark("op", op)
         when (op) {
             "close" -> { closeAll(); done(true, "true", null) }
+            // page shim forwards server evt rtc:signal {callId,gen,seq,kind,sdp?,candidate?,from}
+            "rtcSignal" -> { val m = JSONObject(cmdJson).optJSONObject("data"); main.post { if (m != null) rtc?.onSignal(m) }; done(true, "true", null) }
             "prewarm" -> main.post { done(true, JSONObject().put("engine", "pjsip").put("start", PjsipEngine.start()).toString(), null) } // pjsua on main only (was JavaBridge thread -> unregistered pjlib thread)
             "open" -> main.post {
                 val c = JSONObject(cmdJson)
@@ -55,6 +57,8 @@ object CallMediaCoordinator {
                 if (callId != id) { soundGeneration++; localFailure = null }
                 localFailure?.let { return done(false, null, it) }
                 callId = id; p2pCfg = null; direct = false
+                val media = c.optJSONObject("media")
+                if (USE_RTC_PC && (media == null || media.optString("provider") == "p2p")) return startRtc(id, c.optBoolean("caller"), media, done)
                 CallDiskLog.begin(id); CallDiskLog.mark("connect", "video=$wantVideo pageDirect=${c.optBoolean("direct")} -> server route")
                 // ONE path per call (Donny 9:10/9:12 AM Nov 5 2026; b107/46 scope): the server route (SFU) for EVERY
                 // pairing, phone<->phone included. The page's "direct" hint is logged and ignored; no direct leg is layered on.
@@ -75,6 +79,7 @@ object CallMediaCoordinator {
             // the other phone's call:p2p message (page forwards it from the server socket)
             "p2p" -> { CallDiskLog.mark("p2p-ignored"); done(true, "true", null) } // no direct leg in this build
             "mute" -> { val m = runCatching { JSONObject(cmdJson).optBoolean("muted") }.getOrDefault(false)
+                rtc?.let { it.setMute(m); CallAudioEngine.setMute(m); muted = m; return done(true, "true", null) }
                 muted = m; if (p2pState != P2P_OFF) runCatching { PjsipEngine.nativeP2pSetMute(m) }
                 if (direct) return done(true, "true", null)
                 main.post { val r = runCatching { CallAudioEngine.setMute(m); PjsipEngine.nativeSfuSetMute(m) }.getOrDefault(-1); done(r >= 0, (r >= 0).toString(), if (r < 0) "mute failed" else null) } }
@@ -119,6 +124,23 @@ object CallMediaCoordinator {
             }
         }
     }
+    // ---- P2P PeerConnection path (contract v1, rtc:signal / rtc:iceConfig over the page's OL socket via host.relay).
+    // USE_RTC_PC=false restores the legacy PJSIP ol_sfu/ol_p2p media path for safe cutover. With the flag on, new calls
+    // never start ol_sfu/ol_p2p audio. Until libwebrtc lands the call fails with a typed DEVICE error (no relay).
+    @JvmField var USE_RTC_PC = true
+    @Volatile private var rtc: com.donnydey.openlounge.rtc.RtcCallSession? = null
+    private fun startRtc(id: String, caller: Boolean, media: JSONObject?, done: (Boolean, String?, String?) -> Unit) {
+        CallDiskLog.mark("connect-rtc", "caller=$caller turn=${media?.optJSONArray("iceServers")?.length() ?: 0}")
+        main.post { openCallAudio("rtc") { f ->
+            if (f != null) return@openCallAudio done(false, null, localError(f))
+            val sess = com.donnydey.openlounge.rtc.RtcCallSession(id, caller, media,
+                request = { ev, data, cb -> rpc(ev, data, cb) },
+                onConnected = { active = true; done(true, JSONObject().put("engine", "webrtc").put("path", "p2p").toString(), null) },
+                onFailure = { fl -> CallDiskLog.mark("rtc-failure", fl.toJson()); done(false, null, if (fl.relayEligible) "network:" + fl.toJson() else localError(fl)) })
+            rtc = sess; sess.start()
+        } }
+    }
+
     private fun startLeg(l: Leg, done: (Int) -> Unit) {
         CallDiskLog.mark("engine-start")
         val s0 = PjsipEngine.start() // transport leg only; no PJSIP sound device
@@ -499,7 +521,7 @@ object CallMediaCoordinator {
     }
     private fun stopP2p() { direct = false; directDone?.invoke(false, null, "ended"); directDone = null; videoP2p = false; relayRetryUsed = false; p2pGen++; p2pState = P2P_OFF; p2pCfg = null; p2pPendingOffer = null; runCatching { PjsipEngine.nativeP2pStop() } }
 
-    @JvmStatic fun closeAll() = main.post { soundGeneration++; localFailure = null; CallDiskLog.mark("close-all"); stopP2p(); if (videoOn) { videoOn = false; NativeCallVideo.stop(); host?.nativeCallVideo(false) }; leg = null; runCatching { PjsipEngine.nativeSfuStop() }; PjsipEngine.teardown(); CallAudioEngine.close(); appCtx?.let { CallAudioManager.get(it).release() }; if (active) { active = false; host?.nativeCallAudio(false) } }
+    @JvmStatic fun closeAll() = main.post { rtc?.close(); rtc = null; soundGeneration++; localFailure = null; CallDiskLog.mark("close-all"); stopP2p(); if (videoOn) { videoOn = false; NativeCallVideo.stop(); host?.nativeCallVideo(false) }; leg = null; runCatching { PjsipEngine.nativeSfuStop() }; PjsipEngine.teardown(); CallAudioEngine.close(); appCtx?.let { CallAudioManager.get(it).release() }; if (active) { active = false; host?.nativeCallAudio(false) } }
     @JvmStatic fun isActive(): Boolean = active
     @JvmStatic fun releaseIdle() { main.post { CallDiskLog.mark("release-idle"); PjsipEngine.teardown() } }
 }

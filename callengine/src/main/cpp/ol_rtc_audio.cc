@@ -8,7 +8,8 @@
 #ifdef OL_HAVE_WEBRTC
 #include "api/audio/audio_device.h"
 #include "api/environment/environment_factory.h"
-#include "modules/audio_device/include/audio_device_factory.h"
+#include "sdk/android/native_api/audio_device_module/audio_device_android.h"
+#include "sdk/android/native_api/base/init.h"
 #endif
 
 namespace ol { namespace rtc_audio {
@@ -21,10 +22,13 @@ bool Available() { return true; }
 int Open(int in, int out, const int* rates, int n) {
   std::lock_guard<std::mutex> l(mu);
   for (int i = 0; i < n; i++) {
-    // TODO(OL): AAudio first, then OpenSL ES via CreateAndroidAudioDeviceModule(kind); honor device ids via
-    // AudioManager.setCommunicationDevice (Java) — WebRTC Android ADM follows the communication route.
-    adm = webrtc::CreateAudioDeviceModule(webrtc::CreateEnvironment(), webrtc::AudioDeviceModule::kAndroidAAudioAudio);
-    if (!adm || adm->Init() != 0) { LOGI("adm init fail rate=%d", rates[i]); adm = nullptr; continue; }
+    // AAudio first, then OpenSL ES backend fallback. Device routing follows AudioManager.setCommunicationDevice (Java).
+    for (auto layer : {webrtc::AudioDeviceModule::kAndroidAAudioAudio, webrtc::AudioDeviceModule::kAndroidOpenSLESAudio}) {
+      adm = webrtc::CreateAndroidAudioDeviceModule(webrtc::CreateEnvironment(), layer);
+      if (adm && adm->Init() == 0) break;
+      LOGI("adm init fail layer=%d rate=%d", (int)layer, rates[i]); adm = nullptr;
+    }
+    if (!adm) continue;
     if (adm->InitRecording() == 0 && adm->InitPlayout() == 0 && adm->StartRecording() == 0 && adm->StartPlayout() == 0) {
       actual_rate = rates[i]; return 0; }
     adm->Terminate(); adm = nullptr;
@@ -46,6 +50,9 @@ void Stats(int32_t* c, int32_t* r) { *c = cap_cb; *r = ren_cb; }
 
 #define J(n) Java_com_donnydey_openlounge_audio_CallAudioEngine_##n
 extern "C" {
+#ifdef OL_HAVE_WEBRTC
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) { webrtc::InitAndroid(vm); return JNI_VERSION_1_6; }
+#endif
 JNIEXPORT jboolean JNICALL J(nativeAvailable)(JNIEnv*, jclass) { return ol::rtc_audio::Available(); }
 JNIEXPORT jint JNICALL J(nativeOpen)(JNIEnv* e, jclass, jint in, jint out, jintArray rates) {
   jsize n = e->GetArrayLength(rates); jint* p = e->GetIntArrayElements(rates, nullptr);
