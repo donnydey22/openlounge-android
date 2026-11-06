@@ -28,23 +28,31 @@ class RcSealedTransport(
     private val myDev by lazy { keys.deviceId() }
     @Volatile private var initFailed: String? = null
 
-    init {
-        if (isCaller) io.execute {
-            val latch = java.util.concurrent.CountDownLatch(1)
-            request("rc:keys:fetch", JSONObject().put("callId", callId)) { ok, res, err ->
-                io.execute {
-                    try {
-                        val arr = res?.optJSONArray("bundles")
-                        if (!ok || arr == null || arr.length() == 0) throw IllegalStateException("rc:keys:fetch ${res?.optString("error") ?: err}")
-                        for (i in 0 until arr.length()) runCatching { val b = OlBundle.from(arr.getJSONObject(i)); sessions[b.deviceId] = OlSession.initiate(me, b) }
-                            .onFailure { Log.w(TAG, "bundle reject: ${it.message}") }
-                        if (sessions.isEmpty()) throw IllegalStateException("no valid peer device bundle")
-                    } catch (t: Throwable) { initFailed = t.message ?: "init"; Log.w(TAG, "initiate: $initFailed") }
-                    latch.countDown()
+    private var initDone = !isCaller
+    init { if (isCaller) fetchKeys(0) }
+
+    // Never wait on the crypto executor for a callback queued onto that same executor.
+    private fun fetchKeys(attempt: Int) {
+        if (closed) return
+        request("rc:keys:fetch", JSONObject().put("callId", callId)) { ok, res, err ->
+            if (closed) return@request
+            io.execute {
+                if (closed) return@execute
+                val arr = res?.optJSONArray("bundles")
+                val code = res?.optString("error") ?: err
+                if ((!ok || arr == null || arr.length() == 0) && code == "no_keys" && attempt < 20) {
+                    main.postDelayed({ fetchKeys(attempt + 1) }, 250)
+                    return@execute
                 }
+                try {
+                    if (!ok || arr == null || arr.length() == 0) throw IllegalStateException("rc:keys:fetch $code")
+                    for (i in 0 until arr.length()) runCatching { val b = OlBundle.from(arr.getJSONObject(i)); sessions[b.deviceId] = OlSession.initiate(me, b) }
+                        .onFailure { Log.w(TAG, "bundle reject: ${it.message}") }
+                    if (sessions.isEmpty()) throw IllegalStateException("no valid peer device bundle")
+                } catch (t: Throwable) { initFailed = t.message ?: "init"; Log.w(TAG, "initiate: $initFailed") }
+                initDone = true
+                flushPendingLocked()
             }
-            latch.await(15, java.util.concurrent.TimeUnit.SECONDS).let { if (!it) initFailed = "rc:keys:fetch timeout" }
-            flushPendingLocked()
         }
     }
 
@@ -54,7 +62,7 @@ class RcSealedTransport(
         io.execute {
             if (closed) return@execute
             initFailed?.let { f -> main.post { cb(false, null, "signaling:$f") }; return@execute }
-            if (sessions.isEmpty()) { pending.add(data to cb); if (!isCaller) main.post { cb(true, null, null) }; return@execute }
+            if (!initDone || sessions.isEmpty()) { pending.add(data to cb); if (!isCaller) main.post { cb(true, null, null) }; return@execute }
             sealAndSend(data, cb)
         }
     }

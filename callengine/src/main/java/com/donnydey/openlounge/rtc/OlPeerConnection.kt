@@ -19,6 +19,8 @@ object OlPeerConnection {
     private var source: AudioSource? = null
     private var track: AudioTrack? = null
     private var videoTx: RtpTransceiver? = null
+    private var offerPending = false
+    private var remoteApplying: String? = null
 
     fun load(): Boolean = CallAudioEngine.factory != null
 
@@ -87,20 +89,31 @@ object OlPeerConnection {
     }
     private fun createThenSet(offer: Boolean, restart: Boolean) {
         val p = pc ?: return
+        if (offer && offerPending) return
+        if (offer) offerPending = true
         val mc = MediaConstraints().apply {
             mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"))
             if (restart) mandatory.add(MediaConstraints.KeyValuePair("IceRestart", "true"))
         }
         val type = if (offer) "offer" else "answer"
-        val obs = sdpObs({ d -> p.setLocalDescription(sdpObs(null, { q.add("sdp\n$type\n${d.description}") }, "set-local", true), d) }, null, "create-$type", true)
+        val obs = sdpObs({ d ->
+            if (pc !== p) return@sdpObs
+            p.setLocalDescription(sdpObs(null, { if (pc === p) { offerPending = false; q.add("sdp\n$type\n${d.description}") } }, "set-local", true), d)
+        }, null, "create-$type", true)
         if (offer) p.createOffer(obs, mc) else p.createAnswer(obs, mc)
     }
     @JvmStatic fun nativeCreateOffer(iceRestart: Boolean): Int { pc ?: return ERR_UNAVAILABLE; createThenSet(true, iceRestart); return 0 }
     @JvmStatic fun nativeCreateAnswer(): Int { pc ?: return ERR_UNAVAILABLE; createThenSet(false, false); return 0 }
     @JvmStatic fun nativeSetRemote(type: String, sdp: String): Int {
         val p = pc ?: return ERR_UNAVAILABLE
+        if (type == "offer" && remoteApplying == sdp) return 0
+        if (type == "offer" && p.remoteDescription?.description == sdp && p.signalingState() == PeerConnection.SignalingState.STABLE) {
+            p.localDescription?.takeIf { it.type == SessionDescription.Type.ANSWER }?.let { q.add("sdp\nanswer\n${it.description}") }
+            return 0
+        }
+        remoteApplying = sdp
         val t = if (type == "offer") SessionDescription.Type.OFFER else SessionDescription.Type.ANSWER
-        p.setRemoteDescription(sdpObs(null, { adoptVideo(p); q.add("remote-set") }, "set-remote", true), SessionDescription(t, sdp)); return 0
+        p.setRemoteDescription(sdpObs(null, { if (pc === p) { remoteApplying = null; adoptVideo(p); q.add("remote-set") } }, "set-remote", true), SessionDescription(t, sdp)); return 0
     }
     /** callee: the caller's video m-line arrived -> send on it too (camera track if already on) */
     private fun adoptVideo(p: PeerConnection) {
@@ -114,7 +127,7 @@ object OlPeerConnection {
     @JvmStatic fun nativeSetMute(muted: Boolean) { track?.setEnabled(!muted) }
     @JvmStatic fun nativeTake(): String? = q.poll()
     @JvmStatic fun nativeClose() {
-        videoTx = null; OlVideo.onLocalTrack = null
+        videoTx = null; offerPending = false; remoteApplying = null; OlVideo.onLocalTrack = null
         runCatching { pc?.close(); pc?.dispose() }; pc = null
         runCatching { track?.dispose() }; track = null
         runCatching { source?.dispose() }; source = null
