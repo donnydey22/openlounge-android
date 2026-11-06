@@ -26,6 +26,7 @@ class CallActivity : Activity() {
         const val PHASE_ENDED = "ended"
 
         @JvmStatic
+        @JvmOverloads
         fun intent(
             ctx: Context,
             callId: String,
