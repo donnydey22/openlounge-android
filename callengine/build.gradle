@@ -7,7 +7,7 @@ plugins {
 android {
     namespace 'com.donnydey.openlounge.callengine'
     compileSdk 36
-    ndkVersion '27.2.12479018'
+    ndkVersion '28.2.13676358' // libwebrtc M152 arm64 needs lld>=19 (reloc 315)
     defaultConfig {
         minSdk 24
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
@@ -15,10 +15,14 @@ android {
     }
     buildFeatures { prefab true }
     externalNativeBuild { cmake { path 'src/main/cpp/CMakeLists.txt'; version '3.22.1' } }
+    // -PolWebrtcDir=/workspace/webrtc-bsd/m152 (BSD libwebrtc; never RingRTC AGPL binaries)
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = '17' }
 }
 dependencies {
+    // BSD libwebrtc AAR (org.webrtc Java API + its own libjingle_peerconnection_so.so). The C++ API in libwebrtc.a is
+    // built against Chromium libc++ (std::__Cr) and cannot be called from NDK libc++ code, so OL uses the Java API.
+    api files("${project.findProperty('olWebrtcDir') ?: '/workspace/webrtc-bsd/m152'}/aar/libwebrtc.aar")
     // pjproject 2.17 prefab AAR (built by .github/workflows/android-prefab.yml), linked + packaged via this module
     implementation files('../app/libs/pjproject-2.17-prefab.aar')
     implementation 'com.squareup.okhttp3:okhttp:4.12.0' // native WS signaling (CallSignalClient)

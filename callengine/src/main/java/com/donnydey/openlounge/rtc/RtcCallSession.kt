@@ -33,8 +33,7 @@ class RtcCallSession(
     }
 
     fun start() {
-        val r = OlPeerConnection.takeIf { it.load() }?.let { runCatching { it.nativeCreate(iceServers) }.getOrDefault(OlPeerConnection.ERR_UNAVAILABLE) }
-            ?: OlPeerConnection.ERR_UNAVAILABLE
+        val r = runCatching { OlPeerConnection.nativeCreate(iceServers) }.getOrDefault(OlPeerConnection.ERR_UNAVAILABLE)
         if (r != 0) return fail(CallFailure(CallFailureDomain.DEVICE, "pc-create", r, "WebRTC PeerConnection unavailable ($r)"))
         if (isCaller) runCatching { OlPeerConnection.nativeCreateOffer(false) } else sig.ready()
         poll()
@@ -67,7 +66,9 @@ class RtcCallSession(
                 "cand" -> sig.candidate(JSONObject().put("sdpMid", p[1]).put("sdpMLineIndex", p[2].toInt()).put("candidate", p[3]))
                 "cand-end" -> sig.candidate(null)
                 "ice" -> onIce(p[1])
-                "error" -> return fail(CallFailure(CallFailureDomain.valueOf(p[1].uppercase()), p.getOrElse(2) { "pc" }, p.getOrElse(3) { "-1" }.toIntOrNull() ?: -1, ev))
+                "error" -> {
+                    val d = runCatching { CallFailureDomain.valueOf(p[1].uppercase()) }.getOrDefault(CallFailureDomain.SESSION)
+                    return fail(CallFailure(if (d == CallFailureDomain.NETWORK) CallFailureDomain.SESSION else d, p.getOrElse(2) { "pc" }, p.getOrElse(3) { "-1" }.toIntOrNull() ?: -1, ev)) }
             }
         }
         h.postDelayed({ poll() }, 20)

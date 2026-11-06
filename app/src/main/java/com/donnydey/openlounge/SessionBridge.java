@@ -205,7 +205,7 @@ public final class SessionBridge {
             + "if(ok){f[0](r);return}var err=new Error(e||'native media error');"
             + "if(typeof e==='string'&&e.indexOf('native-media-error:')===0){try{var d=JSON.parse(e.slice(19));"
             + "Object.assign(err,d);err.message=d.message||err.message}catch(ignore){}}f[1](err)};"
-            + "window.OpenLoungeNativeMedia=Object.freeze({capabilities:Object.freeze(['nativeMedia','streamP2p','nativeVideo']),platform:'android',"
+            + "window.OpenLoungeNativeMedia=Object.freeze({capabilities:Object.freeze(['nativeMedia','rtcP2P','streamP2p','nativeVideo']),platform:'android',"
             + "nativeMedia:function(cmd){return new Promise(function(res,rej){var id='nm'+Date.now().toString(36)+(++s);"
             + "p[id]=[res,rej];try{N.nativeMediaCmd(id,JSON.stringify(cmd||{}))}catch(e){delete p[id];rej(e)}})},"
             + "msReply:function(id,ok,result,error){try{N.nativeMsReply(String(id),ok===true,JSON.stringify(result===undefined?null:result),"

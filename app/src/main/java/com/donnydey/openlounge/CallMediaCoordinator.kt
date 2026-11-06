@@ -30,7 +30,7 @@ object CallMediaCoordinator {
     @Volatile private var active = false
 
     private var appCtx: Context? = null
-    @JvmStatic fun init(ctx: Context) { appCtx = ctx.applicationContext; CallDiskLog.init(ctx) }
+    @JvmStatic fun init(ctx: Context) { appCtx = ctx.applicationContext; CallDiskLog.init(ctx); CallAudioEngine.init(ctx) }
     @Volatile private var videoOn = false
 
     @JvmStatic fun handle(cmdJson: String, done: (Boolean, String?, String?) -> Unit) {
