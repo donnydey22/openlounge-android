@@ -106,7 +106,7 @@ object NativeCallMedia {
         CallDiskLog.mark("open-sound")
         val snd = PjsipEngine.openSound()
         CallDiskLog.mark("open-sound-result", "$snd")
-        if (snd != 0) { host?.emit(JSONObject().put("type", "pjsip:error").put("step", "sound").put("error", "pj $snd").toString()); return snd.coerceAtMost(-1) - 200 }
+        if (snd != 0) { host?.emit(JSONObject().put("type", "pjsip:error").put("step", "sound").put("status", snd).put("domain", "audio-device").put("networkRelated", false).put("error", "pj $snd").toString()); return snd }
         leg = l
         return PjsipEngine.nativeSfuAudioStart(l.ip, l.port, l.tx, l.rx, l.ssrc, l.txPt, l.rxPt, 0, false) }
 
@@ -378,7 +378,7 @@ object NativeCallMedia {
         host?.nativeCallAudio(true) // Telegram order: audio mode before engine (VoIPService.java:4303-4305)
         awaitCommMode()
         val s0 = PjsipEngine.start(); if (s0 != 0) return done(false, null, "direct: pjsua start $s0")
-        val snd = PjsipEngine.openSound(); if (snd != 0) host?.emit(JSONObject().put("type", "pjsip:error").put("step", "sound").put("error", "pj $snd").toString())
+        val snd = PjsipEngine.openSound(); if (snd != 0) host?.emit(JSONObject().put("type", "pjsip:error").put("step", "sound").put("status", snd).put("domain", "audio-device").put("networkRelated", false).put("error", "pj $snd").toString())
         directDone = done; directWantVideo = wantVideo
         startP2p()
     }
