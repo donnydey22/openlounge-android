@@ -349,6 +349,7 @@ object NativeCallMedia {
     private fun startDirect(wantVideo: Boolean, done: (Boolean, String?, String?) -> Unit) {
         if (p2pCfg == null) return done(false, null, "direct: no relay config")
         host?.nativeCallAudio(true) // Telegram order: audio mode before engine (VoIPService.java:4303-4305)
+        awaitCommMode()
         val s0 = PjsipEngine.start(); if (s0 != 0) return done(false, null, "direct: pjsua start $s0")
         val snd = PjsipEngine.openSound(); if (snd != 0) host?.emit(JSONObject().put("type", "pjsip:error").put("step", "sound").put("error", "pj $snd").toString())
         directDone = done; directWantVideo = wantVideo
