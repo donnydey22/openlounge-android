@@ -11,6 +11,7 @@ import android.os.HandlerThread
 import android.os.Looper
 import android.view.Surface
 import android.view.TextureView
+import com.donnydey.openlounge.pjsip.OLCameraFanout
 import com.donnydey.openlounge.pjsip.OLSimulcastEncoder
 import com.donnydey.openlounge.pjsip.OLVideoLayer
 import com.donnydey.openlounge.pjsip.PjsipEngine
@@ -18,8 +19,9 @@ import com.donnydey.openlounge.pjsip.PjsipEngine
 /**
  * In-app call video (pjsip-rebuild, matches iOS OLCallVideo): SFU "video" PlainTransport leg in ol_sfu_video.c.
  * Receive: nativeSfuVideoPoll() Annex-B AUs -> MediaCodec H.264 decoder rendering straight into [remote].
- * Send: Camera2 -> 2 simulcast hardware H.264 encoders (180p/15, 720p/30) + [local] preview -> nativeSfuVideoSend.
- * Camera2 guarantees 3 PRIV outputs on every hardware level, hence 2 layers + preview.
+ * Send (47): ONE Camera2 output at an advertised size -> [OLCameraFanout] (EGL) -> 3 simulcast hardware H.264
+ * encoders (180p/15, 720p/30, 1080p/30) + [local] preview drawn from the same frame -> nativeSfuVideoSend.
+ * Camera2 output-combination support depends on hardware level/sizes, so the camera gets exactly one target.
  */
 object NativeCallVideo {
     // SFU android ladder (media-sfu/src/plain.mjs:13, checked at :29) takes exactly 3 SSRCs: 180p/720p/1080p
@@ -34,6 +36,8 @@ object NativeCallVideo {
     private var rx: Thread? = null
     private var dec: MediaCodec? = null
     private var enc: OLSimulcastEncoder? = null
+    private var fan: OLCameraFanout? = null
+    @Volatile private var camGen = 0 // generation guard: callbacks from a stopped camera are ignored
     private var camThread: HandlerThread? = null
     private var cam: CameraDevice? = null
     private var session: CameraCaptureSession? = null
@@ -111,38 +115,74 @@ object NativeCallVideo {
         val want = if (facing == "user") CameraCharacteristics.LENS_FACING_FRONT else CameraCharacteristics.LENS_FACING_BACK
         val id = mgr.cameraIdList.firstOrNull { mgr.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == want }
             ?: mgr.cameraIdList.firstOrNull() ?: return done(false, "no camera")
-        val e = try { OLSimulcastEncoder(layersOverride = LAYERS, forceH264 = true).apply {
+        val top = LAYERS.last()
+        val size = runCatching { cameraSize(mgr.getCameraCharacteristics(id), top.width, top.height) }.getOrNull()
+            ?: return done(false, "no camera size")
+        val e = try { OLSimulcastEncoder(layersOverride = LAYERS, forceH264 = true, requireHardware = true).apply {
             onAnnexB = { layer, au, k, ts -> if (running) { PjsipEngine.nativeSfuVideoSend(layer, au, au.size, ts, k); if (layer == LAYERS.size - 1) txFrames++ } }
             start() } } catch (x: Exception) { return done(false, "encoder: ${x.message}") }
         enc = e
+        val f = try { OLCameraFanout(size.width, size.height, e.fanoutTargets()).also { it.start() } }
+            catch (x: Exception) { stopCamera(); return done(false, "fanout: ${x.message}") }
+        fan = f
+        local?.surfaceTexture?.let { st -> st.setDefaultBufferSize(1280, 720); f.setPreview(Surface(st), 1280, 720) }
+        val gen = ++camGen
+        var reported = false
+        fun finish(ok: Boolean, why: String?) = main.post { if (gen != camGen || reported) return@post; reported = true
+            if (!ok) stopCamera(); done(ok, why); if (!ok) onCameraError?.invoke(why ?: "camera") }
         val t = HandlerThread("ol-camera").also { it.start() }; camThread = t
         val h = Handler(t.looper)
         try {
             mgr.openCamera(id, object : CameraDevice.StateCallback() {
-                override fun onOpened(d: CameraDevice) { cam = d
-                    val outs = ArrayList(e.surfaces)
-                    local?.surfaceTexture?.let { st -> st.setDefaultBufferSize(1280, 720); outs += Surface(st) }
+                override fun onOpened(d: CameraDevice) {
+                    if (gen != camGen) { d.close(); return }
+                    cam = d
+                    val outs = listOf(f.cameraSurface) // exactly one camera target; encoders + preview are fed by EGL
                     @Suppress("DEPRECATION")
-                    d.createCaptureSession(outs, object : CameraCaptureSession.StateCallback() {
-                        override fun onConfigured(s: CameraCaptureSession) { session = s
-                            val rq = d.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-                                outs.forEach { addTarget(it) }
-                                set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, android.util.Range(15, 30))
-                                set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON) }
-                            runCatching { s.setRepeatingRequest(rq.build(), null, h) }
-                            main.post { done(true, null) } }
-                        override fun onConfigureFailed(s: CameraCaptureSession) { main.post { done(false, "camera session"); onCameraError?.invoke("session") } }
-                    }, h)
+                    try { d.createCaptureSession(outs, object : CameraCaptureSession.StateCallback() {
+                        override fun onConfigured(s: CameraCaptureSession) {
+                            if (gen != camGen) { runCatching { s.close() }; return }
+                            session = s
+                            try {
+                                val rq = d.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+                                    addTarget(f.cameraSurface)
+                                    fpsRange(mgr.getCameraCharacteristics(id))?.let { set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
+                                    val stab = mgr.getCameraCharacteristics(id).get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
+                                    if (stab?.contains(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON) == true)
+                                        set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON) }
+                                s.setRepeatingRequest(rq.build(), null, h)
+                                finish(true, null)
+                            } catch (x: Exception) { finish(false, "capture request: ${x.message}") }
+                        }
+                        override fun onConfigureFailed(s: CameraCaptureSession) { finish(false, "camera session") }
+                    }, h) } catch (x: Exception) { finish(false, "camera session: ${x.message}") }
                 }
-                override fun onDisconnected(d: CameraDevice) { d.close(); cam = null }
-                override fun onError(d: CameraDevice, err: Int) { d.close(); cam = null; main.post { onCameraError?.invoke("camera error $err") } }
+                override fun onDisconnected(d: CameraDevice) { d.close(); if (gen == camGen) { cam = null; finish(false, "camera disconnected") } }
+                override fun onError(d: CameraDevice, err: Int) { d.close(); if (gen == camGen) { cam = null; finish(false, "camera error $err") } }
             }, h)
         } catch (x: Exception) { stopCamera(); done(false, "camera: ${x.message}") }
     }
 
+    /** Largest advertised SurfaceTexture size with the top layer's aspect, not above it; else the closest aspect. */
+    private fun cameraSize(ch: CameraCharacteristics, w: Int, h: Int): android.util.Size? {
+        val map = ch.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return null
+        val all = map.getOutputSizes(SurfaceTexture::class.java)?.toList().orEmpty()
+        val same = all.filter { it.width * h == it.height * w && it.width <= w }
+        return same.maxByOrNull { it.width } ?: all.filter { it.width <= w }.maxByOrNull { it.width * it.height }
+    }
+
+    /** Advertised AE range covering 30 fps (prefer 15-30, else fixed 30, else the widest with max 30). */
+    private fun fpsRange(ch: CameraCharacteristics): android.util.Range<Int>? {
+        val r = ch.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: return null
+        return r.firstOrNull { it.lower == 15 && it.upper == 30 } ?: r.firstOrNull { it.lower == 30 && it.upper == 30 }
+            ?: r.filter { it.upper == 30 }.minByOrNull { it.lower }
+    }
+
     private fun stopCamera() {
+        camGen++ // invalidate callbacks from the camera being stopped
         runCatching { session?.close() }; session = null
         runCatching { cam?.close() }; cam = null
+        runCatching { fan?.release() }; fan = null // detach EGL targets before the codec input Surfaces go away
         runCatching { enc?.stop() }; enc = null
         camThread?.quitSafely(); camThread = null
     }

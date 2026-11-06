@@ -59,7 +59,9 @@ object OLVideoSpecV2 {
 }
 
 /** One hardware MediaCodec per layer, each with its own input Surface. Throws VideoConfigException -> fail the call. */
-class OLSimulcastEncoder(val onEncoded: (layer: Int, buf: java.nio.ByteBuffer, info: MediaCodec.BufferInfo) -> Unit = { _, _, _ -> }, layersOverride: List<OLVideoLayer>? = null, forceH264: Boolean = false) {
+class OLSimulcastEncoder(val onEncoded: (layer: Int, buf: java.nio.ByteBuffer, info: MediaCodec.BufferInfo) -> Unit = { _, _, _ -> }, layersOverride: List<OLVideoLayer>? = null, forceH264: Boolean = false,
+  /** Call path (47): hardware H.264 only, never the software fallback. Harness/other consumers keep the default. */
+  val requireHardware: Boolean = false) {
   /** Annex-B AU per layer (SPS/PPS prepended on keyframes), 90 kHz ts -> PjsipEngine.nativeSfuVideoSend. */
   var onAnnexB: ((layer: Int, au: ByteArray, key: Boolean, ts90k: Long) -> Unit)? = null
   private val csd = arrayOfNulls<ByteArray>(3)
@@ -77,7 +79,8 @@ class OLSimulcastEncoder(val onEncoded: (layer: Int, buf: java.nio.ByteBuffer, i
   var hintLevel = 3
 
   fun start() {
-    val hw = OLVideoSpecV2.encoders(mime).firstOrNull() ?: throw VideoConfigException("no $mime encoder")
+    val hw = (if (requireHardware) OLVideoSpecV2.hwEncoders(mime) else OLVideoSpecV2.encoders(mime)).firstOrNull()
+      ?: throw VideoConfigException(if (requireHardware) "no hardware $mime encoder" else "no $mime encoder")
     try {
       for ((li, l) in layers.withIndex()) {
         // Spec keys (bitrate, keyframe interval, no B-frames, Surface input) are always set. Latency/priority/profile are
@@ -102,6 +105,8 @@ class OLSimulcastEncoder(val onEncoded: (layer: Int, buf: java.nio.ByteBuffer, i
         }
         if (!ok) throw IllegalStateException("layer $li ${l.width}x${l.height}: ${last?.message}", last)
       }
+      // All layers must actually initialize; a partial set is a failure (stop() below releases what was created).
+      if (codecs.size != layers.size) throw IllegalStateException("only ${codecs.size}/${layers.size} layers initialized")
     } catch (e: Exception) { stop(); throw VideoConfigException("MediaCodec configure failed (${hw.name} cbr=${OLVideoSpecV2.score(hw, mime) >= 2}): ${e.message}", e) }
     running = true
     drain = Thread({
@@ -149,7 +154,10 @@ class OLSimulcastEncoder(val onEncoded: (layer: Int, buf: java.nio.ByteBuffer, i
     return out.toByteArray().takeIf { it.isNotEmpty() }
   }
 
-  /** Teardown on every call end. */
+  /** Encoder input Surfaces with each layer's fps, for [OLCameraFanout] (one camera feed, per-layer pacing). */
+  fun fanoutTargets(): List<Pair<Surface, Int>> = surfaces.mapIndexed { i, sf -> sf to layers[i].fps }
+
+  /** Teardown on every call end. Any EGL fan-out writing into [surfaces] must be released first. */
   fun stop() {
     running = false; drain?.join(500); drain = null
     for (c in codecs) runCatching { c.stop() }.also { runCatching { c.release() } }
