@@ -112,11 +112,14 @@ object NativeCallMedia {
         val generation = soundGeneration
         fun attempt(number: Int) {
             if (generation != soundGeneration) return done(-1)
-            val status = PjsipEngine.openSound()
-            CallDiskLog.mark("open-sound-result", "attempt=$number status=$status")
-            if (status != 0 && number == 1) {
-                main.postDelayed({ attempt(2) }, 180L)
-            } else done(status)
+            // 1-2: DEFAULT devices (nativeOpenSound also tries 0/0 internally). 3: explicit 0/0 via openSoundDev.
+            val status = if (number >= 3) PjsipEngine.openSoundDev(0, 0) else PjsipEngine.openSound()
+            CallDiskLog.mark("open-sound-result", "attempt=$number status=$status model=${android.os.Build.MODEL}")
+            when {
+                status == 0 -> done(0)
+                number < 3 -> main.postDelayed({ attempt(number + 1) }, if (number == 1) 180L else 220L)
+                else -> done(status) // real pj_status preserved (never collapsed to -201)
+            }
         }
         attempt(1)
     }

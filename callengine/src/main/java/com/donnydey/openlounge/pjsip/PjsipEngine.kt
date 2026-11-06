@@ -7,6 +7,8 @@ object PjsipEngine {
     private fun load() { if (!loaded) { System.loadLibrary("pjproject"); System.loadLibrary("olpjsip"); loaded = true } }
     @JvmStatic external fun nativeStart(jbMinPre: Int, jbMaxPre: Int, jbMax: Int): Int
     @JvmStatic external fun nativeOpenSound(): Int
+    /** Explicit capture/playback indices (fallback when DEFAULT fails on some OEM builds). */
+    @JvmStatic external fun nativeOpenSoundDev(captureDev: Int, playbackDev: Int): Int
     @JvmStatic external fun nativeTeardown()
     @JvmStatic external fun nativeVideoQuickHd(): Int
     @JvmStatic external fun nativeVideoSteady(): Int
@@ -34,14 +36,20 @@ object PjsipEngine {
     @JvmStatic external fun nativeP2pVideoStats(): IntArray // rxPkt, txPkt (H.264 on the direct leg)
     @JvmStatic external fun nativeP2pStop()
     fun ensureLoaded() = load()
-    /** QuickHD: 1080p/2.5 Mbps for the first 4 s of a video call, then 720p/1.2 Mbps. */
+    /** QuickHD: 1080p/2.5 Mbps for the first 4 s of a video call, then 720p/1.2 Mbps. Cancelled by [cancelVideoBurst]. */
+    private val burstHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val burstSteady = Runnable { runCatching { nativeVideoSteady() } }
     @JvmStatic fun startVideoBurst() { start(); nativeVideoQuickHd()
-        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ nativeVideoSteady() }, 4000) }
+        burstHandler.removeCallbacks(burstSteady); burstHandler.postDelayed(burstSteady, 4000) }
+    /** Teardown / call-end: drop the pending steady step so it cannot fire into a torn-down engine. */
+    @JvmStatic fun cancelVideoBurst() { burstHandler.removeCallbacks(burstSteady) }
     /** AV1 only where a hardware decoder exists (negotiated per device via signaling). */
     @JvmStatic fun hardwareAv1(): Boolean = android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS).codecInfos
         .any { !it.isEncoder && (android.os.Build.VERSION.SDK_INT < 29 || it.isHardwareAccelerated) && it.supportedTypes.any { t -> t.equals("video/av01", true) } }
     @JvmStatic @Synchronized fun start(): Int { load(); if (started) return 0; val r = nativeStart(1, 16, 50); started = r == 0; return r }
     /** Called only once the ConnectionService call is active (Android's didActivate equivalent). */
     @JvmStatic @Synchronized fun openSound(): Int { val s = start(); if (s != 0) return s; return nativeOpenSound() } // never touch a half-initialized pjsua
-    @JvmStatic @Synchronized fun teardown() { if (started) nativeTeardown() }
+    @JvmStatic @Synchronized fun openSoundDev(captureDev: Int, playbackDev: Int): Int {
+        val s = start(); if (s != 0) return s; return nativeOpenSoundDev(captureDev, playbackDev) }
+    @JvmStatic @Synchronized fun teardown() { cancelVideoBurst(); if (started) nativeTeardown() }
 }

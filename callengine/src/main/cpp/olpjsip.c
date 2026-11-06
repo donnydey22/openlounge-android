@@ -18,8 +18,16 @@ JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeStar
   pjsua_start(); pjsua_set_no_snd_dev();
   { pjsua_acc_config a; pjsua_acc_config_default(&a); srtp_mandatory(&a); a.id=pj_str("sip:openlounge@local"); pjsua_acc_add(&a,PJ_TRUE,NULL); }
   return 0; }
+/* openSound: try default, then index 0/0. Return the real pj_status_t (0 or positive) — never collapse it. */
 JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeOpenSound(JNIEnv*e,jclass o){
-  REG(); return pjsua_set_snd_dev(PJMEDIA_AUD_DEFAULT_CAPTURE_DEV,PJMEDIA_AUD_DEFAULT_PLAYBACK_DEV); }
+  REG();
+  pj_status_t st = pjsua_set_snd_dev(PJMEDIA_AUD_DEFAULT_CAPTURE_DEV, PJMEDIA_AUD_DEFAULT_PLAYBACK_DEV);
+  if (st == PJ_SUCCESS) return 0;
+  pj_status_t st2 = pjsua_set_snd_dev(0, 0);
+  return (jint)(st2 == PJ_SUCCESS ? PJ_SUCCESS : st); /* keep first status if both fail (more informative) */
+}
+JNIEXPORT jint JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeOpenSoundDev(JNIEnv*e,jclass o,jint cap,jint play){
+  REG(); return (jint)pjsua_set_snd_dev((int)cap, (int)play); }
 JNIEXPORT void JNICALL Java_com_donnydey_openlounge_pjsip_PjsipEngine_nativeTeardown(JNIEnv*e,jclass o){
   REG(); pjsua_call_hangup_all(); pjsua_set_no_snd_dev(); }
 /* Video (t4464u): H.264 via MediaCodec (pjmedia and_media codec). QuickHD start burst then steady caps. */
