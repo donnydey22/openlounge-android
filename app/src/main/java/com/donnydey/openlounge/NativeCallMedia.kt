@@ -40,9 +40,10 @@ object NativeCallMedia {
                 val c = JSONObject(cmdJson)
                 val leg = Leg(c.getString("ip"), c.getInt("port"), c.getString("txKey"), c.getString("rxKey"),
                     c.optLong("ssrc", 1111L), c.optInt("txPt", 111), c.optInt("rxPt", 111))
-                val r = startLeg(leg)
-                if (r == 0) { active = true; host?.nativeCallAudio(true); done(true, JSONObject().put("engine", "pjsip").toString(), null) }
-                else done(false, null, "pjsip audio leg start failed: $r")
+                startLeg(leg) { r ->
+                    if (r == 0) { active = true; host?.nativeCallAudio(true); done(true, JSONObject().put("engine", "pjsip").toString(), null) }
+                    else done(false, null, "pjsip audio leg start failed: $r")
+                }
             }
             // Option B: the page's existing authenticated socket runs call:* (start/accept/decline/hangup + push);
             // at answer the call screen sends {op:"connect", callId} with the ms:* relay installed -> SFU audio leg.
@@ -95,20 +96,37 @@ object NativeCallMedia {
         while (am.mode != android.media.AudioManager.MODE_IN_COMMUNICATION && android.os.SystemClock.elapsedRealtime() - t0 < 500L) Thread.sleep(20)
         CallDiskLog.mark("audio-mode-wait", "mode=${am.mode} ms=${android.os.SystemClock.elapsedRealtime() - t0}")
     }
-    private fun startLeg(l: Leg): Int {
-        // Telegram answer order (DrKLO/Telegram@3de37c8 VoIPService.java:4300-4306 acceptIncomingCall: stopRinging -> configureDeviceForCall,
-        // whose :4865 sets MODE_IN_COMMUNICATION + :4870 voice-call focus) -> engine start (:3473 makeInstance). Audio mode first, then pjsua.
-        CallDiskLog.mark("audio-session", "communication mode on (before engine)")
+    // Keep retries asynchronous: a device may need a moment after MODE_IN_COMMUNICATION.
+    private var soundGeneration = 0
+    private fun openSoundWithRetry(done: (Int) -> Unit) {
+        val generation = soundGeneration
+        fun attempt(number: Int) {
+            if (generation != soundGeneration) return done(-1)
+            val status = PjsipEngine.openSound()
+            CallDiskLog.mark("open-sound-result", "attempt=$number status=$status")
+            if (status != 0 && number == 1) {
+                main.postDelayed({ attempt(2) }, 180L)
+            } else done(status)
+        }
+        attempt(1)
+    }
+    private fun startLeg(l: Leg, done: (Int) -> Unit) {
         host?.nativeCallAudio(true)
         awaitCommMode()
         CallDiskLog.mark("engine-start")
-        val s0 = PjsipEngine.start(); if (s0 != 0) { CallDiskLog.mark("engine-start-fail", "$s0"); return s0 - 100 }
-        CallDiskLog.mark("open-sound")
-        val snd = PjsipEngine.openSound()
-        CallDiskLog.mark("open-sound-result", "$snd")
-        if (snd != 0) { host?.emit(JSONObject().put("type", "pjsip:error").put("step", "sound").put("status", snd).put("domain", "audio-device").put("networkRelated", false).put("error", "pj $snd").toString()); return snd }
-        leg = l
-        return PjsipEngine.nativeSfuAudioStart(l.ip, l.port, l.tx, l.rx, l.ssrc, l.txPt, l.rxPt, 0, false) }
+        val s0 = PjsipEngine.start()
+        if (s0 != 0) { CallDiskLog.mark("engine-start-fail", "$s0"); done(s0); return }
+        openSoundWithRetry { snd ->
+            if (snd != 0) {
+                host?.emit(JSONObject().put("type", "pjsip:error").put("step", "sound").put("status", snd)
+                    .put("domain", "audio-device").put("networkRelated", false).put("error", "pj $snd").toString())
+                done(snd)
+            } else {
+                leg = l
+                done(PjsipEngine.nativeSfuAudioStart(l.ip, l.port, l.tx, l.rx, l.ssrc, l.txPt, l.rxPt, 0, false))
+            }
+        }
+    }
 
     @Volatile private var signal: CallSignalClient? = null
     @Volatile private var creds: Pair<String, String>? = null // in-memory only; never logged
@@ -212,9 +230,9 @@ object NativeCallMedia {
                   if (!ok4) return@consumeUntil fail("consume", e4, result)
                   val rxPt = cons?.optInt("payloadType", 111) ?: 111
                   CallDiskLog.mark("consume", "audio pt=$rxPt")
-                  main.post { val r = startLeg(Leg(ip, port, txKey, rx, ssrc, 111, rxPt))
+                  main.post { startLeg(Leg(ip, port, txKey, rx, ssrc, 111, rxPt)) { r ->
                     if (r == 0) { active = true; host?.nativeCallAudio(true) }; result(r, if (r != 0) "leg start $r" else null)
-                    host?.emit(JSONObject().put("type", "pjsip:audio").put("start", r).toString()) } } } } } }
+                    host?.emit(JSONObject().put("type", "pjsip:audio").put("start", r).toString()) } } } } } } }
     }
 
     /** Video leg (ol_sfu_video.c): own "video" PlainTransport + SRTP key, 2 simulcast SSRCs, H.264 PT 102. */
@@ -378,9 +396,11 @@ object NativeCallMedia {
         host?.nativeCallAudio(true) // Telegram order: audio mode before engine (VoIPService.java:4303-4305)
         awaitCommMode()
         val s0 = PjsipEngine.start(); if (s0 != 0) return done(false, null, "direct: pjsua start $s0")
-        val snd = PjsipEngine.openSound(); if (snd != 0) host?.emit(JSONObject().put("type", "pjsip:error").put("step", "sound").put("status", snd).put("domain", "audio-device").put("networkRelated", false).put("error", "pj $snd").toString())
-        directDone = done; directWantVideo = wantVideo
-        startP2p()
+        openSoundWithRetry { snd ->
+            if (snd != 0) { done(false, null, "audio-device: openSound status=$snd"); return@openSoundWithRetry }
+            directDone = done; directWantVideo = wantVideo
+            startP2p()
+        }
     }
     /** ICE connected (ol_p2p ev 2): the call's one path is up. */
     private fun directUp() {
@@ -420,7 +440,7 @@ object NativeCallMedia {
     }
     private fun stopP2p() { direct = false; directDone?.invoke(false, null, "ended"); directDone = null; videoP2p = false; p2pGen++; p2pState = P2P_OFF; p2pCfg = null; p2pPendingOffer = null; runCatching { PjsipEngine.nativeP2pStop() } }
 
-    @JvmStatic fun closeAll() = main.post { CallDiskLog.mark("close-all"); stopP2p(); if (videoOn) { videoOn = false; NativeCallVideo.stop(); host?.nativeCallVideo(false) }; leg = null; runCatching { PjsipEngine.nativeSfuStop() }; PjsipEngine.teardown(); if (active) { active = false; host?.nativeCallAudio(false) } }
+    @JvmStatic fun closeAll() = main.post { soundGeneration++; CallDiskLog.mark("close-all"); stopP2p(); if (videoOn) { videoOn = false; NativeCallVideo.stop(); host?.nativeCallVideo(false) }; leg = null; runCatching { PjsipEngine.nativeSfuStop() }; PjsipEngine.teardown(); if (active) { active = false; host?.nativeCallAudio(false) } }
     @JvmStatic fun isActive(): Boolean = active
     @JvmStatic fun releaseIdle() { main.post { CallDiskLog.mark("release-idle"); PjsipEngine.teardown() } }
 }
