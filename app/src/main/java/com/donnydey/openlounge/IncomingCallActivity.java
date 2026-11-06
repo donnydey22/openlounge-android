@@ -33,7 +33,7 @@ import java.net.URL;
 
 /**
  * Full-screen incoming call (shown over the lock screen, turns the screen on): caller name + photo on a blurred
- * backdrop, Decline / Accept like the web ring screen. Accept → MainActivity at /call/<id>?accept=1 (the web layer
+ * backdrop, Decline / Accept like the web ring screen. Accept → native CallSignalClient call:accept (no WebView
  * answers instantly); Decline → POST /api/calls/<id>/decline. Finishes on call_cancel and at expiresAt.
  */
 public class IncomingCallActivity extends Activity {
@@ -104,12 +104,15 @@ public class IncomingCallActivity extends Activity {
     private void accept() {
         String id = callId;
         CallNotifications.cancel(this, id);
-        // Android 12+: the call FGS must be up before the WebView connects; starting it from this user tap (visible
+        // Android 12+: the call FGS must be up before media; starting it from this user tap (visible
         // activity) is exempt from background-start limits and lets Android 14+ grant the microphone type.
         CallService.start(getApplicationContext(), id, getIntent().getStringExtra(CallNotifications.EXTRA_CALLER), false, true);
+        // Linphone cut: native owns accept signaling — no /call/<id>?accept=1 WebView path.
+        boolean nativeOk = NativeCallMedia.acceptIncoming(getApplicationContext(), id);
         Intent open = new Intent(this, MainActivity.class)
                 .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                .putExtra(OpenLoungeMessagingService.EXTRA_OPEN_PATH, "/call/" + id + "?accept=1");
+                .putExtra("ol_native_accept_call_id", id)
+                .putExtra("ol_native_accept_ok", nativeOk);
         if (Build.VERSION.SDK_INT >= 26) {
             KeyguardManager km = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
             if (km != null && km.isKeyguardLocked()) {

@@ -119,6 +119,33 @@ object NativeCallMedia {
             sc.connect() } }
     /** FCM call_incoming woke us: reopen the signal socket so call-signal re-delivers the ring (connected()). */
     @JvmStatic fun onPushWake() = main.post { connectSignal() }
+
+    /** Linphone cut: native owns accept signaling — load WS URL + access token without the WebView. */
+    @JvmStatic fun ensureSignalCreds(ctx: Context): Boolean {
+        val token = CallApi.freshAccessToken(ctx) ?: return false
+        val origin = CallApi.origin(ctx)
+        val ws = origin.replace(Regex("^http"), "ws") + "/ws"
+        creds = ws to token
+        return true
+    }
+
+    /** Answer from IncomingCallActivity / Telecom — no /call/id?accept=1 WebView path. */
+    @JvmStatic fun acceptIncoming(ctx: Context, callId: String): Boolean {
+        if (callId.isEmpty()) return false
+        if (!ensureSignalCreds(ctx)) {
+            CallDiskLog.mark("accept-native-fail", "no token")
+            return false
+        }
+        main.post {
+            connectSignal()
+            val ok = signal?.accept(callId) == true
+            CallDiskLog.mark("accept-native", "callId=$callId ok=$ok")
+            // UI: show connecting state
+            host?.emit(JSONObject().put("type", "call:answering").put("callId", callId).toString())
+            this.callId = callId
+        }
+        return true
+    }
     @Volatile private var callId: String? = null
     private var txKey = ""
     private fun newKey(): String { val b = ByteArray(30); java.security.SecureRandom().nextBytes(b)
