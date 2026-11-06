@@ -85,9 +85,9 @@ class OlSession private constructor(private var sendCk: ByteArray, private var r
         internal fun header(n: Int): ByteArray = ByteBuffer.allocate(5).put(1).putInt(n).array()
     }
 
-    fun confirmed() { pre = null }
+    @Synchronized fun confirmed() { pre = null }
 
-    fun seal(plain: ByteArray): JSONObject {
+    @Synchronized fun seal(plain: ByteArray): JSONObject {
         val n = sendN++
         val mk = OlCrypto.hmac(sendCk, 1); val nonce = OlCrypto.hmac(sendCk, 3).copyOf(12)
         sendCk = OlCrypto.hmac(sendCk, 2)
@@ -95,18 +95,24 @@ class OlSession private constructor(private var sendCk: ByteArray, private var r
         return JSONObject().put("v", 1).put("n", n).put("ct", OlCrypto.b64(ct)).also { e -> pre?.let { e.put("pre", it) } }
     }
 
-    fun open(e: JSONObject): ByteArray {
+    @Synchronized fun open(e: JSONObject): ByteArray {
         val n = e.optInt("n", -1)
         if (e.optInt("v") != 1 || n < 0) throw SecurityException("olx3dh: bad envelope")
+        // Authenticate against a snapshot; a forged envelope must not burn receive/skipped keys.
+        var nextN = recvN
+        var nextCk = recvCk
+        val nextSkipped = LinkedHashMap(skipped)
         val ck: ByteArray
-        if (n < recvN) ck = skipped.remove(n) ?: throw SecurityException("olx3dh: replay")
+        if (n < nextN) ck = nextSkipped.remove(n) ?: throw SecurityException("olx3dh: replay")
         else {
-            if (n - recvN > 256) throw SecurityException("olx3dh: too far ahead")
-            while (recvN < n) { skipped[recvN++] = recvCk; recvCk = OlCrypto.hmac(recvCk, 2) }
-            ck = recvCk; recvCk = OlCrypto.hmac(recvCk, 2); recvN++
-            while (skipped.size > 256) skipped.remove(skipped.keys.first())
+            if (n - nextN > 256) throw SecurityException("olx3dh: too far ahead")
+            while (nextN < n) { nextSkipped[nextN++] = nextCk; nextCk = OlCrypto.hmac(nextCk, 2) }
+            ck = nextCk; nextCk = OlCrypto.hmac(nextCk, 2); nextN++
+            while (nextSkipped.size > 256) nextSkipped.remove(nextSkipped.keys.first())
         }
         val mk = OlCrypto.hmac(ck, 1); val nonce = OlCrypto.hmac(ck, 3).copyOf(12)
-        return OlCrypto.gcm(false, mk, nonce, ad + header(n), OlCrypto.unb64(e.getString("ct")))
+        val plain = OlCrypto.gcm(false, mk, nonce, ad + header(n), OlCrypto.unb64(e.getString("ct")))
+        recvN = nextN; recvCk = nextCk; skipped.clear(); skipped.putAll(nextSkipped)
+        return plain
     }
 }

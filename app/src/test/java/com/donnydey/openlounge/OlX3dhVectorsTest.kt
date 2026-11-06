@@ -43,4 +43,26 @@ class OlX3dhVectorsTest {
         assertEquals("answer", String(sa.open(sb.seal("answer".toByteArray()))))
         assertThrows(SecurityException::class.java) { OlSession.initiate(a, bundle.copy(spk = opk.pub)) }
     }
+    private fun receiverPair(): Pair<OlSession, List<JSONObject>> {
+        val a = OlIdentity(OlCrypto.genDh(), OlCrypto.genSig()); val b = OlIdentity(OlCrypto.genDh(), OlCrypto.genSig())
+        val spk = OlCrypto.genDh(); val opk = OlCrypto.genDh()
+        val bundle = OlBundle("devB", b.dh.pub, b.sig.pub, 7, spk.pub, OlCrypto.sign(b.sig, spk.pub), 3, opk.pub)
+        val sa = OlSession.initiate(a, bundle)
+        val e0 = sa.seal("offer".toByteArray()); val e1 = sa.seal("ice".toByteArray())
+        return OlSession.respond(b, spk.priv, opk.priv, e0.getJSONObject("pre")) to listOf(e0,e1)
+    }
+    @Test fun unauthenticatedFuturePacketDoesNotAdvanceRatchet() {
+        val (receiver, envelopes) = receiverPair()
+        val bad = JSONObject(envelopes[1].toString()).put("ct", OlCrypto.b64(ByteArray(24)))
+        assertThrows(Exception::class.java) { receiver.open(bad) }
+        assertEquals("ice", String(receiver.open(envelopes[1])))
+        assertEquals("offer", String(receiver.open(envelopes[0])))
+    }
+    @Test fun unauthenticatedSkippedPacketDoesNotBurnSkippedKey() {
+        val (receiver, envelopes) = receiverPair()
+        assertEquals("ice", String(receiver.open(envelopes[1])))
+        val bad = JSONObject(envelopes[0].toString()).put("ct", OlCrypto.b64(ByteArray(24)))
+        assertThrows(Exception::class.java) { receiver.open(bad) }
+        assertEquals("offer", String(receiver.open(envelopes[0])))
+    }
 }
