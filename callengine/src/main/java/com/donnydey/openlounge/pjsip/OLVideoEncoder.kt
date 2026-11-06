@@ -99,8 +99,8 @@ class OLSimulcastEncoder(val onEncoded: (layer: Int, buf: java.nio.ByteBuffer, i
   val surfaces = ArrayList<Surface>()
   private var drain: Thread? = null
   private var keyReq = 0
-  private val pendingKeys = java.util.concurrent.atomic.AtomicInteger()
-  fun requestKeyframes() { pendingKeys.set((1 shl layers.size) - 1) }
+  /** Flip / local refresh: IDR on every layer, not throttled. */
+  fun requestKeyframes() { forceKeyframe(throttle = false) }
   private val lastKeyReqMs = LongArray(3)
   /** Per-layer PLI/FIR bitmask source (default: the native SFU video leg). */
   var keyReqSource: () -> Int = { runCatching { PjsipEngine.nativeSfuVideoTakeKeyReq() }.getOrDefault(0) }
