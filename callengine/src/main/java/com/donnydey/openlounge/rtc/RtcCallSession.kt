@@ -45,7 +45,17 @@ class RtcCallSession(
         val m = sig.accept(raw) ?: return
         when (m.optString("kind")) {
             "ready" -> if (isCaller) localOffer?.let { sig.offer(it) } ?: runCatching { OlPeerConnection.nativeCreateOffer(false) }
-            "offer" -> if (!isCaller) OlPeerConnection.nativeSetRemote("offer", m.optString("sdp"))
+            "offer" -> if (!isCaller) {
+                if (sig.gen == 0) OlPeerConnection.nativeSetRemote("offer", m.optString("sdp"))
+                else { val generation = sig.gen
+                    request("rtc:iceConfig", JSONObject().put("callId", callId)) { ok, res, _ ->
+                        if (!closed && sig.gen == generation) {
+                            if (ok) res?.optJSONObject("config")?.optJSONArray("iceServers")?.let { iceServers=it.toString(); OlPeerConnection.nativeSetConfiguration(iceServers) }
+                            OlPeerConnection.nativeSetRemote("offer", m.optString("sdp"))
+                        }
+                    }
+                }
+            }
             "answer" -> if (isCaller) OlPeerConnection.nativeSetRemote("answer", m.optString("sdp"))
             "candidate" -> { val c = m.optJSONObject("candidate"); if (sig.remoteSet) addCand(c) else sig.bufferCandidate(c) }
             "restart" -> if (isCaller) iceRestart()
@@ -78,7 +88,7 @@ class RtcCallSession(
     private fun onIce(state: String) {
         Log.i(TAG, "ice $state")
         when (state) {
-            "connected", "completed" -> { graceGen++; restartTry = 0; restartStart = 0; if (!connectedOnce) { connectedOnce = true; onConnected() } }
+            "connected", "completed" -> { graceGen++; restartTry = 0; restartStart = 0; if (!connectedOnce) { connectedOnce = true; if(isCaller) scheduleTurnLease(); onConnected() } }
             "disconnected" -> { val g = ++graceGen; h.postDelayed({ if (g == graceGen) networkLoss("disconnected") }, 2500) }
             "failed" -> networkLoss("failed")
         }
@@ -93,13 +103,20 @@ class RtcCallSession(
         if (now - restartStart > 45_000) return fail(CallFailure(CallFailureDomain.NETWORK, "ice", -1, "ICE did not recover in 45 s"))
         val delay = longArrayOf(0, 1000, 2000, 4000, 8000)[minOf(restartTry++, 4)]
         h.postDelayed({
+            if (closed) return@postDelayed
             request("rtc:iceConfig", JSONObject().put("callId", callId)) { ok, res, _ ->
+                if (closed) return@request
                 res?.optJSONObject("config")?.optJSONArray("iceServers")?.let { iceServers = it.toString(); OlPeerConnection.nativeSetConfiguration(iceServers) }
                 if (!ok) Log.w(TAG, "iceConfig refresh failed; restarting with current creds")
                 sig.bumpGen()
                 OlPeerConnection.nativeCreateOffer(true)
             } }, delay)
     }
+
+    // Refresh 600s TURN credentials before expiry. Same-PC transport maintenance, never a local-audio fallback.
+    private fun scheduleTurnLease() { h.postDelayed({
+        if (!closed && connectedOnce && isCaller) { restartStart=0L; restartTry=0; iceRestart(); scheduleTurnLease() }
+    }, 480_000) }
 
     fun setMute(m: Boolean) = runCatching { OlPeerConnection.nativeSetMute(m) }
     /** OS reported an interface change: fresh ICE now instead of waiting for consent timeout. */
