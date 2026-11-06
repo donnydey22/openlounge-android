@@ -3,19 +3,20 @@ package com.donnydey.openlounge
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
-import android.graphics.Color
+import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
 import android.widget.FrameLayout
+import org.json.JSONObject
 
 /**
- * Native call host (Claude step 5 first cut): one Activity, four phases
+ * Native call host (Claude step 5): one Activity, four phases
  * (incoming / outgoing / active / ended). No WebView child.
  *
- * IncomingCallActivity remains the FSI trampoline for lock-screen rings and forwards here.
- * Full CallController + surface ownership moves in a later cut; this cut establishes the host
- * and keeps NativeCallScreen chrome as the phase renderer inside the host root.
+ * IncomingCallActivity remains the FSI trampoline for lock-screen rings and forwards here
+ * after Accept. This cut wires chrome controls to AudioManager + MainActivity.dispatchNativeCall
+ * / NativeCallMedia / CallApi so the host is usable without the page painting the call.
  */
 class CallActivity : Activity() {
     companion object {
@@ -47,6 +48,10 @@ class CallActivity : Activity() {
 
     private var root: FrameLayout? = null
     private var screen: NativeCallScreen? = null
+    private var callId: String? = null
+    private var peerName: String = ""
+    private var peerPhoto: String = ""
+    private var video = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -61,8 +66,25 @@ class CallActivity : Activity() {
         val r = FrameLayout(this).also { it.setBackgroundColor(0xFF0B1220.toInt()); root = it }
         setContentView(r)
         screen = NativeCallScreen(this, r, object : NativeCallScreen.Actions {
-            override fun pageCall(detailJson: String): Boolean = false // first cut: host owns chrome; signaling stays elsewhere
-            override fun speaker(on: Boolean) { /* first cut: route via CallService/MainActivity path later */ }
+            override fun pageCall(detailJson: String): Boolean {
+                // Prefer live MainActivity page bridge; fall back to native hangup/mute paths.
+                if (MainActivity.dispatchNativeCall(detailJson)) return true
+                return handleLocalCallAction(detailJson)
+            }
+            override fun speaker(on: Boolean) {
+                val am = getSystemService(AUDIO_SERVICE) as? AudioManager ?: return
+                try {
+                    if (Build.VERSION.SDK_INT >= 31) {
+                        // Communication device pick is owned by MainActivity CallAudioRoute when alive;
+                        // here use speakerphone as the durable fallback for the standalone host.
+                        @Suppress("DEPRECATION")
+                        am.isSpeakerphoneOn = on
+                    } else {
+                        @Suppress("DEPRECATION")
+                        am.isSpeakerphoneOn = on
+                    }
+                } catch (_: RuntimeException) {}
+            }
             override fun camera(on: Boolean, facing: String) {
                 NativeCallMedia.handle("""{"op":"camera","on":$on,"facing":"$facing"}""") { _, _, _ -> }
             }
@@ -78,9 +100,10 @@ class CallActivity : Activity() {
 
     private fun applyIntent(i: Intent) {
         val id = i.getStringExtra(CallNotifications.EXTRA_CALL_ID) ?: return
-        val name = i.getStringExtra(CallNotifications.EXTRA_CALLER).orEmpty()
-        val photo = i.getStringExtra(CallNotifications.EXTRA_PHOTO).orEmpty()
-        val video = i.getBooleanExtra(CallNotifications.EXTRA_VIDEO, false)
+        callId = id
+        peerName = i.getStringExtra(CallNotifications.EXTRA_CALLER).orEmpty()
+        peerPhoto = i.getStringExtra(CallNotifications.EXTRA_PHOTO).orEmpty()
+        video = i.getBooleanExtra(CallNotifications.EXTRA_VIDEO, false)
         val phase = i.getStringExtra(EXTRA_PHASE) ?: PHASE_INCOMING
         val type = when (phase) {
             PHASE_INCOMING -> "call:incoming"
@@ -89,11 +112,45 @@ class CallActivity : Activity() {
             PHASE_ENDED -> "call:ended"
             else -> "call:answering"
         }
-        val m = org.json.JSONObject()
-            .put("callId", id).put("name", name).put("photo", photo).put("video", video)
+        val m = JSONObject()
+            .put("callId", id).put("name", peerName).put("photo", peerPhoto).put("video", video)
         screen?.onPageCall(type, m)
-        if (phase == PHASE_INCOMING) {
-            // Accept / Decline still available via IncomingCallActivity trampoline + notifications for this cut.
+        if (phase == PHASE_ENDED) {
+            window.decorView.postDelayed({ finish() }, 900)
+        }
+    }
+
+    /** Standalone host path when MainActivity's page bridge is not up. */
+    private fun handleLocalCallAction(detailJson: String): Boolean {
+        return try {
+            val m = JSONObject(detailJson)
+            when (m.optString("type")) {
+                "call:hangup" -> {
+                    val id = callId ?: return false
+                    Thread {
+                        try {
+                            // Best-effort: decline token path covers unanswered; hangup via page if alive.
+                            CallApi.decline(applicationContext, id)
+                        } catch (_: Throwable) {}
+                        runOnUiThread {
+                            NativeCallMedia.closeAll()
+                            CallService.stop(this)
+                            CallNotifications.cancel(this, id)
+                            screen?.onPageCall("call:ended", JSONObject().put("callId", id))
+                            finish()
+                        }
+                    }.start()
+                    true
+                }
+                "call:mute" -> {
+                    val muted = m.optBoolean("muted")
+                    NativeCallMedia.handle("""{"op":"mute","muted":$muted}""") { _, _, _ -> }
+                    true
+                }
+                else -> false
+            }
+        } catch (_: Exception) {
+            false
         }
     }
 }
