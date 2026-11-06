@@ -1067,25 +1067,23 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         handler.post(() -> { if (webView != null) webView.evaluateJavascript(js, null); });
     }
 
-    // ---- pjsip-rebuild in-app video: remote full-screen + local PiP TextureViews under a transparent WebView ----
-    private android.view.TextureView remoteVideo, localVideo;
+    // ---- in-app call video: remote full-screen + local PiP WebRTC renderers under a transparent WebView ----
+    private android.view.SurfaceView remoteVideo, localVideo; // org.webrtc.SurfaceViewRenderer (built in NativeCallVideo)
     private Integer savedWebBg;
     private void installCallVideoViews() {
         FrameLayout root = findViewById(R.id.root);
         if (root == null || webView == null) return;
-        remoteVideo = new android.view.TextureView(this);
-        localVideo = new android.view.TextureView(this);
+        remoteVideo = NativeCallVideo.INSTANCE.renderer(this, false);
+        localVideo = NativeCallVideo.INSTANCE.renderer(this, true); // PiP above the full-screen remote surface
         float d = getResources().getDisplayMetrics().density;
         FrameLayout.LayoutParams pip = new FrameLayout.LayoutParams((int) (110 * d), (int) (160 * d), android.view.Gravity.TOP | android.view.Gravity.END);
         pip.setMargins(0, (int) (96 * d), (int) (16 * d), 0);
         int at = root.indexOfChild(webView);
         root.addView(remoteVideo, at, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         root.addView(localVideo, at + 1, pip);
-        localVideo.setScaleX(-1f); // selfie mirror
         remoteVideo.setVisibility(View.GONE);
         localVideo.setVisibility(View.GONE);
-        NativeCallVideo.INSTANCE.setRemote(remoteVideo);
-        NativeCallVideo.INSTANCE.setLocal(localVideo);
+        NativeCallVideo.INSTANCE.bind(remoteVideo, localVideo);
         callScreen = new NativeCallScreen(this, root, new NativeCallScreen.Actions() {
             @Override public boolean pageCall(String detailJson) { return dispatchNativeCall(detailJson); }
             @Override public void speaker(boolean on) {

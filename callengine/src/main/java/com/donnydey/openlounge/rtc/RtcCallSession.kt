@@ -33,7 +33,7 @@ class RtcCallSession(
     }
 
     fun start() {
-        val r = runCatching { OlPeerConnection.nativeCreate(iceServers) }.getOrDefault(OlPeerConnection.ERR_UNAVAILABLE)
+        val r = runCatching { OlPeerConnection.nativeCreate(iceServers, isCaller) }.getOrDefault(OlPeerConnection.ERR_UNAVAILABLE)
         if (r != 0) return fail(CallFailure(CallFailureDomain.DEVICE, "pc-create", r, "WebRTC PeerConnection unavailable ($r)"))
         if (isCaller) runCatching { OlPeerConnection.nativeCreateOffer(false) } else sig.ready()
         poll()
@@ -102,6 +102,8 @@ class RtcCallSession(
     }
 
     fun setMute(m: Boolean) = runCatching { OlPeerConnection.nativeSetMute(m) }
+    /** OS reported an interface change: fresh ICE now instead of waiting for consent timeout. */
+    fun networkChanged() { if (!closed && connectedOnce) networkLoss("network-change") }
     private fun fail(f: CallFailure) { if (closed) return; onFailure(f); close() }
     fun close() { if (closed) return; closed = true; runCatching { sig.bye() }; runCatching { OlPeerConnection.nativeClose() }; h.removeCallbacksAndMessages(null) }
 

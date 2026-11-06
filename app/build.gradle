@@ -2,7 +2,7 @@ plugins {
     id 'com.android.application'
     // FCM: reads app/google-services.json (Firebase project open-lounge-2aabd)
     id 'com.google.gms.google-services'
-    // native call media: NativeCallMedia.kt -> PJSIP engine
+    // native call media: callengine (WebRTC PeerConnection, RingRTC session model)
     id 'org.jetbrains.kotlin.android'
 }
 
@@ -31,7 +31,7 @@ android {
     defaultConfig {
         applicationId "com.donnydey.openlounge"
         minSdk 24
-        ndk { abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64' } // ABIs in the pjproject prefab AAR
+        ndk { abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64' } // ABIs in the libwebrtc AAR
         targetSdk 36
         versionCode 48
         versionName "0.3.31-signal"
@@ -133,7 +133,7 @@ dependencies {
     // opt-in biometric app lock (BiometricLock)
     implementation 'androidx.biometric:biometric:1.1.0'
 
-    // PJSIP media engine (pjproject 2.17 prefab AAR built by .github/workflows/android-prefab.yml). No WebRTC.
+    // call engine: BSD libwebrtc m152 PeerConnection (audio + video), sealed rc:* session. No PJSIP.
     implementation project(':callengine')
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'
 

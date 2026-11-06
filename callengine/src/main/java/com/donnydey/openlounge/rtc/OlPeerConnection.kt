@@ -8,7 +8,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 
 /**
  * One PeerConnection on the CallAudioEngine factory (BSD libwebrtc m152 Java API). Contract config: iceTransportPolicy
- * all, bundle max-bundle, rtcpMux require, unified plan; one Opus audio track. Async results are queued and drained
+ * all, bundle max-bundle, rtcpMux require, unified plan; one Opus audio track + one video transceiver (OlVideo). Async results are queued and drained
  * by RtcCallSession via [nativeTake] (same string protocol as before):
  * "sdp\n<type>\n<sdp>" | "cand\n<mid>\n<idx>\n<cand>" | "cand-end" | "ice\n<state>" | "remote-set" | "error\n<domain>\n<step>\n<code>"
  */
@@ -18,6 +18,7 @@ object OlPeerConnection {
     private var pc: PeerConnection? = null
     private var source: AudioSource? = null
     private var track: AudioTrack? = null
+    private var videoTx: RtpTransceiver? = null
 
     fun load(): Boolean = CallAudioEngine.factory != null
 
@@ -53,18 +54,26 @@ object OlPeerConnection {
         override fun onRemoveStream(s: MediaStream) {}
         override fun onDataChannel(d: DataChannel) {}
         override fun onRenegotiationNeeded() {}
-        override fun onAddTrack(r: RtpReceiver, s: Array<out MediaStream>) { Log.i(TAG, "remote track ${r.track()?.kind()}") }
+        override fun onAddTrack(r: RtpReceiver, s: Array<out MediaStream>) {
+            val t = r.track(); Log.i(TAG, "remote track ${t?.kind()}")
+            if (t is VideoTrack) OlVideo.setRemoteTrack(t)
+        }
     }
 
     private fun err(domain: String, step: String, msg: String?) { Log.e(TAG, "$step: $msg"); q.add("error\n$domain\n$step\n-1") }
 
-    @JvmStatic fun nativeCreate(iceServersJson: String): Int {
+    @JvmStatic fun nativeCreate(iceServersJson: String, isCaller: Boolean = true): Int {
         val f = CallAudioEngine.factory ?: return ERR_UNAVAILABLE
         nativeClose()
         val p = f.createPeerConnection(config(iceServersJson), observer) ?: return -2
         val src = f.createAudioSource(MediaConstraints()); val t = f.createAudioTrack("ol-mic", src)
         p.addTrack(t, listOf("ol")) ?: run { p.dispose(); return -3 }
         pc = p; source = src; track = t
+        // one video m-line on the same PC from the start (caller offers sendrecv; callee adopts it on remote-set), so
+        // the camera turns on/off by replaceTrack only — same as the browser CallSession and iOS OLRtcCall.
+        if (isCaller) videoTx = p.addTransceiver(MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO, RtpTransceiver.RtpTransceiverInit(RtpTransceiver.RtpTransceiverDirection.SEND_RECV, listOf("ol")))
+        OlVideo.onLocalTrack = { vt -> videoTx?.sender?.setTrack(vt, false) }
+        OlVideo.localTrack?.let { videoTx?.sender?.setTrack(it, false) }
         return 0
     }
     @JvmStatic fun nativeSetConfiguration(iceServersJson: String): Int = if (pc?.setConfiguration(config(iceServersJson)) == true) 0 else -1
@@ -91,12 +100,21 @@ object OlPeerConnection {
     @JvmStatic fun nativeSetRemote(type: String, sdp: String): Int {
         val p = pc ?: return ERR_UNAVAILABLE
         val t = if (type == "offer") SessionDescription.Type.OFFER else SessionDescription.Type.ANSWER
-        p.setRemoteDescription(sdpObs(null, { q.add("remote-set") }, "set-remote", true), SessionDescription(t, sdp)); return 0
+        p.setRemoteDescription(sdpObs(null, { adoptVideo(p); q.add("remote-set") }, "set-remote", true), SessionDescription(t, sdp)); return 0
+    }
+    /** callee: the caller's video m-line arrived -> send on it too (camera track if already on) */
+    private fun adoptVideo(p: PeerConnection) {
+        if (videoTx != null) return
+        val tx = p.transceivers.firstOrNull { it.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO } ?: return
+        runCatching { tx.direction = RtpTransceiver.RtpTransceiverDirection.SEND_RECV }
+        videoTx = tx
+        OlVideo.localTrack?.let { tx.sender.setTrack(it, false) }
     }
     @JvmStatic fun nativeAddCandidate(cand: String, mid: String, idx: Int): Int = if (pc?.addIceCandidate(IceCandidate(mid, idx, cand)) == true) 0 else -1
     @JvmStatic fun nativeSetMute(muted: Boolean) { track?.setEnabled(!muted) }
     @JvmStatic fun nativeTake(): String? = q.poll()
     @JvmStatic fun nativeClose() {
+        videoTx = null; OlVideo.onLocalTrack = null
         runCatching { pc?.close(); pc?.dispose() }; pc = null
         runCatching { track?.dispose() }; track = null
         runCatching { source?.dispose() }; source = null

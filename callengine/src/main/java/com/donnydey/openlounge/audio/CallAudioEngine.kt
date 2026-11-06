@@ -11,7 +11,7 @@ import java.util.concurrent.atomic.AtomicInteger
 /**
  * Sole native call audio engine: one WebRTC AudioDeviceModule (JavaAudioDeviceModule; WebRTC APM does AEC/NS/AGC,
  * resampling, Opus, jitter) feeding one PeerConnectionFactory. Opened ONLY after [CallAudioManager] READY.
- * Capture/playout start when the PeerConnection negotiates audio. No PJSIP sound device, bridge, or conference graph.
+ * Capture/playout start when the PeerConnection negotiates audio. Video codecs (HW first) on OlVideo.egl.
  *
  * Library: BSD stock Google libwebrtc m152 AAR (interim; target signalapp/webrtc 8037b). RingRTC (AGPL) = oracle only.
  * Every failure here is DEVICE/CODEC — never NETWORK, never allowRelay.
@@ -77,7 +77,10 @@ object CallAudioEngine {
                 })
                 .createAudioDeviceModule()
             adm = a
-            factory = PeerConnectionFactory.builder().setAudioDeviceModule(a).createPeerConnectionFactory()
+            factory = PeerConnectionFactory.builder().setAudioDeviceModule(a)
+                .setVideoEncoderFactory(com.donnydey.openlounge.rtc.OlVideo.encoderFactory())
+                .setVideoDecoderFactory(com.donnydey.openlounge.rtc.OlVideo.decoderFactory())
+                .createPeerConnectionFactory()
             Log.i(TAG, "engine-open in=${input?.kind} out=${output?.kind} rates=${supportedRates.joinToString()}")
             null
         }.getOrElse { e -> close(); CallFailure(CallFailureDomain.DEVICE, "engine-open", ERR_UNAVAILABLE, e.toString()) }
