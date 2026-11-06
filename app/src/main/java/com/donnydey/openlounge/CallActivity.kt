@@ -86,7 +86,7 @@ class CallActivity : Activity() {
                 } catch (_: RuntimeException) {}
             }
             override fun camera(on: Boolean, facing: String) {
-                NativeCallMedia.handle("""{"op":"camera","on":$on,"facing":"$facing"}""") { _, _, _ -> }
+                CallMediaCoordinator.handle("""{"op":"camera","on":$on,"facing":"$facing"}""") { _, _, _ -> }
             }
         })
         applyIntent(intent)
@@ -133,7 +133,7 @@ class CallActivity : Activity() {
                             CallApi.decline(applicationContext, id)
                         } catch (_: Throwable) {}
                         runOnUiThread {
-                            NativeCallMedia.closeAll()
+                            CallMediaCoordinator.closeAll()
                             CallService.stop(this)
                             CallNotifications.cancel(this, id)
                             screen?.onPageCall("call:ended", JSONObject().put("callId", id))
@@ -144,7 +144,7 @@ class CallActivity : Activity() {
                 }
                 "call:mute" -> {
                     val muted = m.optBoolean("muted")
-                    NativeCallMedia.handle("""{"op":"mute","muted":$muted}""") { _, _, _ -> }
+                    CallMediaCoordinator.handle("""{"op":"mute","muted":$muted}""") { _, _, _ -> }
                     true
                 }
                 else -> false

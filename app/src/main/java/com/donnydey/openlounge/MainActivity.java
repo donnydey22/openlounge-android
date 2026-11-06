@@ -68,7 +68,7 @@ import android.net.Network;
 import android.net.NetworkCapabilities;
 import java.util.List;
 
-public class MainActivity extends AppCompatActivity implements SessionBridge.Host, NativeCallMedia.Host {
+public class MainActivity extends AppCompatActivity implements SessionBridge.Host, CallMediaCoordinator.Host {
     private NativePhoneAuth phoneAuth;
 
     @Override
@@ -277,8 +277,8 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         // Durable native token store mirrored by src/lib/session.ts (window.OpenLoungeNative)
         sessionBridge = new SessionBridge(this, this);
         // 0.3.16 native call media: process-wide (survives page reloads); this activity is its page relay
-        NativeCallMedia.init(this);
-        NativeCallMedia.setHost(this);
+        CallMediaCoordinator.init(this);
+        CallMediaCoordinator.setHost(this);
         // native feel: theme-colored background (no white flash before the page paints), no overscroll glow
         boolean dark = (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK) != Configuration.UI_MODE_NIGHT_NO;
         webView.setBackgroundColor(Color.parseColor(dark ? "#0b0b0d" : "#f4f3ee"));
@@ -1041,7 +1041,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         return a.pageLoaded;
     }
 
-    // ---- 0.3.16 native call media host (NativeCallMedia.Host + SessionBridge.Host.nativeMediaResolve) ----
+    // ---- 0.3.16 native call media host (CallMediaCoordinator.Host + SessionBridge.Host.nativeMediaResolve) ----
     @Override
     public void nativeMediaResolve(String reqId, boolean ok, String resultJson, String error) {
         String r = resultJson == null || resultJson.isEmpty() ? "null" : resultJson;
@@ -1091,11 +1091,12 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             @Override public void speaker(boolean on) {
                 callSpeaker = on;
                 callUserPick = on ? CallAudioRoute.Device.SPEAKER : CallAudioRoute.Device.EARPIECE;
-                if (callAudioOn) applyCallRoute(); // reportCallRoute tells the page (openlounge:native-audio-route)
+                com.donnydey.openlounge.audio.CallAudioManager.get(MainActivity.this).select(on ? com.donnydey.openlounge.audio.CallAudioDevices.Kind.SPEAKER : com.donnydey.openlounge.audio.CallAudioDevices.Kind.EARPIECE);
+                if (callAudioOn) applyCallRoute(); // rooms only now; reportCallRoute tells the page (openlounge:native-audio-route)
             }
             @Override public void camera(boolean on, String facing) {
                 try {
-                    NativeCallMedia.handle(new JSONObject().put("op", "camera").put("on", on).put("facing", facing).toString(),
+                    CallMediaCoordinator.handle(new JSONObject().put("op", "camera").put("on", on).put("facing", facing).toString(),
                             (ok, r, e) -> kotlin.Unit.INSTANCE);
                 } catch (Exception ignored) {}
             }
@@ -1123,8 +1124,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
 
     @Override
     public void nativeCallAudio(boolean on) {
-        // media is live → communication mode + route policy now (call:ended / onDestroy still switch it off)
-        if (on) callAudio(true);
+        // Duplicate call focus owner removed: CallAudioManager owns call focus/mode/route. Rooms keep callAudio().
     }
 
     @Override
@@ -1165,7 +1165,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 // Do NOT enter MODE_IN_COMMUNICATION yet: the page's ringback is a normal media <audio> element and
                 // communication mode re-routes/attenuates it (earpiece, voice stream) so the caller hears silence.
                 // Call mode + route are applied on call:connected (CallAudioPolicy).
-                if (CallAudioPolicy.enterCommunicationModeOn(type)) callAudio(true);
+                // call focus/mode/route owned solely by audio.CallAudioManager (signal-identical-calling)
                 CallService.start(this, callId, callName, false);
                 if (CallAudioPolicy.startRingbackOn(type)) ringback(true);
                 break;
@@ -1176,12 +1176,12 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                     CallNotifications.cancel(this, id); // answered on the page's own ring screen
                     callId = id;
                 }
-                if (CallAudioPolicy.enterCommunicationModeOn(type)) callAudio(true);
+                // call focus/mode/route owned solely by audio.CallAudioManager (signal-identical-calling)
                 CallService.start(this, callId, callName, true);
                 break;
             case "call:ended":
                 if (CallAudioPolicy.stopRingbackOn(type)) ringback(false);
-                NativeCallMedia.closeAll(); // the only native-media teardown besides the page's op 'close'
+                CallMediaCoordinator.closeAll(); // the only native-media teardown besides the page's op 'close'
                 if (!id.isEmpty()) CallNotifications.cancel(this, id);
                 CallService.stop(this);
                 callAudio(false);
@@ -1193,7 +1193,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 // the page is about to play the incoming ringtone: no live call → no left-over call-mode session
                 // (communication mode / voice stream made the ring thin and quiet) and the native engine stopped
                 if (CallAudioPolicy.prepareRingtoneOn(type, callId != null || roomAudioLive)) {
-                    NativeCallMedia.releaseIdle();
+                    CallMediaCoordinator.releaseIdle();
                     callAudio(false);
                     AudioManager ram = (AudioManager) getSystemService(AUDIO_SERVICE);
                     if (ram != null) try { ram.setMode(AudioManager.MODE_NORMAL); } catch (RuntimeException ignored) {}
@@ -1449,7 +1449,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                     lastNetType = key;
                     if (first) return;
                     handler.post(() -> {
-                        NativeCallMedia.onNetworkChange(); // app-owned media: fresh ICE now, even mid page reload
+                        CallMediaCoordinator.onNetworkChange(); // app-owned media: fresh ICE now, even mid page reload
                         if (webView != null) webView.evaluateJavascript("try{window.__olNetworkChanged&&window.__olNetworkChanged('" + key + "')}catch(e){}", null);
                     });
                 }
@@ -1465,7 +1465,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             netCallback = null;
         }
         activityForeground = false;
-        if (NativeCallMedia.getHost() == this) NativeCallMedia.setHost(null);
+        if (CallMediaCoordinator.getHost() == this) CallMediaCoordinator.setHost(null);
         if (live.get() == this) live = new WeakReference<>(null);
         if (isFinishing()) {
             CallService.stop(this);

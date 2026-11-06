@@ -108,7 +108,7 @@ public class IncomingCallActivity extends Activity {
         // activity) is exempt from background-start limits and lets Android 14+ grant the microphone type.
         CallService.start(getApplicationContext(), id, getIntent().getStringExtra(CallNotifications.EXTRA_CALLER), false, true);
         // Linphone cut: native owns accept signaling — no /call/<id>?accept=1 WebView path.
-        boolean nativeOk = NativeCallMedia.acceptIncoming(getApplicationContext(), id);
+        boolean nativeOk = CallMediaCoordinator.acceptIncoming(getApplicationContext(), id);
         // Native-UI first cut: CallActivity owns in-app call chrome (no WebView call path).
         startActivity(CallActivity.intent(this, id,
                 getIntent().getStringExtra(CallNotifications.EXTRA_CALLER),

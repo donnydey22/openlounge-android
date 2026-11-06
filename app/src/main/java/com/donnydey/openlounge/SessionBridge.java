@@ -177,7 +177,7 @@ public final class SessionBridge {
         host.callMessage(json);
     }
 
-    // ---- 0.3.16: native call media (NativeCallMedia.kt). The page talks to it through window.OpenLoungeNativeMedia
+    // ---- 0.3.16: native call media (CallMediaCoordinator.kt). The page talks to it through window.OpenLoungeNativeMedia
     // (NATIVE_MEDIA_SHIM: Promise-based nativeMedia(cmd) + msReply(id, ok, result, error), capabilities ["nativeMedia"]),
     // the same contract as the iOS app's window.OpenLoungeNative; these flat string methods are its transport.
     @JavascriptInterface
@@ -187,7 +187,7 @@ public final class SessionBridge {
             host.nativeMediaResolve(reqId, false, "null", "nativeMedia unavailable");
             return;
         }
-        NativeCallMedia.handle(cmdJson, (ok, result, error) -> {
+        CallMediaCoordinator.handle(cmdJson, (ok, result, error) -> {
             host.nativeMediaResolve(reqId, ok, result, error);
             return kotlin.Unit.INSTANCE;
         });
@@ -196,7 +196,7 @@ public final class SessionBridge {
     @JavascriptInterface
     public void nativeMsReply(String id, boolean ok, String resultJson, String error) {
         if (!trusted() || id == null || id.length() > 100 || (resultJson != null && resultJson.length() > 262144)) return;
-        NativeCallMedia.onMsReply(id, ok, resultJson, error);
+        CallMediaCoordinator.onMsReply(id, ok, resultJson, error);
     }
 
     public static final String NATIVE_MEDIA_SHIM = "(function(){try{var N=window.OpenLoungeNative;"

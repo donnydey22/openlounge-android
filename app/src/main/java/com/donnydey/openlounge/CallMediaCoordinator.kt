@@ -5,6 +5,9 @@ import android.os.Handler
 import android.os.Looper
 import com.donnydey.openlounge.pjsip.CallSignalClient
 import com.donnydey.openlounge.pjsip.PjsipEngine
+import com.donnydey.openlounge.audio.CallAudioEngine
+import com.donnydey.openlounge.audio.CallAudioManager
+import com.donnydey.openlounge.audio.CallFailure
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -13,7 +16,7 @@ import org.json.JSONObject
  * SessionBridge stay unchanged; the WebView never captures or plays call audio. SDP/SRTP signaling over the
  * existing TLS WebSocket (M4): 'open' starts the SRTP audio leg to the SFU PlainTransport; 'close' tears down fully.
  */
-object NativeCallMedia {
+object CallMediaCoordinator {
     interface Host {
         fun relay(id: String, event: String, dataJson: String): Boolean
         fun emit(detailJson: String)
@@ -74,7 +77,7 @@ object NativeCallMedia {
             "mute" -> { val m = runCatching { JSONObject(cmdJson).optBoolean("muted") }.getOrDefault(false)
                 muted = m; if (p2pState != P2P_OFF) runCatching { PjsipEngine.nativeP2pSetMute(m) }
                 if (direct) return done(true, "true", null)
-                main.post { val r = runCatching { PjsipEngine.nativeSfuSetMute(m) }.getOrDefault(-1); done(r >= 0, (r >= 0).toString(), if (r < 0) "mute failed" else null) } }
+                main.post { val r = runCatching { CallAudioEngine.setMute(m); PjsipEngine.nativeSfuSetMute(m) }.getOrDefault(-1); done(r >= 0, (r >= 0).toString(), if (r < 0) "mute failed" else null) } }
             "end" -> { callId = null; closeAll(); done(true, "true", null) }
             else -> done(false, null, "unknown op: $op")
         }
@@ -90,88 +93,39 @@ object NativeCallMedia {
     }
     private data class Leg(val ip: String, val port: Int, val tx: String, val rx: String, val ssrc: Long, val txPt: Int, val rxPt: Int)
     @Volatile private var leg: Leg? = null
-    // Signal FullSignalAudioManagerApi31.kt:155-166 (+ listener :55-62): request MODE_IN_COMMUNICATION, proceed only once applied.
-    // Bounded poll on the caller's (main) thread, where pjsua already runs; setMode is synchronous (MainActivity.java:1257). Signal has no timeout; 500 ms here.
-    private fun awaitCommMode() {
-        val am = appCtx?.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager ?: return
-        val t0 = android.os.SystemClock.elapsedRealtime()
-        while (am.mode != android.media.AudioManager.MODE_IN_COMMUNICATION && android.os.SystemClock.elapsedRealtime() - t0 < 500L) Thread.sleep(20)
-        CallDiskLog.mark("audio-mode-wait", "mode=${am.mode} ms=${android.os.SystemClock.elapsedRealtime() - t0}")
-    }
-    // Keep retries asynchronous: a device may need a moment after MODE_IN_COMMUNICATION.
+    // Call-audio lifecycle (signal-identical-calling): CallAudioManager (focus → mode applied → route, async, own thread)
+    // then CallAudioEngine (WebRTC ADM) opens devices. Replaces awaitCommMode main-thread poll, PJSIP openSound retries
+    // and 420003/-201 coercion. Every failure here is typed local — never relay/TURN/ICE restart.
     private var soundGeneration = 0
-    // A relay cannot repair a local engine/device failure. Sticky for this call, cleared on a new call/end.
     @Volatile private var localFailure: String? = null
-    private fun localError(domain: String, status: Int): String {
-        val detail = JSONObject().put("domain", domain).put("status", status).put("networkRelated", false)
-            .put("allowRelay", false).put("message", "$domain status=$status").toString()
-        localFailure = "native-media-error:$detail"
+    private fun localError(f: CallFailure): String {
+        localFailure = "native-media-error:" + f.toJson()
+        CallDiskLog.mark("local-audio-failure", f.toJson())
+        host?.emit(JSONObject().put("type", "pjsip:error").put("step", f.step).put("status", f.code)
+            .put("domain", f.domain.name.lowercase()).put("networkRelated", false).put("model", android.os.Build.MODEL).toString())
         return localFailure!!
     }
-    /** Instrument which openSound/call path returns PJMEDIA_EAUD_INIT (420003 / legacy -201). */
-    private const val PJMEDIA_EAUD_INIT = 420003
-    private fun networkTypeLabel(): String {
-        val ctx = appCtx ?: return "unknown"
-        return try {
-            val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
-                ?: return "unknown"
-            val nc = cm.getNetworkCapabilities(cm.activeNetwork) ?: return "none"
-            when {
-                nc.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
-                nc.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
-                nc.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
-                else -> "other"
-            }
-        } catch (_: Throwable) { "unknown" }
-    }
-    private fun eaudName(status: Int): String = when (status) {
-        PJMEDIA_EAUD_INIT, -201 -> "PJMEDIA_EAUD_INIT"
-        420001 -> "PJMEDIA_EAUD_ERR"
-        420002 -> "PJMEDIA_EAUD_SYSERR"
-        420004 -> "PJMEDIA_EAUD_INVDEV"
-        420005 -> "PJMEDIA_EAUD_NODEV"
-        420007 -> "PJMEDIA_EAUD_NOTREADY"
-        else -> "other"
-    }
-    private fun logSoundStatus(path: String, attempt: Int, status: Int) {
-        val line = "path=$path attempt=$attempt status=$status eaud=${eaudName(status)} model=${android.os.Build.MODEL} net=${networkTypeLabel()}"
-        CallDiskLog.mark("open-sound-result", line)
-        if (status != 0) {
-            host?.emit(JSONObject().put("type", "pjsip:error").put("step", "sound").put("path", path)
-                .put("status", status).put("eaud", eaudName(status)).put("domain", "audio-device")
-                .put("networkRelated", false).put("model", android.os.Build.MODEL)
-                .put("net", networkTypeLabel()).put("error", "pj $status").toString())
-        }
-    }
-    private fun openSoundWithRetry(path: String, done: (Int) -> Unit) {
+    private fun openCallAudio(path: String, done: (CallFailure?) -> Unit) {
+        val ctx = appCtx ?: return done(CallFailure(com.donnydey.openlounge.audio.CallFailureDomain.SESSION, path, -1, "no context"))
         val generation = soundGeneration
-        fun attempt(number: Int) {
-            if (generation != soundGeneration) return done(-1)
-            // 1-2: DEFAULT devices (nativeOpenSound also tries 0/0 internally). 3: explicit 0/0 via openSoundDev.
-            val status = if (number >= 3) PjsipEngine.openSoundDev(0, 0) else PjsipEngine.openSound()
-            logSoundStatus(path, number, status)
-            when {
-                status == 0 -> done(0)
-                number < 3 -> main.postDelayed({ attempt(number + 1) }, if (number == 1) 180L else 220L)
-                else -> done(status) // real pj_status preserved (never collapsed to -201)
+        val mgr = CallAudioManager.get(ctx); mgr.tracer = { e, d -> CallDiskLog.mark(e, d) }
+        mgr.prepare(videoOn) { prep ->
+            main.post {
+                if (generation != soundGeneration) return@post done(CallFailure(com.donnydey.openlounge.audio.CallFailureDomain.SESSION, "cancelled", 0, "call ended"))
+                if (prep != null) return@post done(prep)
+                val out = mgr.devices.choose(videoOn)
+                val inp = mgr.devices.inputs.firstOrNull { it.kind == out?.kind } ?: mgr.devices.inputs.firstOrNull()
+                done(CallAudioEngine.open(inp, out, inp?.sampleRates ?: IntArray(0)))
             }
         }
-        attempt(1)
     }
     private fun startLeg(l: Leg, done: (Int) -> Unit) {
-        host?.nativeCallAudio(true)
-        awaitCommMode()
         CallDiskLog.mark("engine-start")
-        val s0 = PjsipEngine.start()
-        if (s0 != 0) { CallDiskLog.mark("engine-start-fail", "$s0"); localError("engine", s0); done(s0); return }
-        openSoundWithRetry("startLeg") { snd ->
-            if (snd != 0) {
-                localError("audio-device", snd)
-                done(snd)
-            } else {
-                leg = l
-                done(PjsipEngine.nativeSfuAudioStart(l.ip, l.port, l.tx, l.rx, l.ssrc, l.txPt, l.rxPt, 0, false))
-            }
+        val s0 = PjsipEngine.start() // transport leg only; no PJSIP sound device
+        if (s0 != 0) { localError(CallFailure(com.donnydey.openlounge.audio.CallFailureDomain.SESSION, "transport-start", s0, "transport start $s0")); done(s0); return }
+        openCallAudio("startLeg") { f ->
+            if (f != null) { localError(f); done(f.code.takeIf { it != 0 } ?: -1) }
+            else { leg = l; done(PjsipEngine.nativeSfuAudioStart(l.ip, l.port, l.tx, l.rx, l.ssrc, l.txPt, l.rxPt, 0, true)) }
         }
     }
 
@@ -500,11 +454,9 @@ object NativeCallMedia {
     private var directWantVideo = false
     private fun startDirect(wantVideo: Boolean, done: (Boolean, String?, String?) -> Unit) {
         if (p2pCfg == null) return done(false, null, "direct: no relay config")
-        host?.nativeCallAudio(true) // Telegram order: audio mode before engine (VoIPService.java:4303-4305)
-        awaitCommMode()
-        val s0 = PjsipEngine.start(); if (s0 != 0) return done(false, null, "direct: pjsua start $s0")
-        openSoundWithRetry("startDirect") { snd ->
-            if (snd != 0) { done(false, null, localError("audio-device", snd)); return@openSoundWithRetry }
+        val s0 = PjsipEngine.start(); if (s0 != 0) return done(false, null, "direct: transport start $s0")
+        openCallAudio("startDirect") { f ->
+            if (f != null) { done(false, null, localError(f)); return@openCallAudio }
             directDone = done; directWantVideo = wantVideo; relayRetryUsed = false
             startP2p()
         }
@@ -547,7 +499,7 @@ object NativeCallMedia {
     }
     private fun stopP2p() { direct = false; directDone?.invoke(false, null, "ended"); directDone = null; videoP2p = false; relayRetryUsed = false; p2pGen++; p2pState = P2P_OFF; p2pCfg = null; p2pPendingOffer = null; runCatching { PjsipEngine.nativeP2pStop() } }
 
-    @JvmStatic fun closeAll() = main.post { soundGeneration++; localFailure = null; CallDiskLog.mark("close-all"); stopP2p(); if (videoOn) { videoOn = false; NativeCallVideo.stop(); host?.nativeCallVideo(false) }; leg = null; runCatching { PjsipEngine.nativeSfuStop() }; PjsipEngine.teardown(); if (active) { active = false; host?.nativeCallAudio(false) } }
+    @JvmStatic fun closeAll() = main.post { soundGeneration++; localFailure = null; CallDiskLog.mark("close-all"); stopP2p(); if (videoOn) { videoOn = false; NativeCallVideo.stop(); host?.nativeCallVideo(false) }; leg = null; runCatching { PjsipEngine.nativeSfuStop() }; PjsipEngine.teardown(); CallAudioEngine.close(); appCtx?.let { CallAudioManager.get(it).release() }; if (active) { active = false; host?.nativeCallAudio(false) } }
     @JvmStatic fun isActive(): Boolean = active
     @JvmStatic fun releaseIdle() { main.post { CallDiskLog.mark("release-idle"); PjsipEngine.teardown() } }
 }
