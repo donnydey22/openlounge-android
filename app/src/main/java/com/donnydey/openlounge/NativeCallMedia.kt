@@ -108,13 +108,48 @@ object NativeCallMedia {
         localFailure = "native-media-error:$detail"
         return localFailure!!
     }
-    private fun openSoundWithRetry(done: (Int) -> Unit) {
+    /** Instrument which openSound/call path returns PJMEDIA_EAUD_INIT (420003 / legacy -201). */
+    private const val PJMEDIA_EAUD_INIT = 420003
+    private fun networkTypeLabel(): String {
+        val ctx = appCtx ?: return "unknown"
+        return try {
+            val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+                ?: return "unknown"
+            val nc = cm.getNetworkCapabilities(cm.activeNetwork) ?: return "none"
+            when {
+                nc.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+                nc.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+                nc.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+                else -> "other"
+            }
+        } catch (_: Throwable) { "unknown" }
+    }
+    private fun eaudName(status: Int): String = when (status) {
+        PJMEDIA_EAUD_INIT, -201 -> "PJMEDIA_EAUD_INIT"
+        420001 -> "PJMEDIA_EAUD_ERR"
+        420002 -> "PJMEDIA_EAUD_SYSERR"
+        420004 -> "PJMEDIA_EAUD_INVDEV"
+        420005 -> "PJMEDIA_EAUD_NODEV"
+        420007 -> "PJMEDIA_EAUD_NOTREADY"
+        else -> "other"
+    }
+    private fun logSoundStatus(path: String, attempt: Int, status: Int) {
+        val line = "path=$path attempt=$attempt status=$status eaud=${eaudName(status)} model=${android.os.Build.MODEL} net=${networkTypeLabel()}"
+        CallDiskLog.mark("open-sound-result", line)
+        if (status != 0) {
+            host?.emit(JSONObject().put("type", "pjsip:error").put("step", "sound").put("path", path)
+                .put("status", status).put("eaud", eaudName(status)).put("domain", "audio-device")
+                .put("networkRelated", false).put("model", android.os.Build.MODEL)
+                .put("net", networkTypeLabel()).put("error", "pj $status").toString())
+        }
+    }
+    private fun openSoundWithRetry(path: String, done: (Int) -> Unit) {
         val generation = soundGeneration
         fun attempt(number: Int) {
             if (generation != soundGeneration) return done(-1)
             // 1-2: DEFAULT devices (nativeOpenSound also tries 0/0 internally). 3: explicit 0/0 via openSoundDev.
             val status = if (number >= 3) PjsipEngine.openSoundDev(0, 0) else PjsipEngine.openSound()
-            CallDiskLog.mark("open-sound-result", "attempt=$number status=$status model=${android.os.Build.MODEL}")
+            logSoundStatus(path, number, status)
             when {
                 status == 0 -> done(0)
                 number < 3 -> main.postDelayed({ attempt(number + 1) }, if (number == 1) 180L else 220L)
@@ -129,11 +164,9 @@ object NativeCallMedia {
         CallDiskLog.mark("engine-start")
         val s0 = PjsipEngine.start()
         if (s0 != 0) { CallDiskLog.mark("engine-start-fail", "$s0"); localError("engine", s0); done(s0); return }
-        openSoundWithRetry { snd ->
+        openSoundWithRetry("startLeg") { snd ->
             if (snd != 0) {
                 localError("audio-device", snd)
-                host?.emit(JSONObject().put("type", "pjsip:error").put("step", "sound").put("status", snd)
-                    .put("domain", "audio-device").put("networkRelated", false).put("error", "pj $snd").toString())
                 done(snd)
             } else {
                 leg = l
@@ -302,19 +335,61 @@ object NativeCallMedia {
     // stays up until the direct leg carries RTP both ways; then audio switches and the server route is dropped.
     private data class P2pCfg(val offerer: Boolean, val stun: String, val turn: String, val user: String, val pass: String, val tcp: Boolean, val relayOnly: Boolean) {
         companion object {
-            /** reuse the relay logins the server already hands out in connect.iceServers (turn:/turns: urls) */
+            /**
+             * Reuse connect.iceServers turn:/turns: URLs. Offer UDP + TCP + TLS:443 together
+             * (Signal/Linphone/Jitsi), not a single preferred UDP URL. Encoded for ol_p2p as
+             * "host:port|udp,host:port|tcp,host:443|tls".
+             */
             fun from(c: JSONObject): P2pCfg? {
                 val arr = c.optJSONArray("iceServers") ?: return null
-                var turn = ""; var tcp = false; var user = ""; var pass = ""
-                for (i in 0 until arr.length()) { val s = arr.optJSONObject(i) ?: continue
-                    val urls = s.optJSONArray("urls")?.let { a -> List(a.length()) { a.optString(it) } } ?: listOf(s.optString("urls"))
-                    for (u in urls) { val m = Regex("^turn:([^?]+)(\\?transport=(udp|tcp))?$").find(u) ?: continue
-                        val isTcp = m.groupValues[3] == "tcp" || c.optBoolean("tcpOnly")
-                        if (turn.isEmpty() || (!isTcp && tcp)) { turn = m.groupValues[1]; tcp = isTcp; user = s.optString("username"); pass = s.optString("credential") } } }
-                if (turn.isEmpty()) return null
-                return P2pCfg(c.optBoolean("p2pOfferer"), turn, turn, user, pass, tcp, c.optBoolean("relayOnly"))
+                val ents = linkedSetOf<String>() // "host:port|transport"
+                var user = ""; var pass = ""; var stunHost = ""
+                for (i in 0 until arr.length()) {
+                    val s = arr.optJSONObject(i) ?: continue
+                    val urls = s.optJSONArray("urls")?.let { a -> List(a.length()) { a.optString(it) } }
+                        ?: listOf(s.optString("urls"))
+                    for (u in urls) {
+                        val turns = u.startsWith("turns:", ignoreCase = true)
+                        val isTurn = u.startsWith("turn:", ignoreCase = true)
+                        if (!turns && !isTurn) {
+                            Regex("^stun[s]?:([^?]*)", RegexOption.IGNORE_CASE).find(u)?.let {
+                                if (stunHost.isEmpty()) stunHost = it.groupValues[1]
+                            }
+                            continue
+                        }
+                        var rest = u.substringAfter(':')
+                        val transport = when {
+                            turns -> "tls"
+                            Regex("transport=tcp", RegexOption.IGNORE_CASE).containsMatchIn(rest) -> "tcp"
+                            Regex("transport=udp", RegexOption.IGNORE_CASE).containsMatchIn(rest) -> "udp"
+                            else -> "udp"
+                        }
+                        rest = rest.substringBefore('?')
+                        if (rest.isEmpty()) continue
+                        val hp = if (turns && !rest.contains(':')) "$rest:443" else rest
+                        ents.add("$hp|$transport")
+                        if (user.isEmpty()) { user = s.optString("username"); pass = s.optString("credential") }
+                        if (stunHost.isEmpty()) stunHost = hp
+                    }
+                }
+                if (ents.isEmpty()) return null
+                val primary = ents.first().substringBefore('|').let { if (it.contains(':')) it else "$it:3478" }
+                val host = primary.substringBeforeLast(':')
+                val basePort = primary.substringAfterLast(':').toIntOrNull() ?: 3478
+                fun has(t: String) = ents.any { it.endsWith("|$t") }
+                if (!has("udp")) ents.add("$host:$basePort|udp")
+                if (!has("tcp")) ents.add("$host:$basePort|tcp")
+                if (!has("tls")) ents.add("$host:443|tls")
+                val turnMulti = ents.take(3).joinToString(",")
+                CallDiskLog.mark("turn-multi", turnMulti)
+                return P2pCfg(
+                    c.optBoolean("p2pOfferer"), stunHost.ifEmpty { primary }, turnMulti, user, pass,
+                    tcp = ents.any { it.endsWith("|tcp") || it.endsWith("|tls") },
+                    relayOnly = c.optBoolean("relayOnly")
+                )
             }
         }
+        fun withRelayOnly(): P2pCfg = copy(relayOnly = true, tcp = true)
     }
     private const val P2P_OFF = 0; private const val P2P_TRYING = 1; private const val P2P_LIVE = 2; private const val P2P_FAILED = 3
     @Volatile private var p2pState = P2P_OFF
@@ -322,7 +397,9 @@ object NativeCallMedia {
     private var p2pPendingOffer: String? = null
     private var p2pGen = 0
     @Volatile private var muted = false
+    private var relayRetryUsed = false
     private const val P2P_TIMEOUT_MS = 15_000L
+    private const val P2P_RELAY_RETRY_MS = 28_000L // Signal/LiveKit/Jitsi: ~25-30s relay-only before hangup
 
     private fun startP2p() {
         val cfg = p2pCfg ?: return
@@ -337,7 +414,7 @@ object NativeCallMedia {
         p2pPendingOffer?.let { p2pPendingOffer = null; PjsipEngine.nativeP2pRemote(it) }
         armTimeout(); poll(p2pGen)
     }
-    private fun armTimeout() { val g = ++p2pGen; main.postDelayed({ if (g == p2pGen && p2pState == P2P_TRYING) p2pFail("timeout") }, P2P_TIMEOUT_MS) }
+    private fun armTimeout(budgetMs: Long = P2P_TIMEOUT_MS) { val g = ++p2pGen; main.postDelayed({ if (g == p2pGen && p2pState == P2P_TRYING) p2pFail("timeout") }, budgetMs) }
     /** ICE events come from pjsua threads through a queue (olpjsip.c); drained here on the main thread. */
     private fun poll(g: Int) {
         if (g != p2pGen || p2pState == P2P_OFF || p2pState == P2P_FAILED) return
@@ -397,9 +474,23 @@ object NativeCallMedia {
         backToServer(why); p2pGen++; p2pState = P2P_FAILED; runCatching { PjsipEngine.nativeP2pStop() }
         if (!direct) return
         host?.emit(JSONObject().put("type", "pjsip:error").put("step", "direct").put("error", why).toString())
+        // First-connect miss: one relay-only retry with ~28s budget (Signal/LiveKit/Jitsi) before hangup.
+        if (directDone != null && !relayRetryUsed && localFailure == null) {
+            val base = p2pCfg ?: run {
+                val d = directDone; directDone = null
+                d?.invoke(false, null, "direct: $why"); return
+            }
+            relayRetryUsed = true
+            p2pCfg = base.withRelayOnly()
+            CallDiskLog.mark("relay-only-retry", "why=$why budget=$P2P_RELAY_RETRY_MS")
+            host?.emit(JSONObject().put("type", "pjsip:p2p").put("state", "relay-retry").put("why", why).toString())
+            p2pState = P2P_TRYING
+            beginP2p(p2pCfg!!)
+            armTimeout(P2P_RELAY_RETRY_MS) // replaces the 15s armed inside beginP2p
+            return
+        }
         val d = directDone; directDone = null
-        if (d != null) { d(false, null, "direct: $why"); return } // first connect failed: the page decides (end/retry)
-        // mid-call: keep retrying the same single path until the call ends (stopP2p clears p2pCfg / bumps the gen)
+        if (d != null) { d(false, null, "direct: $why"); return }
         val g = p2pGen; main.postDelayed({ if (g == p2pGen && direct && p2pCfg != null && p2pState == P2P_FAILED) restartP2p(true) }, 1_000L)
     }
 
@@ -412,9 +503,9 @@ object NativeCallMedia {
         host?.nativeCallAudio(true) // Telegram order: audio mode before engine (VoIPService.java:4303-4305)
         awaitCommMode()
         val s0 = PjsipEngine.start(); if (s0 != 0) return done(false, null, "direct: pjsua start $s0")
-        openSoundWithRetry { snd ->
+        openSoundWithRetry("startDirect") { snd ->
             if (snd != 0) { done(false, null, localError("audio-device", snd)); return@openSoundWithRetry }
-            directDone = done; directWantVideo = wantVideo
+            directDone = done; directWantVideo = wantVideo; relayRetryUsed = false
             startP2p()
         }
     }
@@ -454,7 +545,7 @@ object NativeCallMedia {
         if (p2pState == P2P_OFF) { p2pPendingOffer = sdp; return } // connect not reached yet; startP2p picks it up
         p2pPendingOffer = sdp; beginP2p(cfg)
     }
-    private fun stopP2p() { direct = false; directDone?.invoke(false, null, "ended"); directDone = null; videoP2p = false; p2pGen++; p2pState = P2P_OFF; p2pCfg = null; p2pPendingOffer = null; runCatching { PjsipEngine.nativeP2pStop() } }
+    private fun stopP2p() { direct = false; directDone?.invoke(false, null, "ended"); directDone = null; videoP2p = false; relayRetryUsed = false; p2pGen++; p2pState = P2P_OFF; p2pCfg = null; p2pPendingOffer = null; runCatching { PjsipEngine.nativeP2pStop() } }
 
     @JvmStatic fun closeAll() = main.post { soundGeneration++; localFailure = null; CallDiskLog.mark("close-all"); stopP2p(); if (videoOn) { videoOn = false; NativeCallVideo.stop(); host?.nativeCallVideo(false) }; leg = null; runCatching { PjsipEngine.nativeSfuStop() }; PjsipEngine.teardown(); if (active) { active = false; host?.nativeCallAudio(false) } }
     @JvmStatic fun isActive(): Boolean = active

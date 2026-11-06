@@ -1,20 +1,26 @@
 package com.donnydey.openlounge
 
 /**
- * Page call message -> Telegram VoIPService state (DrKLO/Telegram@3de37c8 messenger/voip/VoIPService.java,
- * ui/VoIPFragment.java updateViewState). Pure, so it is unit-tested on the JVM. Nothing else is in the flow.
+ * Native 1:1 call phases (Claude native-UI scope: incoming / outgoing / active / ended).
+ * Page call:* messages still map in for this first cut; CallController will re-source later.
  */
 object NativeCallFlow {
-    enum class State { WAITING, WAIT_INIT, ESTABLISHED, ENDED }
+    enum class State { INCOMING, WAITING, WAIT_INIT, ESTABLISHED, ENDED }
     @JvmStatic fun stateFor(type: String): State? = when (type) {
-        "call:outgoing" -> State.WAITING      // STATE_WAITING (WhatsApp wording "Calling…")
-        "call:answering" -> State.WAIT_INIT   // STATE_WAIT_INIT -> R.string.VoipConnecting
-        "call:connected" -> State.ESTABLISHED // STATE_ESTABLISHED: engine reported connected -> showTimer
-        "call:ended" -> State.ENDED           // STATE_ENDED: no rating -> windowView.finish()
+        "call:incoming" -> State.INCOMING
+        "call:outgoing" -> State.WAITING      // outgoing "Calling…"
+        "call:answering" -> State.WAIT_INIT   // "Connecting…"
+        "call:connected" -> State.ESTABLISHED // active
+        "call:ended" -> State.ENDED
         else -> null
     }
-    @JvmStatic fun statusText(s: State?): String = when (s) { State.WAITING -> "Calling…"; State.WAIT_INIT -> "Connecting…"; else -> "" }
+    @JvmStatic fun statusText(s: State?): String = when (s) {
+        State.INCOMING -> "Incoming call"
+        State.WAITING -> "Calling…"
+        State.WAIT_INIT -> "Connecting…"
+        State.ENDED -> "Call ended"
+        else -> ""
+    }
     @JvmStatic fun timer(sec: Long): String = String.format("%d:%02d", sec / 60, sec % 60)
-    /** VoIPFragment.updateButtons slot 0: frontal-camera action while my video is on, else speaker. */
     @JvmStatic fun firstButtonIsFlip(camOn: Boolean) = camOn
 }

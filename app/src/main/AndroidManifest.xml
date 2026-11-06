@@ -74,6 +74,15 @@
             android:taskAffinity="com.donnydey.openlounge.call"
             android:excludeFromRecents="true"
             android:theme="@style/Theme.OpenLounge.IncomingCall" />
+        <activity
+            android:name=".CallActivity"
+            android:exported="false"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:launchMode="singleTop"
+            android:taskAffinity="com.donnydey.openlounge.call"
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.OpenLounge.IncomingCall" />
         <receiver
             android:name=".CallActionReceiver"
             android:exported="false" />

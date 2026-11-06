@@ -29,9 +29,9 @@ import org.json.JSONObject
  * Look = Open Lounge's own call screen (web CallOverlay.tsx), not Telegram's.
  * Refs: DrKLO/Telegram@3de37c8 TMessagesProj/.../ui/VoIPFragment.java, .../messenger/voip/VoIPService.java.
  *
- * Gate (fallback = the page's own call screen underneath, unchanged): shown only for calls the page announced with a
- * callId; a video call keeps it only once native video is up (MainActivity.nativeCallVideo(true)), otherwise the
- * overlay steps aside on call:connected and the web video screen is used as today. Kill switch: Prefs native_call_ui.
+ * Native-UI first cut (Claude step 5): this screen owns all four phases — never hands the call paint back to the
+ * WebView. Missing native video tiles keep the avatar + "Connecting…" chrome; no 3 s web-video fallback.
+ * Kill switch: Prefs native_call_ui.
  */
 class NativeCallScreen(private val act: Activity, private val root: FrameLayout, private val actions: Actions) {
     interface Actions {
@@ -74,9 +74,8 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
             "call:connected" -> if (view != null && (id.isEmpty() || id == callId)) {
                 video = video || m.optBoolean("video")
                 set(NativeCallFlow.State.ESTABLISHED)
-                // video: the native leg opens right after connect; if native tiles aren't up in 3 s the web video
-                // screen underneath owns the call (fallback, as today)
-                if (video && !nativeVideo) { val c = callId; ui.postDelayed({ if (callId == c && view != null && !nativeVideo) { hidden = true; view?.visibility = View.GONE } }, 3000) }
+                // Native-UI first cut: never hide for WebView. Stay visible; avatar/status cover until native tiles up.
+                if (hidden) { hidden = false; view?.visibility = View.VISIBLE }
             }
             "call:ended" -> if (id.isEmpty() || id == callId) { set(NativeCallFlow.State.ENDED); dismiss() }
             "call:muted" -> { muted = m.optBoolean("muted"); render() }

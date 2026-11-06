@@ -32,9 +32,9 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 
 /**
- * Full-screen incoming call (shown over the lock screen, turns the screen on): caller name + photo on a blurred
- * backdrop, Decline / Accept like the web ring screen. Accept → native CallSignalClient call:accept (no WebView
- * answers instantly); Decline → POST /api/calls/<id>/decline. Finishes on call_cancel and at expiresAt.
+ * FSI trampoline (Claude native-UI first cut): lock-screen ring chrome. Accept → native CallSignalClient
+ * call:accept, then forward into CallActivity (active phase, no WebView call paint). Decline → POST
+ * /api/calls/<id>/decline. Finishes on call_cancel and at expiresAt.
  */
 public class IncomingCallActivity extends Activity {
     static final String ACTION_ACCEPT = "com.donnydey.openlounge.CALL_ACCEPT";
@@ -109,6 +109,12 @@ public class IncomingCallActivity extends Activity {
         CallService.start(getApplicationContext(), id, getIntent().getStringExtra(CallNotifications.EXTRA_CALLER), false, true);
         // Linphone cut: native owns accept signaling — no /call/<id>?accept=1 WebView path.
         boolean nativeOk = NativeCallMedia.acceptIncoming(getApplicationContext(), id);
+        // Native-UI first cut: CallActivity owns in-app call chrome (no WebView call path).
+        startActivity(CallActivity.intent(this, id,
+                getIntent().getStringExtra(CallNotifications.EXTRA_CALLER),
+                getIntent().getStringExtra(CallNotifications.EXTRA_PHOTO),
+                getIntent().getBooleanExtra(CallNotifications.EXTRA_VIDEO, false),
+                CallActivity.PHASE_ACTIVE));
         Intent open = new Intent(this, MainActivity.class)
                 .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 .putExtra("ol_native_accept_call_id", id)
