@@ -36,9 +36,12 @@ object CallMediaCoordinator {
     @JvmStatic fun handle(cmdJson: String, done: (Boolean, String?, String?) -> Unit) {
         val op = runCatching { JSONObject(cmdJson).optString("op") }.getOrDefault("")
         CallDiskLog.mark("op", op)
+        ensureRcPublished()
         when (op) {
             "close" -> { closeAll(); done(true, "true", null) }
             // page shim forwards server evt rtc:signal {callId,gen,seq,kind,sdp?,candidate?,from}
+            // RingRTC session model: server evt rc:msg (E2E-sealed) → this device's OLX3DH-v1 session → RtcCallSession
+            "rcMsg" -> { val m = JSONObject(cmdJson).optJSONObject("data"); if (m != null) rcTransport?.onRcMsg(m); done(true, "true", null) }
             "rtcSignal" -> { val m = JSONObject(cmdJson).optJSONObject("data"); main.post { if (m != null) rtc?.onSignal(m) }; done(true, "true", null) }
             "prewarm" -> main.post { done(true, JSONObject().put("engine", "pjsip").put("start", PjsipEngine.start()).toString(), null) } // pjsua on main only (was JavaBridge thread -> unregistered pjlib thread)
             "open" -> main.post {
@@ -129,14 +132,33 @@ object CallMediaCoordinator {
     // never start ol_sfu/ol_p2p audio. Until libwebrtc lands the call fails with a typed DEVICE error (no relay).
     @JvmField var USE_RTC_PC = true
     @Volatile private var rtc: com.donnydey.openlounge.rtc.RtcCallSession? = null
+    @Volatile private var rcTransport: com.donnydey.openlounge.ringrtc.RcSealedTransport? = null
+    @Volatile private var rcPublished = false
+    private val rcKeys by lazy { com.donnydey.openlounge.ringrtc.OlKeyStore(appCtx!!) }
+    /** publish this device's OLX3DH-v1 bundle once per process (needs the page relay to be up) */
+    private fun ensureRcPublished() {
+        if (rcPublished || appCtx == null || host == null) return
+        rcPublished = true
+        com.donnydey.openlounge.ringrtc.RcSealedTransport.publish(rcKeys) { ev, d, cb -> main.post { rpc(ev, d) { ok, r, e -> if (!ok) rcPublished = false; cb(ok, r, e) } } }
+    }
     private fun startRtc(id: String, caller: Boolean, media: JSONObject?, done: (Boolean, String?, String?) -> Unit) {
         CallDiskLog.mark("connect-rtc", "caller=$caller turn=${media?.optJSONArray("iceServers")?.length() ?: 0}")
         main.post { openCallAudio("rtc") { f ->
             if (f != null) return@openCallAudio done(false, null, localError(f))
-            val sess = com.donnydey.openlounge.rtc.RtcCallSession(id, caller, media,
-                request = { ev, data, cb -> rpc(ev, data, cb) },
-                onConnected = { active = true; done(true, JSONObject().put("engine", "webrtc").put("path", "p2p").toString(), null) },
-                onFailure = { fl -> CallDiskLog.mark("rtc-failure", fl.toJson()); done(false, null, if (fl.relayEligible) "network:" + fl.toJson() else localError(fl)) })
+            rcTransport?.close()
+            com.donnydey.openlounge.ringrtc.RcCallManager.begin(id, caller)
+            com.donnydey.openlounge.ringrtc.RcCallManager.connecting(id)
+            lateinit var sess: com.donnydey.openlounge.rtc.RtcCallSession
+            val tx = com.donnydey.openlounge.ringrtc.RcSealedTransport(rcKeys, id, caller,
+                request = { ev, data, cb -> main.post { rpc(ev, data, cb) } }, onSignal = { m -> sess.onSignal(m) })
+            rcTransport = tx
+            sess = com.donnydey.openlounge.rtc.RtcCallSession(id, caller, media,
+                request = { ev, data, cb -> tx.send(ev, data, cb) },
+                onConnected = { active = true; com.donnydey.openlounge.ringrtc.RcCallManager.connected(id); done(true, JSONObject().put("engine", "webrtc").put("path", "p2p").toString(), null) },
+                onFailure = { fl -> CallDiskLog.mark("rtc-failure", fl.toJson())
+                    com.donnydey.openlounge.ringrtc.RcCallManager.end(id, com.donnydey.openlounge.ringrtc.RcHangup.FAILED,
+                        if (fl.relayEligible) com.donnydey.openlounge.ringrtc.RcCallEvent.ENDED_CONNECTION_FAILURE else com.donnydey.openlounge.ringrtc.RcCallEvent.ENDED_DEVICE_FAILURE, fl.code.toString())
+                    done(false, null, if (fl.relayEligible) "network:" + fl.toJson() else localError(fl)) })
             rtc = sess; sess.start()
         } }
     }
@@ -521,7 +543,7 @@ object CallMediaCoordinator {
     }
     private fun stopP2p() { direct = false; directDone?.invoke(false, null, "ended"); directDone = null; videoP2p = false; relayRetryUsed = false; p2pGen++; p2pState = P2P_OFF; p2pCfg = null; p2pPendingOffer = null; runCatching { PjsipEngine.nativeP2pStop() } }
 
-    @JvmStatic fun closeAll() = main.post { rtc?.close(); rtc = null; soundGeneration++; localFailure = null; CallDiskLog.mark("close-all"); stopP2p(); if (videoOn) { videoOn = false; NativeCallVideo.stop(); host?.nativeCallVideo(false) }; leg = null; runCatching { PjsipEngine.nativeSfuStop() }; PjsipEngine.teardown(); CallAudioEngine.close(); appCtx?.let { CallAudioManager.get(it).release() }; if (active) { active = false; host?.nativeCallAudio(false) } }
+    @JvmStatic fun closeAll() = main.post { rtc?.close(); rtc = null; rcTransport?.close(); rcTransport = null; callId?.let { com.donnydey.openlounge.ringrtc.RcCallManager.end(it, com.donnydey.openlounge.ringrtc.RcHangup.NORMAL, com.donnydey.openlounge.ringrtc.RcCallEvent.LOCAL_HANGUP) }; soundGeneration++; localFailure = null; CallDiskLog.mark("close-all"); stopP2p(); if (videoOn) { videoOn = false; NativeCallVideo.stop(); host?.nativeCallVideo(false) }; leg = null; runCatching { PjsipEngine.nativeSfuStop() }; PjsipEngine.teardown(); CallAudioEngine.close(); appCtx?.let { CallAudioManager.get(it).release() }; if (active) { active = false; host?.nativeCallAudio(false) } }
     @JvmStatic fun isActive(): Boolean = active
     @JvmStatic fun releaseIdle() { main.post { CallDiskLog.mark("release-idle"); PjsipEngine.teardown() } }
 }

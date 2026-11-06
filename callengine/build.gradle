@@ -25,6 +25,8 @@ dependencies {
     api files("${project.findProperty('olWebrtcDir') ?: '/workspace/webrtc-bsd/m152'}/aar/libwebrtc.aar")
     // pjproject 2.17 prefab AAR (built by .github/workflows/android-prefab.yml), linked + packaged via this module
     implementation files('../app/libs/pjproject-2.17-prefab.aar')
+    // OLX3DH-v1 call session crypto (X25519/Ed25519/HKDF on API 26+). MIT licence — not libsignal.
+    implementation 'org.bouncycastle:bcprov-jdk18on:1.79'
     implementation 'com.squareup.okhttp3:okhttp:4.12.0' // native WS signaling (CallSignalClient)
     androidTestImplementation 'androidx.test:runner:1.6.2'
     androidTestImplementation 'androidx.test.ext:junit:1.2.1'
