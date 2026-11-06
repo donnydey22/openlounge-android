@@ -14,18 +14,22 @@ import android.view.TextureView
 import com.donnydey.openlounge.pjsip.OLCameraFanout
 import com.donnydey.openlounge.pjsip.OLSimulcastEncoder
 import com.donnydey.openlounge.pjsip.OLVideoLayer
+import com.donnydey.openlounge.pjsip.OLVideoSpecV2
 import com.donnydey.openlounge.pjsip.PjsipEngine
 
 /**
  * In-app call video (pjsip-rebuild, matches iOS OLCallVideo): SFU "video" PlainTransport leg in ol_sfu_video.c.
  * Receive: nativeSfuVideoPoll() Annex-B AUs -> MediaCodec H.264 decoder rendering straight into [remote].
  * Send (47): ONE Camera2 output at an advertised size -> [OLCameraFanout] (EGL) -> 3 simulcast hardware H.264
- * encoders (180p/15, 720p/30, 1080p/30) + [local] preview drawn from the same frame -> nativeSfuVideoSend.
- * Camera2 output-combination support depends on hardware level/sizes, so the camera gets exactly one target.
+ * encoders (capability ladder; 1080p on capable HW, lower on A11/weak) + [local] preview from the same frame
+ * -> nativeSfuVideoSend. Camera2 gets exactly one target. Mitigations: per-SSRC keyframes, MediaCodec
+ * invalidate rebuild (-12903 analogue), off-main setup, flip without rebuild, empty-c watch, bg resume,
+ * teardown/burst cleanup. Video mitigations do not claim to fix audio -201.
  */
 object NativeCallVideo {
-    // SFU android ladder (media-sfu/src/plain.mjs:13, checked at :29) takes exactly 3 SSRCs: 180p/720p/1080p
-    val LAYERS = listOf(OLVideoLayer(320, 180, 120_000, 15), OLVideoLayer(1280, 720, 600_000, 30), OLVideoLayer(1920, 1080, 1_600_000, 30))
+    // SFU still expects 3 SSRCs; sizes from OLVideoSpecV2.layersForDevice (weak HW incl. A11 -> 720p top).
+    val LAYERS: List<OLVideoLayer> get() = activeLayers
+    @Volatile private var activeLayers: List<OLVideoLayer> = OLVideoSpecV2.layersForDevice()
     var remote: TextureView? = null
     var local: TextureView? = null
     var onFirstRemoteFrame: (() -> Unit)? = null
@@ -48,15 +52,42 @@ object NativeCallVideo {
     private var ctx: Context? = null
     @Volatile var rxFrames = 0; @Volatile var txFrames = 0
     var facing = "user"; private set
+    @Volatile private var cameraDesired = false
+    private var emptyWatch: Runnable? = null
+    private val lifecycleCbs = object : android.app.Application.ActivityLifecycleCallbacks {
+        override fun onActivityResumed(a: android.app.Activity) {
+            if (!running || !cameraDesired || closing) return
+            // Without multitasking camera access, Camera2 often freezes in background; reopen or IDR on resume.
+            if (cam == null || session == null) {
+                CallDiskLog.mark("video-bg-resume", "reopen facing=$facing")
+                camera(true, facing) { ok, e -> if (!ok) CallDiskLog.mark("video-bg-resume-fail", e ?: "") }
+            } else enc?.requestKeyframes()
+        }
+        override fun onActivityCreated(a: android.app.Activity, b: android.os.Bundle?) {}
+        override fun onActivityStarted(a: android.app.Activity) {}
+        override fun onActivityPaused(a: android.app.Activity) {}
+        override fun onActivityStopped(a: android.app.Activity) {}
+        override fun onActivitySaveInstanceState(a: android.app.Activity, b: android.os.Bundle) {}
+        override fun onActivityDestroyed(a: android.app.Activity) {}
+    }
+    @Volatile private var lifecycleRegistered = false
 
     /** Starts the native leg and the receive/decode loop. 0 on success (ol_sfu_video_start result). */
     fun start(c: Context, ip: String, port: Int, txKey: String, rxKey: String, ssrcs: LongArray, pt: Int): Int {
         if (closing || running) return -20 // do not reuse native state while a previous teardown is draining
         ctx = c.applicationContext
+        activeLayers = OLVideoSpecV2.layersForDevice()
+        CallDiskLog.mark("video-layers", activeLayers.joinToString { "${it.width}x${it.height}@${it.fps}" } +
+            " weak=${OLVideoSpecV2.weakHardware()}")
         val r = PjsipEngine.nativeSfuVideoStart(ip, port, txKey, rxKey, ssrcs, pt)
         if (r != 0) return r
         running = true; rxFrames = 0; txFrames = 0
         rx = Thread({ recvLoop() }, "ol-video-recv").also { it.start() }
+        if (!lifecycleRegistered) {
+            (c.applicationContext as? android.app.Application)?.let {
+                runCatching { it.registerActivityLifecycleCallbacks(lifecycleCbs); lifecycleRegistered = true }
+            }
+        }
         return 0
     }
 
@@ -115,7 +146,9 @@ object NativeCallVideo {
         pendingCameraDone?.invoke(false, "camera superseded")
         pendingCameraDone = null
         val gen = ++camGen
-        if (!on) { cameraHandler.post { stopCamera() }; done(true, null); return }
+        cameraDesired = on
+        if (!on) { emptyWatch?.let { main.removeCallbacks(it) }; emptyWatch = null
+            cameraHandler.post { stopCamera() }; done(true, null); return }
         if (!running || closing) { done(false, "video leg not running"); return }
         pendingCameraDone = done
         facing = if (face == "environment") "environment" else "user"
@@ -152,18 +185,27 @@ object NativeCallVideo {
             var e = enc
             var f = fan
             if (e == null || f == null) {
-                e = OLSimulcastEncoder(layersOverride = LAYERS, forceH264 = true, requireHardware = true)
+                activeLayers = OLVideoSpecV2.layersForDevice()
+                e = OLSimulcastEncoder(layersOverride = activeLayers, forceH264 = true, requireHardware = true)
                 enc = e // own partially-initialized instances too
-                e.onAnnexB = { layer, au, k, ts -> if (running && !closing) {
+                e.onAnnexB = label@{ layer, au, k, ts ->
+                    if (!running || closing || au.isEmpty()) return@label // empty-c: never send zero-length
                     PjsipEngine.nativeSfuVideoSend(layer, au, au.size, ts, k)
-                    if (layer == LAYERS.size - 1) txFrames++
-                } }
+                    if (layer == activeLayers.size - 1) txFrames++
+                }
+                e.onInvalidated = { // MediaCodec died (VT -12903 analogue): rebuild all layers via full reopen
+                    CallDiskLog.mark("video-enc-invalidated", "rebuild")
+                    main.post {
+                        if (!running || !cameraDesired || closing) return@post
+                        camera(true, facing) { ok, err -> CallDiskLog.mark("video-enc-rebuild", "ok=$ok err=${err ?: ""}") }
+                    }
+                }
                 e.start()
                 f = OLCameraFanout(size.width, size.height, e.fanoutTargets())
                 fan = f; f.start()
             } else {
                 f.resizeCameraInput(size.width, size.height)
-                e.requestKeyframes() // decoder refresh, not codec rebuild
+                e.requestKeyframes() // flip: decoder refresh, not codec rebuild
             }
             val captureFan = f
             captureFan.setPreview(preview, 1280, 720)
@@ -182,6 +224,7 @@ object NativeCallVideo {
                                     fpsRange(ch)?.let { set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
                                 }
                                 s.setRepeatingRequest(rq.build(), null, cameraHandler)
+                                armEmptyWatch(gen)
                                 reportCamera(gen, true, null)
                             } catch (x: Exception) { cameraFailure(gen, "capture request: ${x.message}") }
                         }
@@ -217,6 +260,7 @@ object NativeCallVideo {
         val r = ch.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: return null
         return r.firstOrNull { it.lower == 15 && it.upper == 30 } ?: r.firstOrNull { it.lower == 30 && it.upper == 30 }
             ?: r.filter { it.upper == 30 }.minByOrNull { it.lower }
+            ?: r.filter { it.upper >= 24 }.minByOrNull { it.lower }
     }
 
     /** ol-camera only. Close the producer before the EGL consumers and codec input surfaces. */
@@ -233,8 +277,40 @@ object NativeCallVideo {
         runCatching { enc?.stop() }; enc = null
     }
 
+    /** empty-c: if fan-out / TX stalls for ~2s while camera desired, force IDR; after ~4s reopen. */
+    private fun armEmptyWatch(gen: Int) {
+        main.post {
+            emptyWatch?.let { main.removeCallbacks(it) }
+            val startFan = fan?.frames ?: 0
+            val startTx = txFrames
+            val r = object : Runnable {
+                var tick = 0
+                override fun run() {
+                    if (gen != camGen || !cameraDesired || !running || closing) return
+                    val frames = (fan?.frames ?: 0) - startFan
+                    val tx = txFrames - startTx
+                    if (frames == 0 || tx == 0) {
+                        tick++
+                        CallDiskLog.mark("video-empty-c", "tick=$tick fan=$frames tx=$tx")
+                        enc?.requestKeyframes()
+                        if (tick >= 2) {
+                            CallDiskLog.mark("video-empty-c-reopen", "facing=$facing")
+                            camera(true, facing) { _, _ -> }
+                            return
+                        }
+                        main.postDelayed(this, 2000L)
+                    }
+                }
+            }
+            emptyWatch = r
+            main.postDelayed(r, 2000L)
+        }
+    }
+
     fun stop() {
-        running = false; closing = true; camGen++
+        running = false; cameraDesired = false; closing = true; camGen++
+        emptyWatch?.let { main.removeCallbacks(it) }; emptyWatch = null
+        PjsipEngine.cancelVideoBurst()
         main.post { pendingCameraDone?.invoke(false, "video stopped"); pendingCameraDone = null }
         cameraHandler.post {
             stopCamera()
