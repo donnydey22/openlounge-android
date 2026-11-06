@@ -38,7 +38,11 @@ object NativeCallVideo {
     private var enc: OLSimulcastEncoder? = null
     private var fan: OLCameraFanout? = null
     @Volatile private var camGen = 0 // generation guard: callbacks from a stopped camera are ignored
-    private var camThread: HandlerThread? = null
+    // Serialized ownership for camera, codec and EGL setup/teardown; never initialize them on main.
+    private val camThread = HandlerThread("ol-camera").also { it.start() }
+    private val cameraHandler = Handler(camThread.looper)
+    @Volatile private var closing = false
+    private var pendingCameraDone: ((Boolean, String?) -> Unit)? = null
     private var cam: CameraDevice? = null
     private var session: CameraCaptureSession? = null
     private var ctx: Context? = null
@@ -47,6 +51,7 @@ object NativeCallVideo {
 
     /** Starts the native leg and the receive/decode loop. 0 on success (ol_sfu_video_start result). */
     fun start(c: Context, ip: String, port: Int, txKey: String, rxKey: String, ssrcs: LongArray, pt: Int): Int {
+        if (closing || running) return -20 // do not reuse native state while a previous teardown is draining
         ctx = c.applicationContext
         val r = PjsipEngine.nativeSfuVideoStart(ip, port, txKey, rxKey, ssrcs, pt)
         if (r != 0) return r
@@ -104,63 +109,91 @@ object NativeCallVideo {
         }
     }
 
-    /** Camera on/off/flip. Off keeps the leg (and the remote video) running. */
-    @SuppressLint("MissingPermission")
+    /** Camera commands are ordered on main, but all expensive setup runs on ol-camera. */
     fun camera(on: Boolean, face: String = facing, done: (Boolean, String?) -> Unit) {
-        stopCamera()
-        if (!on) return done(true, null)
-        facing = if (face == "environment") "environment" else "user"
-        val c = ctx ?: return done(false, "no context")
-        val mgr = c.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-        val want = if (facing == "user") CameraCharacteristics.LENS_FACING_FRONT else CameraCharacteristics.LENS_FACING_BACK
-        val id = mgr.cameraIdList.firstOrNull { mgr.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == want }
-            ?: mgr.cameraIdList.firstOrNull() ?: return done(false, "no camera")
-        val top = LAYERS.last()
-        val size = runCatching { cameraSize(mgr.getCameraCharacteristics(id), top.width, top.height) }.getOrNull()
-            ?: return done(false, "no camera size")
-        val e = try { OLSimulcastEncoder(layersOverride = LAYERS, forceH264 = true, requireHardware = true).apply {
-            onAnnexB = { layer, au, k, ts -> if (running) { PjsipEngine.nativeSfuVideoSend(layer, au, au.size, ts, k); if (layer == LAYERS.size - 1) txFrames++ } }
-            start() } } catch (x: Exception) { return done(false, "encoder: ${x.message}") }
-        enc = e
-        val f = try { OLCameraFanout(size.width, size.height, e.fanoutTargets()).also { it.start() } }
-            catch (x: Exception) { stopCamera(); return done(false, "fanout: ${x.message}") }
-        fan = f
-        local?.surfaceTexture?.let { st -> st.setDefaultBufferSize(1280, 720); f.setPreview(Surface(st), 1280, 720) }
+        if (Looper.myLooper() != Looper.getMainLooper()) { main.post { camera(on, face, done) }; return }
+        pendingCameraDone?.invoke(false, "camera superseded")
+        pendingCameraDone = null
         val gen = ++camGen
-        var reported = false
-        fun finish(ok: Boolean, why: String?) = main.post { if (gen != camGen || reported) return@post; reported = true
-            if (!ok) stopCamera(); done(ok, why); if (!ok) onCameraError?.invoke(why ?: "camera") }
-        val t = HandlerThread("ol-camera").also { it.start() }; camThread = t
-        val h = Handler(t.looper)
+        if (!on) { cameraHandler.post { stopCamera() }; done(true, null); return }
+        if (!running || closing) { done(false, "video leg not running"); return }
+        pendingCameraDone = done
+        facing = if (face == "environment") "environment" else "user"
+        val selectedFacing = facing
+        val preview = local?.surfaceTexture?.let { Surface(it) }
+        cameraHandler.post {
+            if (gen != camGen) { preview?.release(); return@post }
+            stopCamera()
+            setupCamera(gen, selectedFacing, preview)
+        }
+    }
+
+    private fun reportCamera(gen: Int, ok: Boolean, why: String?) {
+        main.post {
+            if (gen != camGen) return@post
+            val cb = pendingCameraDone; pendingCameraDone = null
+            cb?.invoke(ok, why)
+            if (!ok) onCameraError?.invoke(why ?: "camera")
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun setupCamera(gen: Int, face: String, preview: Surface?) {
+        val c = ctx
+        if (c == null) { preview?.release(); reportCamera(gen, false, "no context"); return }
         try {
+            val mgr = c.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val want = if (face == "user") CameraCharacteristics.LENS_FACING_FRONT else CameraCharacteristics.LENS_FACING_BACK
+            val id = mgr.cameraIdList.firstOrNull { mgr.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == want }
+                ?: mgr.cameraIdList.firstOrNull() ?: error("no camera")
+            val ch = mgr.getCameraCharacteristics(id)
+            val top = LAYERS.last()
+            val size = cameraSize(ch, top.width, top.height) ?: error("empty camera sizes")
+            val e = OLSimulcastEncoder(layersOverride = LAYERS, forceH264 = true, requireHardware = true)
+            enc = e // own partially-initialized instances too, so all failure paths can clean them up
+            e.onAnnexB = { layer, au, k, ts -> if (running && !closing) {
+                PjsipEngine.nativeSfuVideoSend(layer, au, au.size, ts, k)
+                if (layer == LAYERS.size - 1) txFrames++
+            } }
+            e.start()
+            val f = OLCameraFanout(size.width, size.height, e.fanoutTargets())
+            fan = f; f.start()
+            f.setPreview(preview, 1280, 720)
             mgr.openCamera(id, object : CameraDevice.StateCallback() {
                 override fun onOpened(d: CameraDevice) {
                     if (gen != camGen) { d.close(); return }
                     cam = d
-                    val outs = listOf(f.cameraSurface) // exactly one camera target; encoders + preview are fed by EGL
                     @Suppress("DEPRECATION")
-                    try { d.createCaptureSession(outs, object : CameraCaptureSession.StateCallback() {
+                    try { d.createCaptureSession(listOf(f.cameraSurface), object : CameraCaptureSession.StateCallback() {
                         override fun onConfigured(s: CameraCaptureSession) {
-                            if (gen != camGen) { runCatching { s.close() }; return }
+                            if (gen != camGen) { s.close(); return }
                             session = s
                             try {
                                 val rq = d.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                                     addTarget(f.cameraSurface)
-                                    fpsRange(mgr.getCameraCharacteristics(id))?.let { set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
-                                    val stab = mgr.getCameraCharacteristics(id).get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
-                                    if (stab?.contains(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON) == true)
-                                        set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON) }
-                                s.setRepeatingRequest(rq.build(), null, h)
-                                finish(true, null)
-                            } catch (x: Exception) { finish(false, "capture request: ${x.message}") }
+                                    fpsRange(ch)?.let { set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
+                                }
+                                s.setRepeatingRequest(rq.build(), null, cameraHandler)
+                                reportCamera(gen, true, null)
+                            } catch (x: Exception) { cameraFailure(gen, "capture request: ${x.message}") }
                         }
-                        override fun onConfigureFailed(s: CameraCaptureSession) { finish(false, "camera session") }
-                    }, h) } catch (x: Exception) { finish(false, "camera session: ${x.message}") }
+                        override fun onConfigureFailed(s: CameraCaptureSession) { s.close(); cameraFailure(gen, "camera session") }
+                    }, cameraHandler) } catch (x: Exception) { cameraFailure(gen, "camera session: ${x.message}") }
                 }
-                override fun onDisconnected(d: CameraDevice) { d.close(); if (gen == camGen) { cam = null; finish(false, "camera disconnected") } }
-                override fun onError(d: CameraDevice, err: Int) { d.close(); if (gen == camGen) { cam = null; finish(false, "camera error $err") } }
-            }, h)
-        } catch (x: Exception) { stopCamera(); done(false, "camera: ${x.message}") }
+                override fun onDisconnected(d: CameraDevice) { d.close(); cameraFailure(gen, "camera disconnected") }
+                override fun onError(d: CameraDevice, err: Int) { d.close(); cameraFailure(gen, "camera error $err") }
+            }, cameraHandler)
+        } catch (x: Exception) {
+            preview?.release()
+            cameraFailure(gen, "camera setup: ${x.message}")
+        }
+    }
+
+    private fun cameraFailure(gen: Int, why: String) {
+        if (gen != camGen) return
+        stopCamera()
+        CallDiskLog.mark("video-camera-fail", why)
+        reportCamera(gen, false, why)
     }
 
     /** Largest advertised SurfaceTexture size with the top layer's aspect, not above it; else the closest aspect. */
@@ -178,19 +211,24 @@ object NativeCallVideo {
             ?: r.filter { it.upper == 30 }.minByOrNull { it.lower }
     }
 
+    /** ol-camera only. Close the producer before the EGL consumers and codec input surfaces. */
     private fun stopCamera() {
-        camGen++ // invalidate callbacks from the camera being stopped
+        runCatching { session?.stopRepeating() }
+        runCatching { session?.abortCaptures() }
         runCatching { session?.close() }; session = null
         runCatching { cam?.close() }; cam = null
-        runCatching { fan?.release() }; fan = null // detach EGL targets before the codec input Surfaces go away
+        runCatching { fan?.release() }; fan = null
         runCatching { enc?.stop() }; enc = null
-        camThread?.quitSafely(); camThread = null
     }
 
-
     fun stop() {
-        running = false; stopCamera()
-        rx?.join(500); rx = null
-        runCatching { PjsipEngine.nativeSfuVideoStop() }
+        running = false; closing = true; camGen++
+        main.post { pendingCameraDone?.invoke(false, "video stopped"); pendingCameraDone = null }
+        cameraHandler.post {
+            stopCamera()
+            rx?.join(); rx = null // poll is non-blocking; never free native state under the receive loop
+            runCatching { PjsipEngine.nativeSfuVideoStop() }
+            closing = false
+        }
     }
 }
