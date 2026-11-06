@@ -87,11 +87,20 @@ object NativeCallMedia {
     }
     private data class Leg(val ip: String, val port: Int, val tx: String, val rx: String, val ssrc: Long, val txPt: Int, val rxPt: Int)
     @Volatile private var leg: Leg? = null
+    // Signal FullSignalAudioManagerApi31.kt:155-166 (+ listener :55-62): request MODE_IN_COMMUNICATION, proceed only once applied.
+    // Bounded poll on the caller's (main) thread, where pjsua already runs; setMode is synchronous (MainActivity.java:1257). Signal has no timeout; 500 ms here.
+    private fun awaitCommMode() {
+        val am = appCtx?.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager ?: return
+        val t0 = android.os.SystemClock.elapsedRealtime()
+        while (am.mode != android.media.AudioManager.MODE_IN_COMMUNICATION && android.os.SystemClock.elapsedRealtime() - t0 < 500L) Thread.sleep(20)
+        CallDiskLog.mark("audio-mode-wait", "mode=${am.mode} ms=${android.os.SystemClock.elapsedRealtime() - t0}")
+    }
     private fun startLeg(l: Leg): Int {
         // Telegram answer order (DrKLO/Telegram@3de37c8 VoIPService.java:4300-4306 acceptIncomingCall: stopRinging -> configureDeviceForCall,
         // whose :4865 sets MODE_IN_COMMUNICATION + :4870 voice-call focus) -> engine start (:3473 makeInstance). Audio mode first, then pjsua.
         CallDiskLog.mark("audio-session", "communication mode on (before engine)")
         host?.nativeCallAudio(true)
+        awaitCommMode()
         CallDiskLog.mark("engine-start")
         val s0 = PjsipEngine.start(); if (s0 != 0) { CallDiskLog.mark("engine-start-fail", "$s0"); return s0 - 100 }
         CallDiskLog.mark("open-sound")
