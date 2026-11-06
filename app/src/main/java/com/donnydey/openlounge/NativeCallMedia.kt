@@ -42,13 +42,15 @@ object NativeCallMedia {
                     c.optLong("ssrc", 1111L), c.optInt("txPt", 111), c.optInt("rxPt", 111))
                 startLeg(leg) { r ->
                     if (r == 0) { active = true; host?.nativeCallAudio(true); done(true, JSONObject().put("engine", "pjsip").toString(), null) }
-                    else done(false, null, "pjsip audio leg start failed: $r")
+                    else done(false, null, localFailure ?: "pjsip audio leg start failed: $r")
                 }
             }
             // Option B: the page's existing authenticated socket runs call:* (start/accept/decline/hangup + push);
             // at answer the call screen sends {op:"connect", callId} with the ms:* relay installed -> SFU audio leg.
             "connect" -> { val c = JSONObject(cmdJson); val id = c.optString("callId"); if (id.isEmpty()) return done(false, null, "callId required")
                 val wantVideo = c.optBoolean("video") && c.optBoolean("nativeVideo")
+                if (callId != id) { soundGeneration++; localFailure = null }
+                localFailure?.let { return done(false, null, it) }
                 callId = id; p2pCfg = null; direct = false
                 CallDiskLog.begin(id); CallDiskLog.mark("connect", "video=$wantVideo pageDirect=${c.optBoolean("direct")} -> server route")
                 // ONE path per call (Donny 9:10/9:12 AM Nov 5 2026; b107/46 scope): the server route (SFU) for EVERY
@@ -98,6 +100,14 @@ object NativeCallMedia {
     }
     // Keep retries asynchronous: a device may need a moment after MODE_IN_COMMUNICATION.
     private var soundGeneration = 0
+    // A relay cannot repair a local engine/device failure. Sticky for this call, cleared on a new call/end.
+    @Volatile private var localFailure: String? = null
+    private fun localError(domain: String, status: Int): String {
+        val detail = JSONObject().put("domain", domain).put("status", status).put("networkRelated", false)
+            .put("allowRelay", false).put("message", "$domain status=$status").toString()
+        localFailure = "native-media-error:$detail"
+        return localFailure!!
+    }
     private fun openSoundWithRetry(done: (Int) -> Unit) {
         val generation = soundGeneration
         fun attempt(number: Int) {
@@ -115,9 +125,10 @@ object NativeCallMedia {
         awaitCommMode()
         CallDiskLog.mark("engine-start")
         val s0 = PjsipEngine.start()
-        if (s0 != 0) { CallDiskLog.mark("engine-start-fail", "$s0"); done(s0); return }
+        if (s0 != 0) { CallDiskLog.mark("engine-start-fail", "$s0"); localError("engine", s0); done(s0); return }
         openSoundWithRetry { snd ->
             if (snd != 0) {
+                localError("audio-device", snd)
                 host?.emit(JSONObject().put("type", "pjsip:error").put("step", "sound").put("status", snd)
                     .put("domain", "audio-device").put("networkRelated", false).put("error", "pj $snd").toString())
                 done(snd)
@@ -213,6 +224,7 @@ object NativeCallMedia {
 
     /** join -> plain:create (SFU ip/port/key) -> plain:connect (our key) -> plain:produce (our ssrc) -> plain:consume -> start leg. */
     private fun requestSfu(id: String, result: (Int, String?) -> Unit = { _, _ -> }) {
+        localFailure?.let { result(-1, it); return }
         txKey = newKey(); val ssrc = 100000L + java.security.SecureRandom().nextInt(1_000_000)
         val d = { JSONObject().put("callId", id) }
         rpc("ms:join", d()) { ok, _, e -> if (!ok) return@rpc fail("join", e, result)
@@ -231,7 +243,7 @@ object NativeCallMedia {
                   val rxPt = cons?.optInt("payloadType", 111) ?: 111
                   CallDiskLog.mark("consume", "audio pt=$rxPt")
                   main.post { startLeg(Leg(ip, port, txKey, rx, ssrc, 111, rxPt)) { r ->
-                    if (r == 0) { active = true; host?.nativeCallAudio(true) }; result(r, if (r != 0) "leg start $r" else null)
+                    if (r == 0) { active = true; host?.nativeCallAudio(true) }; result(r, if (r != 0) localFailure ?: "leg start $r" else null)
                     host?.emit(JSONObject().put("type", "pjsip:audio").put("start", r).toString()) } } } } } } }
     }
 
@@ -371,6 +383,7 @@ object NativeCallMedia {
         host?.emit(JSONObject().put("type", "pjsip:p2p").put("state", "server").put("why", why).toString())
     }
     private fun restartP2p(tellPeer: Boolean) {
+        if (localFailure != null) return // never ICE/TURN-retry a sound/engine failure
         val cfg = p2pCfg ?: return
         p2pState = P2P_TRYING
         if (cfg.offerer) { if (runCatching { PjsipEngine.nativeP2pRestart() }.getOrDefault(-1) != 0) return p2pFail("restart")
@@ -397,7 +410,7 @@ object NativeCallMedia {
         awaitCommMode()
         val s0 = PjsipEngine.start(); if (s0 != 0) return done(false, null, "direct: pjsua start $s0")
         openSoundWithRetry { snd ->
-            if (snd != 0) { done(false, null, "audio-device: openSound status=$snd"); return@openSoundWithRetry }
+            if (snd != 0) { done(false, null, localError("audio-device", snd)); return@openSoundWithRetry }
             directDone = done; directWantVideo = wantVideo
             startP2p()
         }
@@ -440,7 +453,7 @@ object NativeCallMedia {
     }
     private fun stopP2p() { direct = false; directDone?.invoke(false, null, "ended"); directDone = null; videoP2p = false; p2pGen++; p2pState = P2P_OFF; p2pCfg = null; p2pPendingOffer = null; runCatching { PjsipEngine.nativeP2pStop() } }
 
-    @JvmStatic fun closeAll() = main.post { soundGeneration++; CallDiskLog.mark("close-all"); stopP2p(); if (videoOn) { videoOn = false; NativeCallVideo.stop(); host?.nativeCallVideo(false) }; leg = null; runCatching { PjsipEngine.nativeSfuStop() }; PjsipEngine.teardown(); if (active) { active = false; host?.nativeCallAudio(false) } }
+    @JvmStatic fun closeAll() = main.post { soundGeneration++; localFailure = null; CallDiskLog.mark("close-all"); stopP2p(); if (videoOn) { videoOn = false; NativeCallVideo.stop(); host?.nativeCallVideo(false) }; leg = null; runCatching { PjsipEngine.nativeSfuStop() }; PjsipEngine.teardown(); if (active) { active = false; host?.nativeCallAudio(false) } }
     @JvmStatic fun isActive(): Boolean = active
     @JvmStatic fun releaseIdle() { main.post { CallDiskLog.mark("release-idle"); PjsipEngine.teardown() } }
 }
