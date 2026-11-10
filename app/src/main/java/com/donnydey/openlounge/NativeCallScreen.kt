@@ -26,7 +26,7 @@ import org.json.JSONObject
  *   call:answering -> STATE_WAIT_INIT      ("Connecting…")
  *   call:connected -> STATE_ESTABLISHED    (showTimer; = engine reported connected, VoIPService.onConnectionStateChanged)
  *   call:ended     -> STATE_ENDED          (no rating -> windowView.finish(): screen removed)
- * Placement (first UI 101e00a): [Speaker] [Video] [Mute] [End call], plus Flip when the local camera is on
+ * Placement: audio in-call [Speaker] [Mute] [End call]; video stage adds Flip / Camera; pre-answer is one Cancel
  * so a video call can still switch lenses (the first commit listed flip as an in-call control).
  * Look = the first Open Lounge call screen (web CallOverlay.tsx / calls.module.css at 101e00a, 2026-10-07 MST).
  * Refs: DrKLO/Telegram@3de37c8 TMessagesProj/.../ui/VoIPFragment.java, .../messenger/voip/VoIPService.java.
@@ -302,7 +302,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         top = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding(dp(24), 0, dp(24), 0) }
         avatar = TextView(act).apply { setTextColor(Color.WHITE); textSize = 30f; gravity = Gravity.CENTER; typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
             }
-        // squircle (web avatar-shape.ts, ~42% corner equivalent), clipped so the photo takes the same shape
+        // 112dp circle avatar, clipped so the photo takes the same shape
         avatarBox = FrameLayout(act).apply {
             background = GradientDrawable().apply { cornerRadius = dp(47).toFloat(); setColor(0xFF64748B.toInt()) }
             CallAvatar.applyOutline(this, dp(47).toFloat())
@@ -325,7 +325,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         ringBox.addView(presenceDot, FrameLayout.LayoutParams(dp(22), dp(22), Gravity.END or Gravity.BOTTOM).apply { rightMargin = dp(4); bottomMargin = dp(4) })
         top.clipChildren = false; v.clipChildren = false
         top.addView(ringBox, LinearLayout.LayoutParams(dp(112), dp(112)).apply { bottomMargin = dp(12) })
-        top.addView(name, LinearLayout.LayoutParams(-1, -2)); top.addView(status, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
+        top.addView(name, LinearLayout.LayoutParams(-1, -2)); top.addView(status, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(16) })
         // Centered between the 56dp top bar and the bottom row (SwiftUI CallScreen / IncomingCallScreen).
         // FrameLayout CENTER offsets by (topMargin - bottomMargin), so these put the block in the middle of the space between them.
         v.addView(top, FrameLayout.LayoutParams(-1, -2, Gravity.CENTER).apply { topMargin = 0; bottomMargin = dp(CallChrome.CENTER_LIFT) })
@@ -366,10 +366,10 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
             gravity = Gravity.CENTER
             background = GradientDrawable().apply { setColor(0x99000000.toInt()); cornerRadius = dp(16).toFloat() }
             setPadding(dp(12), dp(6), dp(12), dp(6))
-            maxWidth = dp(260); includeFontPadding = false; setLineSpacing(0f, 1.15f)
+            includeFontPadding = false; setLineSpacing(0f, 1.15f)
             visibility = View.GONE
         }
-        v.addView(failBanner, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = dp(64) })
+        v.addView(failBanner, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, -2, Gravity.TOP).apply { topMargin = dp(64); leftMargin = dp(16); rightMargin = dp(16) })
         miniBar = LinearLayout(act).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -563,18 +563,18 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
             // answered: the timer shows at once (0:00), not only from the first tick
             status.text = NativeCallFlow.timer((SystemClock.elapsedRealtime() - establishedAt) / 1000)
         }
-        // First UI always offers Video (audio→video upgrade). Flip is shown once the local camera is on.
-        // "Camera" (not "Stop video") keeps five even 56dp labeled circles on one row.
-        // Pre-answer (calling / ringing / connecting): one red Cancel. Video, Speaker, Mute, End after answered.
+        // Pre-answer (calling / ringing / connecting): one red Cancel.
+        // Audio in-call (Donny's design): Speaker (white when on), Mute, End call. Video row only on the video stage.
         val pre = !live && !failed && !endedCard
+        val videoRow = !pre && !failed && !endedCard && (camOn || nativeVideo || video)
         endBtn.label.text = if (pre) "Cancel" else "End call"
         bFirst.box.visibility = if (pre) View.GONE else View.VISIBLE
         bMic.box.visibility = if (pre) View.GONE else View.VISIBLE
         bFlip.box.visibility = if (camOn && !failed && !pre) View.VISIBLE else View.GONE
         // Same lucide glyphs as iOS (Assets.xcassets ol_call_*): speaker without/with second wave, plain hung-up handset.
         bFlip.set("Flip", R.drawable.ol_call_flip)
-        bFirst.set(if (speakerOn) "Speaker" else "Phone", if (speakerOn) R.drawable.ol_call_speaker else R.drawable.ol_call_speaker_off, active = speakerOn)
-        bVid.box.visibility = if (failed || pre) View.GONE else View.VISIBLE
+        bFirst.set("Speaker", if (speakerOn) R.drawable.ol_call_speaker else R.drawable.ol_call_speaker_off, active = speakerOn)
+        bVid.box.visibility = if (videoRow) View.VISIBLE else View.GONE
         bVid.set(if (camOn) "Camera" else "Video", if (camOn) R.drawable.ol_call_video else R.drawable.ol_call_video_off, active = camOn)
         bMic.set(if (muted) "Unmute" else "Mute", if (muted) R.drawable.ol_call_mic_off else R.drawable.ol_call_mic, active = muted)
         applyChrome(v)

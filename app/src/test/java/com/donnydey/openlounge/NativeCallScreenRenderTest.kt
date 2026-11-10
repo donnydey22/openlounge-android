@@ -62,7 +62,7 @@ class NativeCallScreenRenderTest {
         val rb = ringBoxOf(root)!!; val loc = IntArray(2); rb.getLocationInWindow(loc)
         val r0 = IntArray(2); root.getLocationInWindow(r0); return loc[1] - r0[1]
     }
-    /** SwiftUI CallScreen: block (112 avatar, 12, name, 4, status) centered between the 56pt bar and the 24 + 76 row. */
+    /** SwiftUI CallScreen: block (112 avatar, 12, name, 16, status) centered between the 56pt bar and the 24 + 76 row. */
     private fun expectedAvatarTop(act: Activity, root: View): Int {
         val d = act.resources.displayMetrics.density
         val rb = ringBoxOf(root)!!
@@ -125,18 +125,19 @@ class NativeCallScreenRenderTest {
         if (v is android.view.ViewGroup) for (i in 0 until v.childCount) if (hasPhoto(v.getChildAt(i))) return true
         return false
     }
-    /** The 112dp avatar photo was cover-cropped into a squircle (corner pixels are transparent). */
-    private fun squirclePhoto(v: View): Boolean {
+    /** The 112dp avatar photo was cover-cropped into a circle (corners and mid-edge are transparent). */
+    private fun circlePhoto(v: View): Boolean {
         if (v is ImageView && v.drawable != null && v.width == v.height && v.width > 0) {
             val d = v.drawable
             val b = (d as? android.graphics.drawable.BitmapDrawable)?.bitmap
             if (b != null && b.width > 8 && b.height == b.width) {
                 val a00 = Color.alpha(b.getPixel(0, 0))
                 val mid = Color.alpha(b.getPixel(b.width / 2, b.height / 2))
-                if (a00 < 16 && mid > 200) return true
+                val top = Color.alpha(b.getPixel(b.width / 2, 0))
+                if (a00 < 16 && mid > 200 && top < 16) return true
             }
         }
-        if (v is ViewGroup) for (i in 0 until v.childCount) if (squirclePhoto(v.getChildAt(i))) return true
+        if (v is ViewGroup) for (i in 0 until v.childCount) if (circlePhoto(v.getChildAt(i))) return true
         return false
     }
 
@@ -175,7 +176,7 @@ class NativeCallScreenRenderTest {
         assertTrue("pre-answer card: only Cancel, no Video / Speaker / Mute / End call: $t", t.none { it in listOf("Phone", "Speaker", "Video", "Mute", "End call", "Flip", "Camera") })
         assertTrue("no minimize before answer", findDesc(root, "Minimize call")?.let { isShown(it) } != true)
         assertTrue("profile photo is painted (initials only as a fallback)", hasPhoto(root))
-        assertTrue("avatar is a 112dp squircle (transparent corners, not a square crop)", squirclePhoto(root))
+        assertTrue("avatar is a 112dp circle (transparent corners, not a squircle)", circlePhoto(root))
         assertTrue("online presence dot on the calling avatar", findDesc(root, "online") != null)
         val expect = Math.round(56f * act.resources.displayMetrics.density)
         assertEquals("56dp Cancel disc", expect, discWidth(root, "Cancel"))
@@ -191,18 +192,17 @@ class NativeCallScreenRenderTest {
         // media flowing (olcall onConnected -> MainActivity.emit relay) -> full row and the timer
         NativeCallScreen.onNativeMediaFlowing("t1")
         t = texts(root)
-        assertTrue("media flowing -> full row: $t", t.containsAll(listOf("Phone", "Video", "Mute", "End call")) && !t.contains("Cancel"))
+        assertTrue("media flowing -> Speaker / Mute / End call: $t", t.containsAll(listOf("Speaker", "Mute", "End call")) && !t.contains("Cancel") && !t.contains("Phone") && !t.contains("Video"))
         assertTrue("timer starts when media flows: $t", t.contains("0:00"))
-        assertTrue("first UI offers Video on voice calls (audio→video upgrade)", t.contains("Video"))
-        assertTrue("Flip stays hidden until the local camera is on", !t.contains("Flip"))
+        assertTrue("audio in-call has no Video button (design is Speaker / Mute / End call)", !t.contains("Video") && !t.contains("Flip"))
         assertBlurred(snap(root, "2b-media-flowing"), "media flowing")
         assertEquals("live avatar does not move", avTop, avatarTop(root))
-        val sizes = listOf("Phone", "Video", "Mute", "End call").map { discWidth(root, it) }
+        val sizes = listOf("Speaker", "Mute", "End call").map { discWidth(root, it) }
         assertTrue("even in-call discs: $sizes", sizes.all { it == sizes[0] && it == expect })
         s.onPageCall("call:connected", JSONObject().put("callId", "t1"))
         org.robolectric.shadows.ShadowLooper.idleMainLooper(1, java.util.concurrent.TimeUnit.SECONDS)
         t = texts(root); snap(root, "3-active"); assertTrue(t.toString(), t.any { Regex("^\\d+:\\d\\d$").matches(it) })
-        findClickable(root, "Phone")!!.performClick(); t = texts(root); assertTrue(t.contains("Speaker")); assertBlurred(snap(root, "4-speaker"), "in-call audio")
+        findClickable(root, "Speaker")!!.performClick(); t = texts(root); assertTrue(t.contains("Speaker")); assertBlurred(snap(root, "4-speaker"), "in-call audio")
         assertEquals("in-call audio avatar does not move", avTop, avatarTop(root))
         findDesc(root, "Minimize call")!!.performClick()
         t = texts(root); assertTrue("minimized bar shows the peer and Tap to return", t.any { it.contains("Ada Lovelace") && it.contains("Tap to return") })
@@ -216,7 +216,7 @@ class NativeCallScreenRenderTest {
         }
         findBar(root)!!.performClick()
         t = texts(root); assertTrue("restored controls", t.contains("End call")); snap(root, "6-restored")
-        findClickable(root, "Video")!!.performClick()
+        s.onNativeVideo(true)
         root.measure(View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(2340, View.MeasureSpec.EXACTLY))
         root.layout(0, 0, 1080, 2340)
         t = texts(root)
@@ -225,7 +225,6 @@ class NativeCallScreenRenderTest {
         assertTrue("Stop video is not used (it overflowed the even row)", !t.contains("Stop video"))
         val videoSizes = listOf("Speaker", "Flip", "Camera", "Mute", "End call").map { discWidth(root, it) }
         assertTrue("even in-call video discs: $videoSizes", videoSizes.all { it == videoSizes[0] && it == expect })
-        s.onNativeVideo(true)
         app.visibility = View.GONE
         remote.visibility = View.VISIBLE
         pip.visibility = View.VISIBLE
@@ -303,7 +302,7 @@ class NativeCallScreenRenderTest {
         assertTrue(t.toString(), t.containsAll(listOf("Ada Lovelace", "Decline", "Message", "Accept")))
         val shot = snap(root, "0-incoming")
         assertBlurred(shot, "incoming")
-        assertTrue("incoming avatar is the squircle photo", squirclePhoto(root))
+        assertTrue("incoming avatar is the circle photo", circlePhoto(root))
         assertTrue("online dot on the incoming avatar", findDesc(root, "online") != null)
         val d = act.resources.displayMetrics.density
         val rb = ringBoxOf(root)!!

@@ -11,9 +11,8 @@ import android.view.ViewOutlineProvider
 import android.widget.ImageView
 
 /**
- * First-design avatar shape (101e00a / web avatar-shape.ts): 112dp squircle, 47dp corners.
- * The photo is cover-cropped into that shape so a rectangular source never paints square corners
- * (Robolectric's clipToOutline often no-ops, so the bitmap itself is clipped).
+ * Call-screen avatar: 112dp circle (Donny's live iPhone design, Nov 2026), cover-cropped.
+ * Robolectric's clipToOutline often no-ops, so the bitmap itself is clipped.
  */
 object CallAvatar {
     const val SIZE_DP = 112
@@ -26,7 +25,8 @@ object CallAvatar {
     fun applyOutline(view: View, cornerPx: Float) {
         view.outlineProvider = object : ViewOutlineProvider() {
             override fun getOutline(v: View, outline: Outline) {
-                outline.setRoundRect(0, 0, v.width.coerceAtLeast(0), v.height.coerceAtLeast(0), cornerPx)
+                // Avatars are circles (the cornerPx argument is kept so existing callers compile).
+                outline.setOval(0, 0, v.width.coerceAtLeast(0), v.height.coerceAtLeast(0))
             }
         }
         view.clipToOutline = true
@@ -65,6 +65,10 @@ object CallAvatar {
         }
         return out
     }
+
+    /** Center-crop [src] into a [sizePx] circle with transparent corners. */
+    @JvmStatic
+    fun circle(src: Bitmap, sizePx: Int): Bitmap = squircle(src, sizePx, sizePx / 2f)
 
     /** Cover-crop [src] into a rounded rectangle (used for the 100×150 PiP, 18dp corners). */
     @JvmStatic
@@ -109,10 +113,9 @@ object CallAvatar {
             view.measuredWidth > 0 -> view.measuredWidth
             else -> src.width
         }
-        val corner = cornerPx(size)
-        view.setImageBitmap(squircle(src, size, corner))
+        view.setImageBitmap(circle(src, size))
         view.scaleType = ImageView.ScaleType.FIT_XY
         view.alpha = 1f
-        applyOutline(view, corner)
+        applyOutline(view, size / 2f)
     }
 }

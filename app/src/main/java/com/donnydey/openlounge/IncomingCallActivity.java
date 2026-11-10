@@ -88,7 +88,6 @@ public class IncomingCallActivity extends Activity {
         } else {
             getWindow().addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON);
         }
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         handle(getIntent());
     }
 
@@ -231,7 +230,7 @@ public class IncomingCallActivity extends Activity {
     }
 
     // ---------- UI: first Open Lounge call screen (web 101e00a, 2026-10-07 MST) ----------
-    // Full-screen #0b1220 stage, drifting blobs + blurred photo, squircle 112dp avatar with the
+    // Full-screen #0b1220 stage, drifting blobs + blurred photo, 112dp circle avatar with the
     // 101e00a / PresenceAvatar online dot (16dp + 3dp ring, bottom-right). Even 56dp Decline /
     // Message / Accept discs (24dp icon, 12sp label). Pulsing emerald Accept with swipe-up.
     // Quick-reply sheet declines the call. Accept / Decline / permission paths above this line
@@ -307,11 +306,11 @@ public class IncomingCallActivity extends Activity {
             ringBox.addView(rv, new FrameLayout.LayoutParams(dp(112), dp(112)));
         }
         FrameLayout avatar = new FrameLayout(this);
-        GradientDrawable squircle = new GradientDrawable();
-        squircle.setCornerRadius(dp(47));
-        squircle.setColor(Color.parseColor("#64748B"));
-        avatar.setBackground(squircle);
-        CallAvatar.applyOutline(avatar, dp(47));
+        GradientDrawable circle = new GradientDrawable();
+        circle.setShape(GradientDrawable.OVAL);
+        circle.setColor(Color.parseColor("#64748B"));
+        avatar.setBackground(circle);
+        CallAvatar.applyOutline(avatar, dp(56));
         TextView initial = new TextView(this);
         initialView = initial;
         initial.setText(initials(name));
@@ -358,7 +357,7 @@ public class IncomingCallActivity extends Activity {
         sub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
         sub.setIncludeFontPadding(false);
         LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        sl.topMargin = dp(4);
+        sl.topMargin = dp(16);
         col.addView(sub, sl);
 
         View spacer = new View(this);
