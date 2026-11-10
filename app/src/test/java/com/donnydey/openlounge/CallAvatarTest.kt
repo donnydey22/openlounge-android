@@ -23,6 +23,6 @@ class CallAvatarTest {
         assertTrue("bottom-right corner is transparent", Color.alpha(out.getPixel(111, 111)) < 16)
         assertTrue("center is the cover-cropped photo", Color.alpha(out.getPixel(56, 56)) > 200)
         assertEquals(0xFFFF0000.toInt(), out.getPixel(56, 56))
-        assertTrue("top edge mid-point is transparent (circle, not a squircle)", Color.alpha(out.getPixel(56, 0)) < 16)
+        assertTrue("top edge beside center is transparent (circle; a squircle would still be opaque here)", Color.alpha(out.getPixel(47, 0)) < 16)
     }
 }
