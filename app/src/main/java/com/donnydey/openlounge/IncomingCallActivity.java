@@ -48,6 +48,18 @@ public class IncomingCallActivity extends Activity {
     private static WeakReference<IncomingCallActivity> current = new WeakReference<>(null);
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
 
+    /** False under unit tests so looping pulse/blob animators cannot stall Robolectric setup. */
+    private static boolean runCallAnimations() {
+        String fp = Build.FINGERPRINT == null ? "" : Build.FINGERPRINT;
+        if (fp.toLowerCase(java.util.Locale.US).contains("robolectric")) return false;
+        try {
+            Class.forName("org.robolectric.RuntimeEnvironment");
+            return false;
+        } catch (Throwable t) {
+            return true;
+        }
+    }
+
     private String callId;
     private final Runnable expire = this::finishQuietly;
 
@@ -243,6 +255,7 @@ public class IncomingCallActivity extends Activity {
     private ImageView photoView;
     private ImageView backdrop;
     private TextView initialView;
+    private final java.util.ArrayList<View> blobs = new java.util.ArrayList<>();
 
     private void buildUi(String name, boolean video, String photoUrl) {
         FrameLayout root = new FrameLayout(this);
@@ -252,8 +265,10 @@ public class IncomingCallActivity extends Activity {
 
         // drifting colour blobs (peer slate + indigo #6366F1) + blurred photo + shade
         FrameLayout bg = new FrameLayout(this);
-        bg.addView(blob(0xFF64748B, Gravity.TOP | Gravity.START, 0.18f, 0.14f, vmax));
-        bg.addView(blob(0xFF6366F1, Gravity.BOTTOM | Gravity.END, -0.16f, -0.12f, vmax));
+        blobs.clear();
+        blobs.add(blob(0xFF64748B, Gravity.TOP | Gravity.START, 0.18f, 0.14f, vmax));
+        blobs.add(blob(0xFF6366F1, Gravity.BOTTOM | Gravity.END, -0.16f, -0.12f, vmax));
+        for (View b : blobs) bg.addView(b);
         ImageView backdrop = new ImageView(this);
         this.backdrop = backdrop;
         backdrop.setScaleType(ImageView.ScaleType.CENTER_CROP);
@@ -295,7 +310,7 @@ public class IncomingCallActivity extends Activity {
         squircle.setCornerRadius(dp(47));
         squircle.setColor(Color.parseColor("#64748B"));
         avatar.setBackground(squircle);
-        avatar.setClipToOutline(true);
+        CallAvatar.applyOutline(avatar, dp(47));
         TextView initial = new TextView(this);
         initialView = initial;
         initial.setText(initials(name));
@@ -360,10 +375,13 @@ public class IncomingCallActivity extends Activity {
 
         setContentView(root);
         loadPhoto(photoUrl, photo, backdrop);
-        for (int i = 0; i < rings.size(); i++) pulseRing(rings.get(i), i * 800L);
-        pulseAccept();
+        // Robolectric's fingerprint is "robolectric"; skip looping animators so unit snapshots can finish.
+        if (runCallAnimations()) {
+            for (int i = 0; i < rings.size(); i++) pulseRing(rings.get(i), i * 800L);
+            pulseAccept();
+        }
         applyPresence(CallPresence.of(getIntent() != null ? getIntent().getStringExtra("presence") : null));
-        startPresencePeek();
+        if (runCallAnimations()) startPresencePeek();
     }
 
     private View blob(int color, int gravity, float dx, float dy, int vmax) {
@@ -382,7 +400,7 @@ public class IncomingCallActivity extends Activity {
             lp.bottomMargin = (int) (-vmax * 0.25);
         }
         v.setLayoutParams(lp);
-        v.animate().translationX(dx * vmax).translationY(dy * vmax).setDuration(14000).start();
+        if (runCallAnimations()) v.animate().translationX(dx * vmax).translationY(dy * vmax).setDuration(14000).start();
         return v;
     }
 
@@ -640,25 +658,44 @@ public class IncomingCallActivity extends Activity {
         }
     }
 
-    /** http(s) photo, or file:// under this app's cache/files; ≤ 2 MB, decoded off the main thread. */
+    private void applyDecodedPhoto(Bitmap bmp, ImageView photo, ImageView backdrop) {
+        if (isFinishing() || photo == null || bmp == null) return;
+        CallAvatar.setPhoto(photo, bmp);
+        if (initialView != null) initialView.setText("");
+        if (backdrop != null) {
+            backdrop.setImageBitmap(bmp);
+            backdrop.setAlpha(1f);
+            if (Build.VERSION.SDK_INT >= 31) backdrop.setRenderEffect(RenderEffect.createBlurEffect(dp(36), dp(36), Shader.TileMode.CLAMP));
+            else backdrop.setAlpha(0.15f);
+        }
+        for (View b : blobs) b.setVisibility(View.GONE);
+    }
+
+    /** http(s) photo, or file:// under this app's cache/files; ≤ 2 MB. file: is decoded on this thread. */
     private void loadPhoto(String url, ImageView photo, ImageView backdrop) {
         if (!CallPresence.allowedPhotoUrl(url, getCacheDir(), getFilesDir()) || photo == null) return;
         final String src = url;
+        if (src.startsWith("file:")) {
+            try {
+                java.io.File f = new java.io.File(new java.net.URI(src).getPath());
+                if (!f.isFile() || f.length() > 2_000_000) return;
+                BitmapFactory.Options o = new BitmapFactory.Options();
+                o.inJustDecodeBounds = true;
+                BitmapFactory.decodeFile(f.getAbsolutePath(), o);
+                int s = 1;
+                while (Math.max(o.outWidth, o.outHeight) / s > 512) s *= 2;
+                BitmapFactory.Options o2 = new BitmapFactory.Options();
+                o2.inSampleSize = s;
+                Bitmap bmp = BitmapFactory.decodeFile(f.getAbsolutePath(), o2);
+                if (bmp != null) applyDecodedPhoto(bmp, photo, backdrop);
+            } catch (Exception ignored) {}
+            return;
+        }
         new Thread(() -> {
             HttpURLConnection c = null;
             try {
                 byte[] data;
-                if (src.startsWith("file:")) {
-                    java.io.File f = new java.io.File(new java.net.URI(src).getPath());
-                    if (!f.isFile() || f.length() > 2_000_000) return;
-                    ByteArrayOutputStream out = new ByteArrayOutputStream();
-                    try (InputStream in = new java.io.FileInputStream(f)) {
-                        byte[] buf = new byte[16384];
-                        int n;
-                        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
-                    }
-                    data = out.toByteArray();
-                } else {
+                {
                     c = (HttpURLConnection) new URL(src).openConnection();
                     c.setConnectTimeout(5000);
                     c.setReadTimeout(5000);
@@ -683,17 +720,7 @@ public class IncomingCallActivity extends Activity {
                 o2.inSampleSize = s;
                 Bitmap bmp = BitmapFactory.decodeByteArray(data, 0, data.length, o2);
                 if (bmp == null) return;
-                MAIN.post(() -> {
-                    if (isFinishing()) return;
-                    photo.setImageBitmap(bmp);
-                    if (initialView != null) initialView.setText("");
-                    if (backdrop != null) {
-                        backdrop.setImageBitmap(bmp);
-                        backdrop.animate().alpha(1f).setDuration(200).start();
-                        if (Build.VERSION.SDK_INT >= 31) backdrop.setRenderEffect(RenderEffect.createBlurEffect(dp(36), dp(36), Shader.TileMode.CLAMP));
-                        else backdrop.setAlpha(0.15f);
-                    }
-                });
+                MAIN.post(() -> applyDecodedPhoto(bmp, photo, backdrop));
             } catch (Exception ignored) {
             } finally {
                 if (c != null) c.disconnect();

@@ -2,7 +2,10 @@ package com.donnydey.openlounge
 
 import android.app.Activity
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
+import android.graphics.Color
+import android.widget.ImageView
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -30,7 +33,7 @@ class NativeCallScreenRenderTest {
         return out
     }
     private fun isShown(v: View): Boolean { var p: View? = v; while (p != null) { if (p.visibility != View.VISIBLE) return false; p = p.parent as? View }; return true }
-    private fun snap(root: FrameLayout, name: String) {
+    private fun snap(root: View, name: String) {
         root.measure(View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(2340, View.MeasureSpec.EXACTLY))
         root.layout(0, 0, 1080, 2340)
         val b = Bitmap.createBitmap(1080, 2340, Bitmap.Config.ARGB_8888); root.draw(Canvas(b))
@@ -52,19 +55,35 @@ class NativeCallScreenRenderTest {
     }
 
 
-    private fun fixturePhoto(act: Activity): String {
-        val dest = File(act.cacheDir, "avatar-placeholder.jpg")
+    private fun fixtureFile(act: Activity, name: String): File {
+        val dest = File(act.cacheDir, name)
         dest.outputStream().use { out ->
-            javaClass.classLoader!!.getResourceAsStream("avatar-placeholder.jpg")!!.copyTo(out)
+            javaClass.classLoader!!.getResourceAsStream(name)!!.copyTo(out)
         }
-        return dest.toURI().toString()
+        return dest
     }
+    private fun fixturePhoto(act: Activity): String = fixtureFile(act, "avatar-placeholder.jpg").toURI().toString()
+    private fun dp(act: Activity, v: Int) = Math.round(v * act.resources.displayMetrics.density)
     private fun idlePhoto() {
         // file:// photos decode on the main thread; nothing to idle.
     }
     private fun hasPhoto(v: View): Boolean {
         if (v is android.widget.ImageView && v.drawable != null && v.alpha > 0f && v.width > 0) return true
         if (v is android.view.ViewGroup) for (i in 0 until v.childCount) if (hasPhoto(v.getChildAt(i))) return true
+        return false
+    }
+    /** The 112dp avatar photo was cover-cropped into a squircle (corner pixels are transparent). */
+    private fun squirclePhoto(v: View): Boolean {
+        if (v is ImageView && v.drawable != null && v.width == v.height && v.width > 0) {
+            val d = v.drawable
+            val b = (d as? android.graphics.drawable.BitmapDrawable)?.bitmap
+            if (b != null && b.width > 8 && b.height == b.width) {
+                val a00 = Color.alpha(b.getPixel(0, 0))
+                val mid = Color.alpha(b.getPixel(b.width / 2, b.height / 2))
+                if (a00 < 16 && mid > 200) return true
+            }
+        }
+        if (v is ViewGroup) for (i in 0 until v.childCount) if (squirclePhoto(v.getChildAt(i))) return true
         return false
     }
 
@@ -80,6 +99,18 @@ class NativeCallScreenRenderTest {
             gravity = android.view.Gravity.CENTER
         }
         root.addView(app, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        val remote = ImageView(act).apply {
+            setImageBitmap(BitmapFactory.decodeFile(fixtureFile(act, "remote-video-placeholder.jpg").absolutePath))
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            visibility = View.GONE
+        }
+        root.addView(remote, 0, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        val pip = ImageView(act).apply {
+            val raw = BitmapFactory.decodeFile(fixtureFile(act, "local-pip-placeholder.jpg").absolutePath)
+            setImageBitmap(CallAvatar.rounded(raw, dp(act, 100), dp(act, 150), dp(act, 18).toFloat()))
+            scaleType = ImageView.ScaleType.FIT_XY
+            visibility = View.GONE
+        }
         val s = NativeCallScreen(act, root, object : NativeCallScreen.Actions {
             override fun pageCall(detailJson: String): Boolean { sent += detailJson; return true }
             override fun speaker(on: Boolean) {}
@@ -91,6 +122,7 @@ class NativeCallScreenRenderTest {
         var t = texts(root); snap(root, "1-calling")
         assertTrue(t.toString(), t.containsAll(listOf("Ada Lovelace", "Calling…", "Phone", "Video", "Mute", "End call")))
         assertTrue("profile photo is painted (initials only as a fallback)", hasPhoto(root))
+        assertTrue("avatar is a 112dp squircle (transparent corners, not a square crop)", squirclePhoto(root))
         assertTrue("first UI offers Video on voice calls (audio→video upgrade)", t.contains("Video"))
         assertTrue("Flip stays hidden until the local camera is on", !t.contains("Flip"))
         assertTrue("online presence dot on the calling avatar", findDesc(root, "online") != null)
@@ -128,7 +160,18 @@ class NativeCallScreenRenderTest {
         val videoSizes = listOf("Speaker", "Flip", "Camera", "Mute", "End call").map { discWidth(root, it) }
         assertTrue("even in-call video discs: $videoSizes", videoSizes.all { it == videoSizes[0] && it == expect })
         s.onNativeVideo(true)
+        app.visibility = View.GONE
+        remote.visibility = View.VISIBLE
+        pip.visibility = View.VISIBLE
+        if (pip.parent == null) {
+            root.addView(pip, FrameLayout.LayoutParams(dp(act, 100), dp(act, 150), android.view.Gravity.TOP or android.view.Gravity.END).apply {
+                topMargin = dp(act, 64); rightMargin = dp(act, 12)
+            })
+        }
         snap(root, "7-video")
+        app.visibility = View.VISIBLE
+        remote.visibility = View.GONE
+        pip.visibility = View.GONE
         findClickable(root, "End call")!!.performClick()
         assertEquals("call:hangup", JSONObject(sent.last()).getString("type"))
         s.onPageCall("call:ended", JSONObject().put("callId", "t1"))

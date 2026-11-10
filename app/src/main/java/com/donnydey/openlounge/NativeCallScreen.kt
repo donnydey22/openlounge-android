@@ -194,11 +194,12 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
 
     private fun applyDecodedPhoto(id: String, bmp: android.graphics.Bitmap) {
         if (callId != id || view == null) return
-        photoView.setImageBitmap(bmp)
-        photoView.alpha = 1f
+        CallAvatar.setPhoto(photoView, bmp)
         avatar.text = ""
         bgPhoto.setImageBitmap(bmp)
         bgPhoto.alpha = 1f
+        // Photo present: first-design backdrop is the dark blurred portrait, not the indigo blobs.
+        blobs.forEach { it.visibility = android.view.View.GONE }
         bgPhoto.animate().alpha(1f).setDuration(200).start()
     }
     private lateinit var bFirst: Btn
@@ -207,6 +208,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     private lateinit var top: LinearLayout
     private lateinit var bg: FrameLayout
     private lateinit var bgPhoto: android.widget.ImageView
+    private val blobs = ArrayList<View>()
     private lateinit var bVid: Btn
     private lateinit var bMic: Btn
 
@@ -219,8 +221,10 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
             layoutParams = FrameLayout.LayoutParams((vmax * 0.7).toInt(), (vmax * 0.7).toInt(), gravity).apply { if (gravity and Gravity.START == Gravity.START) { leftMargin = (-vmax * 0.25).toInt(); topMargin = (-vmax * 0.2).toInt() } else { rightMargin = (-vmax * 0.3).toInt(); bottomMargin = (-vmax * 0.25).toInt() } }
             animate().translationX(dx * vmax).translationY(dy * vmax).setDuration(14000).start()
         }
-        bg.addView(blob(0xFF64748B.toInt(), Gravity.TOP or Gravity.START, 0.18f, 0.14f))
-        bg.addView(blob(0xFF6366F1.toInt(), Gravity.BOTTOM or Gravity.END, -0.16f, -0.12f))
+        blobs.clear()
+        blobs.add(blob(0xFF64748B.toInt(), Gravity.TOP or Gravity.START, 0.18f, 0.14f))
+        blobs.add(blob(0xFF6366F1.toInt(), Gravity.BOTTOM or Gravity.END, -0.16f, -0.12f))
+        blobs.forEach { bg.addView(it) }
         bgPhoto = android.widget.ImageView(act).apply { scaleType = android.widget.ImageView.ScaleType.CENTER_CROP; alpha = 0f; scaleX = 1.15f; scaleY = 1.15f
             if (android.os.Build.VERSION.SDK_INT >= 31) setRenderEffect(android.graphics.RenderEffect.createBlurEffect(dp(36).toFloat(), dp(36).toFloat(), android.graphics.Shader.TileMode.CLAMP))
             setColorFilter(0x73000000) }
@@ -231,7 +235,10 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         avatar = TextView(act).apply { setTextColor(Color.WHITE); textSize = 30f; gravity = Gravity.CENTER; typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
             }
         // squircle (web avatar-shape.ts, ~42% corner equivalent), clipped so the photo takes the same shape
-        avatarBox = FrameLayout(act).apply { background = GradientDrawable().apply { cornerRadius = dp(47).toFloat(); setColor(0xFF64748B.toInt()) }; clipToOutline = true }
+        avatarBox = FrameLayout(act).apply {
+            background = GradientDrawable().apply { cornerRadius = dp(47).toFloat(); setColor(0xFF64748B.toInt()) }
+            CallAvatar.applyOutline(this, dp(47).toFloat())
+        }
         photoView = android.widget.ImageView(act).apply { scaleType = android.widget.ImageView.ScaleType.CENTER_CROP; alpha = 0f }
         avatarBox.addView(avatar, FrameLayout.LayoutParams(-1, -1)); avatarBox.addView(photoView, FrameLayout.LayoutParams(-1, -1))
         name = TextView(act).apply { setTextColor(Color.WHITE); textSize = 28f; gravity = Gravity.CENTER; maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
