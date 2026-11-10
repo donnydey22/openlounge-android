@@ -215,14 +215,17 @@ public class IncomingCallActivity extends Activity {
     @Override
     protected void onDestroy() {
         MAIN.removeCallbacks(expire);
+        MAIN.removeCallbacks(presenceTick);
         if (current.get() == this) current = new WeakReference<>(null);
         super.onDestroy();
     }
 
     // ---------- UI: first Open Lounge call screen (web 101e00a, 2026-10-07 MST) ----------
-    // Full-screen #0b1220 stage, drifting blobs + blurred photo, squircle avatar, 72dp red Decline,
-    // 48dp Message, 72dp pulsing emerald Accept with swipe-up. Quick-reply sheet declines the call.
-    // Accept / Decline / permission paths above this line are unchanged.
+    // Full-screen #0b1220 stage, drifting blobs + blurred photo, squircle 112dp avatar with the
+    // 101e00a / PresenceAvatar online dot (16dp + 3dp ring, bottom-right). Even 56dp Decline /
+    // Message / Accept discs (24dp icon, 12sp label). Pulsing emerald Accept with swipe-up.
+    // Quick-reply sheet declines the call. Accept / Decline / permission paths above this line
+    // are unchanged.
 
     private int dp(float v) {
         return Math.round(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, getResources().getDisplayMetrics()));
@@ -233,8 +236,10 @@ public class IncomingCallActivity extends Activity {
     private View haloA;
     private View haloB;
     private View replies;
+    private View presenceDot;
     private float acceptDragY;
     private Float acceptStartY;
+    private final Runnable presenceTick = this::peekPresence;
 
     private void buildUi(String name, boolean video, String photoUrl) {
         FrameLayout root = new FrameLayout(this);
@@ -297,6 +302,17 @@ public class IncomingCallActivity extends Activity {
         photo.setScaleType(ImageView.ScaleType.CENTER_CROP);
         avatar.addView(photo, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         ringBox.addView(avatar, new FrameLayout.LayoutParams(dp(112), dp(112)));
+        presenceDot = new View(this);
+        android.graphics.drawable.GradientDrawable dot = new android.graphics.drawable.GradientDrawable();
+        dot.setShape(android.graphics.drawable.GradientDrawable.OVAL);
+        dot.setColor(CallPresence.COLOR_ONLINE);
+        dot.setStroke(dp(3), CallPresence.RING);
+        presenceDot.setBackground(dot);
+        presenceDot.setVisibility(View.GONE);
+        FrameLayout.LayoutParams dlp = new FrameLayout.LayoutParams(dp(22), dp(22), Gravity.END | Gravity.BOTTOM);
+        dlp.rightMargin = dp(4);
+        dlp.bottomMargin = dp(4);
+        ringBox.addView(presenceDot, dlp);
         LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(dp(112), dp(112));
         rlp.bottomMargin = dp(12);
         col.addView(ringBox, rlp);
@@ -327,8 +343,8 @@ public class IncomingCallActivity extends Activity {
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
         row.setClipChildren(false);
-        row.addView(roundAction(getString(R.string.call_decline), 0xFFEF4444, R.drawable.ol_call_phone_off, 72, 8, 13, v -> decline()), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        row.addView(roundAction(getString(R.string.call_message), 0x26FFFFFF, R.drawable.ol_call_message, 48, 5, 12, v -> showReplies(true)), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(roundAction(getString(R.string.call_decline), 0xFFEF4444, R.drawable.ol_call_phone_off, v -> decline()), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(roundAction(getString(R.string.call_message), 0x26FFFFFF, R.drawable.ol_call_message, v -> showReplies(true)), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         row.addView(acceptButton(video), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         col.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
@@ -340,6 +356,8 @@ public class IncomingCallActivity extends Activity {
         loadPhoto(photoUrl, photo, backdrop);
         for (int i = 0; i < rings.size(); i++) pulseRing(rings.get(i), i * 800L);
         pulseAccept();
+        applyPresence(CallPresence.of(getIntent() != null ? getIntent().getStringExtra("presence") : null));
+        startPresencePeek();
     }
 
     private View blob(int color, int gravity, float dx, float dy, int vmax) {
@@ -362,7 +380,7 @@ public class IncomingCallActivity extends Activity {
         return v;
     }
 
-    private View roundAction(String label, int color, int iconRes, int sizeDp, int iconDp, int labelSp, View.OnClickListener onClick) {
+    private View roundAction(String label, int color, int iconRes, View.OnClickListener onClick) {
         LinearLayout b = new LinearLayout(this);
         b.setOrientation(LinearLayout.VERTICAL);
         b.setGravity(Gravity.CENTER_HORIZONTAL);
@@ -371,23 +389,22 @@ public class IncomingCallActivity extends Activity {
         g.setShape(GradientDrawable.OVAL);
         g.setColor(color);
         disc.setBackground(g);
-        disc.setElevation(sizeDp >= 72 ? dp(8) : 0);
         ImageView ic = new ImageView(this);
         ic.setImageResource(iconRes);
         if (color == 0x26FFFFFF) ic.setColorFilter(Color.WHITE);
-        disc.addView(ic, new FrameLayout.LayoutParams(dp(iconDp == 8 ? 32 : (iconDp == 5 ? 20 : 32)), dp(iconDp == 8 ? 32 : (iconDp == 5 ? 20 : 32)), Gravity.CENTER));
+        disc.addView(ic, new FrameLayout.LayoutParams(dp(24), dp(24), Gravity.CENTER));
         disc.setContentDescription(label);
         disc.setOnClickListener(onClick);
-        b.addView(disc, new LinearLayout.LayoutParams(dp(sizeDp), dp(sizeDp)));
+        b.addView(disc, new LinearLayout.LayoutParams(dp(56), dp(56)));
         TextView t = new TextView(this);
         t.setText(label);
         t.setTextColor(0xD9FFFFFF);
-        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, labelSp);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         t.setGravity(Gravity.CENTER);
         t.setOnClickListener(onClick);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(8);
+        lp.topMargin = dp(6);
         b.addView(t, lp);
         return b;
     }
@@ -401,8 +418,8 @@ public class IncomingCallActivity extends Activity {
         wrap.setClipChildren(false);
         haloA = halo();
         haloB = halo();
-        wrap.addView(haloA, new FrameLayout.LayoutParams(dp(72), dp(72), Gravity.CENTER));
-        wrap.addView(haloB, new FrameLayout.LayoutParams(dp(72), dp(72), Gravity.CENTER));
+        wrap.addView(haloA, new FrameLayout.LayoutParams(dp(56), dp(56), Gravity.CENTER));
+        wrap.addView(haloB, new FrameLayout.LayoutParams(dp(56), dp(56), Gravity.CENTER));
         FrameLayout disc = new FrameLayout(this);
         GradientDrawable g = new GradientDrawable();
         g.setShape(GradientDrawable.OVAL);
@@ -412,7 +429,7 @@ public class IncomingCallActivity extends Activity {
         ImageView ic = new ImageView(this);
         ic.setImageResource(video ? R.drawable.ol_call_video : R.drawable.ol_call_phone);
         ic.setColorFilter(Color.WHITE);
-        disc.addView(ic, new FrameLayout.LayoutParams(dp(32), dp(32), Gravity.CENTER));
+        disc.addView(ic, new FrameLayout.LayoutParams(dp(24), dp(24), Gravity.CENTER));
         String label = getString(R.string.call_accept);
         disc.setContentDescription(video ? "Accept video call" : label);
         disc.setOnClickListener(v -> accept());
@@ -442,8 +459,8 @@ public class IncomingCallActivity extends Activity {
             return false;
         });
         acceptDisc = disc;
-        wrap.addView(disc, new FrameLayout.LayoutParams(dp(72), dp(72), Gravity.CENTER));
-        b.addView(wrap, new LinearLayout.LayoutParams(dp(72), dp(72)));
+        wrap.addView(disc, new FrameLayout.LayoutParams(dp(56), dp(56), Gravity.CENTER));
+        b.addView(wrap, new LinearLayout.LayoutParams(dp(56), dp(56)));
         TextView swipe = new TextView(this);
         swipe.setText(getString(R.string.call_swipe_up));
         swipe.setTextColor(0x99FFFFFF);
@@ -453,11 +470,11 @@ public class IncomingCallActivity extends Activity {
         TextView t = new TextView(this);
         t.setText(label);
         t.setTextColor(0xD9FFFFFF);
-        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         t.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(8);
+        lp.topMargin = dp(6);
         b.addView(t, lp);
         swipeHint(swipe);
         // insert swipe hint as a sibling above the disc column by wrapping? first UI has hint above the button.
@@ -576,6 +593,37 @@ public class IncomingCallActivity extends Activity {
         if (n.trim().isEmpty()) return "?";
         if (w.length == 1) return w[0].substring(0, w[0].offsetByCodePoints(0, Math.min(2, w[0].codePointCount(0, w[0].length())))).toUpperCase(java.util.Locale.getDefault());
         return (w[0].substring(0, w[0].offsetByCodePoints(0, 1)) + w[w.length - 1].substring(0, w[w.length - 1].offsetByCodePoints(0, 1))).toUpperCase(java.util.Locale.getDefault());
+    }
+
+    private void startPresencePeek() {
+        MAIN.removeCallbacks(presenceTick);
+        peekPresence();
+    }
+
+    private void peekPresence() {
+        if (isFinishing() || presenceDot == null) return;
+        MainActivity.peekLivePresence(raw -> {
+            if (isFinishing() || presenceDot == null) return;
+            String t = CallPresence.rawFromJs(raw);
+            if (t == null || t.isEmpty()) t = raw == null ? "" : raw.trim();
+            if (!t.isEmpty()) applyPresence(CallPresence.of(t));
+            if (!isFinishing()) MAIN.postDelayed(presenceTick, 2000);
+        });
+    }
+
+    private void applyPresence(String status) {
+        if (presenceDot == null) return;
+        String s = CallPresence.of(status);
+        if (s == null) {
+            presenceDot.setVisibility(View.GONE);
+            presenceDot.setContentDescription(null);
+        } else {
+            android.graphics.drawable.GradientDrawable g = (android.graphics.drawable.GradientDrawable) presenceDot.getBackground();
+            g.setColor(CallPresence.color(s));
+            g.setStroke(dp(3), CallPresence.RING);
+            presenceDot.setVisibility(View.VISIBLE);
+            presenceDot.setContentDescription(s);
+        }
     }
 
     /** https photo only, ≤ 2 MB, decoded downsampled off the main thread. */

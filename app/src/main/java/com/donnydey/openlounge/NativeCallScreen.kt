@@ -39,6 +39,8 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         fun pageCall(detailJson: String): Boolean
         fun speaker(on: Boolean)
         fun camera(on: Boolean, facing: String, done: (Boolean) -> Unit)
+        /** Read-only peek of the page's existing call-screen presence (data-presence). */
+        fun peekCallPresence(done: (String?) -> Unit) { done(null) }
     }
 
 
@@ -69,9 +71,9 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     fun onPageCall(type: String, m: JSONObject) {
         val id = m.optString("callId", "")
         when (type) {
-            "call:incoming" -> if (id.isNotEmpty()) { incoming = id to m.optString("name", ""); incomingPhoto = id to m.optString("photo", "") }
-            "call:outgoing" -> if (id.isNotEmpty()) { begin(id, m.optString("name", ""), m.optBoolean("video"), m.optString("photo", "")); set(NativeCallFlow.State.WAITING) }
-            "call:answering" -> if (id.isNotEmpty()) { if (callId != id) begin(id, m.optString("name", "").ifEmpty { incoming?.takeIf { it.first == id }?.second.orEmpty() }, m.optBoolean("video"), m.optString("photo", "").ifEmpty { incomingPhoto?.takeIf { it.first == id }?.second.orEmpty() }); set(NativeCallFlow.State.WAIT_INIT) }
+            "call:incoming" -> if (id.isNotEmpty()) { incoming = id to m.optString("name", ""); incomingPhoto = id to m.optString("photo", ""); if (CallPresence.hasField(m)) incomingPresence = id to CallPresence.fromMessage(m) }
+            "call:outgoing" -> if (id.isNotEmpty()) { begin(id, m.optString("name", ""), m.optBoolean("video"), m.optString("photo", ""), if (CallPresence.hasField(m)) CallPresence.fromMessage(m) else null); set(NativeCallFlow.State.WAITING) }
+            "call:answering" -> if (id.isNotEmpty()) { if (callId != id) begin(id, m.optString("name", "").ifEmpty { incoming?.takeIf { it.first == id }?.second.orEmpty() }, m.optBoolean("video"), m.optString("photo", "").ifEmpty { incomingPhoto?.takeIf { it.first == id }?.second.orEmpty() }, if (CallPresence.hasField(m)) CallPresence.fromMessage(m) else incomingPresence?.takeIf { it.first == id }?.second); set(NativeCallFlow.State.WAIT_INIT) }
             "call:connected" -> if (view != null && (id.isEmpty() || id == callId)) {
                 video = video || m.optBoolean("video")
                 set(NativeCallFlow.State.ESTABLISHED)
@@ -82,6 +84,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
             "call:muted" -> { muted = m.optBoolean("muted"); render() }
             "call:audioRoute" -> if (m.has("speaker")) { speakerOn = m.optBoolean("speaker"); render() }
         }
+        if (view != null && CallPresence.hasField(m) && (id.isEmpty() || id == callId)) applyPresence(CallPresence.fromMessage(m))
     }
 
     /** MainActivity.nativeCallVideo: native tiles are up (remote full screen, self-view PiP) -> transparent screen. */
@@ -89,18 +92,21 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     private var hidden = false
     private var incoming: Pair<String, String>? = null
     private var incomingPhoto: Pair<String, String>? = null
+    private var incomingPresence: Pair<String, String?>? = null
 
-    private fun begin(id: String, peer: String, v: Boolean, photo: String = "") {
+    private fun begin(id: String, peer: String, v: Boolean, photo: String = "", presence: String? = null) {
         dismiss(); callId = id; video = v; camOn = v; muted = false; speakerOn = v; facing = "user"
         if (!Prefs.nativeCallUi(act)) { callId = null; return }
         build(); name.text = peer.ifEmpty { act.getString(R.string.app_name) }; loadPhoto(id, photo)
+        applyPresence(presence ?: incomingPresence?.takeIf { it.first == id }?.second)
+        startPresencePeek()
     }
 
     private fun set(s: NativeCallFlow.State) { if (view == null) return; state = s
         if (s == NativeCallFlow.State.ESTABLISHED && establishedAt == 0L) { establishedAt = SystemClock.elapsedRealtime(); ui.post(tick) }
         render() }
 
-    private fun dismiss() { ui.removeCallbacks(tick); ui.removeCallbacks(hideCtl); view?.let { root.removeView(it) }; view = null; state = null; callId = null; hidden = false; establishedAt = 0L; nativeVideo = false; minimized = false }
+    private fun dismiss() { ui.removeCallbacks(tick); ui.removeCallbacks(hideCtl); ui.removeCallbacks(presenceTick); view?.let { root.removeView(it) }; view = null; state = null; callId = null; hidden = false; establishedAt = 0L; nativeVideo = false; minimized = false }
 
     private fun dp(v: Int) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), act.resources.displayMetrics).toInt()
 
@@ -108,8 +114,8 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     // xl initials avatar, 28sp semibold name, 15sp white/80 status, RoundBtn 56dp white/15 (active = white, zinc-900
     // icon), End call 56dp red-500, 12sp white/85 label under each button. lucide icons rendered to ol_call_*.png.
     private class Btn(val box: LinearLayout, val disc: FrameLayout, val icon: android.widget.ImageView, val label: TextView)
-    private fun btn(big: Boolean, danger: Boolean, click: () -> Unit): Btn {
-        val size = dp(if (big) 68 else 56)
+    private fun btn(danger: Boolean, click: () -> Unit): Btn {
+        val size = dp(56)
         val disc = FrameLayout(act).apply { background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(if (danger) 0xFFEF4444.toInt() else 0x26FFFFFF) } }
         val icon = android.widget.ImageView(act)
         disc.addView(icon, FrameLayout.LayoutParams(dp(24), dp(24), Gravity.CENTER))
@@ -137,6 +143,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     private lateinit var avatar: TextView
     private lateinit var avatarBox: FrameLayout
     private lateinit var photoView: android.widget.ImageView
+    private lateinit var presenceDot: View
 
     /** web AvatarPhoto.tsx: initials stay underneath, the photo fades in once decoded, a broken URL keeps the initials.
      *  http(s) only, like server/calls/index.ts voipPayload callerPhoto. */
@@ -192,21 +199,27 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         repeat(3) { i -> val rv = View(act).apply { background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setStroke(dp(2), 0x59FFFFFF) }; alpha = 0f }
             rings.add(rv); ringBox.addView(rv, FrameLayout.LayoutParams(dp(112), dp(112))) }
         ringBox.addView(avatarBox, FrameLayout.LayoutParams(dp(112), dp(112)))
+        // 101e00a Avatar presence / later call-screen PresenceAvatar: 16dp + 3dp stage ring, bottom-right 13% inset
+        presenceDot = View(act).apply {
+            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(CallPresence.COLOR_ONLINE); setStroke(dp(3), CallPresence.RING) }
+            visibility = View.GONE
+        }
+        ringBox.addView(presenceDot, FrameLayout.LayoutParams(dp(22), dp(22), Gravity.END or Gravity.BOTTOM).apply { rightMargin = dp(4); bottomMargin = dp(4) })
         top.clipChildren = false; v.clipChildren = false
         top.addView(ringBox, LinearLayout.LayoutParams(dp(112), dp(112)).apply { bottomMargin = dp(12) })
         top.addView(name, LinearLayout.LayoutParams(-1, -2)); top.addView(status, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
         v.addView(top, FrameLayout.LayoutParams(-1, -2, Gravity.CENTER).apply { bottomMargin = dp(80) })
         val row = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER or Gravity.BOTTOM; setPadding(dp(16), 0, dp(16), 0) }
-        bFirst = btn(false, false) { speakerOn = !speakerOn; actions.speaker(speakerOn); render() }
-        bFlip = btn(false, false) { facing = if (facing == "user") "environment" else "user"; actions.camera(true, facing) { } }
-        bVid = btn(false, false) {
+        bFirst = btn(false) { speakerOn = !speakerOn; actions.speaker(speakerOn); render() }
+        bFlip = btn(false) { facing = if (facing == "user") "environment" else "user"; actions.camera(true, facing) { } }
+        bVid = btn(false) {
             val want = !camOn
             if (!want) { camOn = false; actions.camera(false, facing) { }; render(); return@btn }
             // camera permission is requested here (toggle on), not up front; a denial leaves the button off
             actions.camera(true, facing) { ok -> if (ok) { camOn = true; render() } }
         }
-        bMic = btn(false, false) { actions.pageCall(JSONObject().put("type", "call:mute").put("muted", !muted).toString()) }
-        val end = btn(false, true) { actions.pageCall(JSONObject().put("type", "call:hangup").toString()) }
+        bMic = btn(false) { actions.pageCall(JSONObject().put("type", "call:mute").put("muted", !muted).toString()) }
+        val end = btn(true) { actions.pageCall(JSONObject().put("type", "call:hangup").toString()) }
         end.label.text = "End call"; end.icon.setImageResource(R.drawable.ol_call_phone_off)
         row.addView(bFirst.box); row.addView(bFlip.box); row.addView(bVid.box); row.addView(bMic.box); row.addView(end.box)
         v.addView(row, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply { bottomMargin = dp(40) })
@@ -310,6 +323,35 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         bVid.set(if (camOn) "Stop video" else "Video", if (camOn) R.drawable.ol_call_video else R.drawable.ol_call_video_off, active = camOn)
         bMic.set(if (muted) "Unmute" else "Mute", if (muted) R.drawable.ol_call_mic_off else R.drawable.ol_call_mic, active = muted)
         applyChrome(v)
+    }
+
+    private val presenceTick = object : Runnable {
+        override fun run() {
+            if (view == null) return
+            actions.peekCallPresence { raw ->
+                val t = CallPresence.rawFromJs(raw).ifBlank { raw?.trim().orEmpty() }
+                if (t.isNotEmpty()) applyPresence(CallPresence.of(t))
+                if (view != null) ui.postDelayed(this, 2000)
+            }
+        }
+    }
+
+    private fun startPresencePeek() {
+        ui.removeCallbacks(presenceTick)
+        ui.post(presenceTick)
+    }
+
+    private fun applyPresence(status: String?) {
+        if (view == null || !::presenceDot.isInitialized) return
+        val s = CallPresence.of(status)
+        if (s == null) {
+            presenceDot.visibility = View.GONE
+            presenceDot.contentDescription = null
+        } else {
+            (presenceDot.background as GradientDrawable).apply { setColor(CallPresence.color(s)); setStroke(dp(3), CallPresence.RING) }
+            presenceDot.visibility = View.VISIBLE
+            presenceDot.contentDescription = s
+        }
     }
 
     private fun pulse(rv: View, delay: Long) {

@@ -40,6 +40,16 @@ class NativeCallScreenRenderTest {
         if (v is ViewGroup) { for (i in 0 until v.childCount) { val c = v.getChildAt(i); if (c is TextView && c.text == label && v.hasOnClickListeners()) return v; findClickable(c, label)?.let { return it } } }
         return null
     }
+    private fun findDesc(v: View, d: String): View? {
+        if (v.contentDescription == d) return v
+        if (v is ViewGroup) for (i in 0 until v.childCount) findDesc(v.getChildAt(i), d)?.let { return it }
+        return null
+    }
+    private fun discWidth(root: View, label: String): Int {
+        val box = findClickable(root, label) ?: return -1
+        if (box is ViewGroup && box.childCount > 0) return box.getChildAt(0).width
+        return box.width
+    }
 
     @Test fun audioCallFlow() {
         val act = Robolectric.buildActivity(Activity::class.java).setup().get()
@@ -49,22 +59,22 @@ class NativeCallScreenRenderTest {
             override fun speaker(on: Boolean) {}
             override fun camera(on: Boolean, facing: String, done: (Boolean) -> Unit) { done(true) }
         })
-        s.onPageCall("call:outgoing", JSONObject().put("callId", "t1").put("name", "Ada Lovelace").put("video", false))
+        s.onPageCall("call:outgoing", JSONObject().put("callId", "t1").put("name", "Ada Lovelace").put("video", false).put("presence", "online"))
         var t = texts(root); snap(root, "1-calling")
         assertTrue(t.toString(), t.containsAll(listOf("AL", "Ada Lovelace", "Calling…", "Phone", "Video", "Mute", "End call")))
         assertTrue("first UI offers Video on voice calls (audio→video upgrade)", t.contains("Video"))
         assertTrue("Flip stays hidden until the local camera is on", !t.contains("Flip"))
+        assertTrue("online presence dot on the calling avatar", findDesc(root, "online") != null)
+        val sizes = listOf("Phone", "Video", "Mute", "End call").map { discWidth(root, it) }
+        assertTrue("even in-call discs: $sizes", sizes.all { it == sizes[0] && it > 0 })
+        val expect = Math.round(56f * act.resources.displayMetrics.density)
+        assertEquals("56dp in-call discs", expect, sizes[0])
         s.onPageCall("call:answering", JSONObject().put("callId", "t1"))
         t = texts(root); snap(root, "2-connecting"); assertTrue(t.toString(), t.contains("Connecting…"))
         s.onPageCall("call:connected", JSONObject().put("callId", "t1"))
         org.robolectric.shadows.ShadowLooper.idleMainLooper(1, java.util.concurrent.TimeUnit.SECONDS)
         t = texts(root); snap(root, "3-active"); assertTrue(t.toString(), t.any { Regex("^\\d+:\\d\\d$").matches(it) })
         findClickable(root, "Phone")!!.performClick(); t = texts(root); assertTrue(t.contains("Speaker")); snap(root, "4-speaker")
-        fun findDesc(v: View, d: String): View? {
-            if (v.contentDescription == d) return v
-            if (v is ViewGroup) for (i in 0 until v.childCount) findDesc(v.getChildAt(i), d)?.let { return it }
-            return null
-        }
         findDesc(root, "Minimize call")!!.performClick()
         t = texts(root); assertTrue("minimized bar shows the peer and Tap to return", t.any { it.contains("Ada Lovelace") && it.contains("Tap to return") })
         assertTrue("controls hidden while minimized", !t.contains("End call"))

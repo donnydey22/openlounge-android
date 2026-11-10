@@ -97,6 +97,13 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     private boolean migrating = false;
     // 0.3.1 calls: the live activity (for notification Hang up / Decline fallback) + call audio state
     private static WeakReference<MainActivity> live = new WeakReference<>(null);
+
+    /** Read-only: existing page call-screen presence (data-presence), if the WebView is up. */
+    static void peekLivePresence(android.webkit.ValueCallback<String> done) {
+        MainActivity a = live.get();
+        if (a == null || a.webView == null) { done.onReceiveValue(null); return; }
+        a.webView.evaluateJavascript(CallPresence.PEEK_JS, done);
+    }
     private volatile boolean pageLoaded = false;
     /** Main activity is resumed; only then may an FCM payload be exposed to the already-visible WebView. */
     private volatile boolean activityForeground = false;
@@ -1110,6 +1117,9 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                     CallMediaCoordinator.handle(new JSONObject().put("op", "camera").put("on", on).put("facing", facing).toString(),
                             (ok, r, e) -> { done.invoke(ok); return kotlin.Unit.INSTANCE; });
                 } catch (Exception ignored) { done.invoke(false); }
+            }
+            @Override public void peekCallPresence(kotlin.jvm.functions.Function1<? super String, kotlin.Unit> done) {
+                peekLivePresence(v -> done.invoke(v));
             }
         });
     }
