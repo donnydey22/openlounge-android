@@ -65,9 +65,18 @@ final class CallNotifications {
 
     /** Handles an FCM call_incoming. Returns false if it was ignored (expired / malformed). */
     static boolean onIncoming(Context ctx, Map<String, String> d) {
+        return onIncoming(ctx, d, System.currentTimeMillis());
+    }
+
+    /** ol-call-wake: [receivedAt] = when the push arrived; the ring window comes from server timestamps only. */
+    static boolean onIncoming(Context ctx, Map<String, String> d, long receivedAt) {
         String callId = d.get("callId");
         if (callId == null || !callId.matches(CallApi.CALL_ID_RE)) return false;
-        long expiresAt = parseLong(d.get("expiresAt"), System.currentTimeMillis() + 45_000);
+        // Stale check on server time (cut: the phone-clock check `expiresAt <= now`): the server's window
+        // expiresAt − sentAt, counted from arrival. FCM's 30 s TTL bounds how late a ring push can arrive, and the
+        // push-woken socket asks the server before ringing (PushWake).
+        long expiresAt = PushWakePolicy.localDeadline(receivedAt, parseLong(d.get("expiresAt"), 0), parseLong(d.get("sentAt"), 0));
+        if (expiresAt <= 0) expiresAt = receivedAt + 45_000;
         if (expiresAt <= System.currentTimeMillis()) return false; // stale push: never ring for an old call
         String name = d.get("callerName");
         if (name == null || name.trim().isEmpty()) name = ctx.getString(R.string.app_name);
@@ -139,6 +148,7 @@ final class CallNotifications {
 
     static void cancel(Context ctx, String callId) {
         if (callId == null) return;
+        PushWake.release(callId); // ring over here: no push-wake ring for this call any more
         NotificationManagerCompat.from(ctx).cancel(callId, NOTIF_ID);
         IncomingCallActivity.dismiss(callId);
     }

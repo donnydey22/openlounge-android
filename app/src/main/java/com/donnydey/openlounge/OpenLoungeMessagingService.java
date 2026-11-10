@@ -39,8 +39,9 @@ public class OpenLoungeMessagingService extends FirebaseMessagingService {
         // 0.3.1 native call ringing (NATIVE_SPEC.md §1/§4)
         String type = d.get("type");
         if ("call_incoming".equals(type)) {
-            CallMediaCoordinator.onPushWake();
-            CallNotifications.onIncoming(this, d);
+            // ol-call-wake: wake → raw WebSocket on the stored login → "received" → ring once the server confirms
+            // (or after ~2 s without confirmation). Dedupe by call id inside PushWake.
+            PushWake.onPush(this, d);
             return;
         }
         if ("call_cancel".equals(type)) {

@@ -3,7 +3,6 @@ package com.donnydey.openlounge
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
-import com.donnydey.openlounge.signal.CallSignalClient
 import org.json.JSONObject
 
 /**
@@ -142,23 +141,9 @@ object CallMediaCoordinator {
         }
     }
 
-    // ---- native call-signal socket (ring / accept without the WebView)
-    @Volatile private var signal: CallSignalClient? = null
-    @Volatile private var creds: Pair<String, String>? = null // in-memory only; never logged
-    private fun connectSignal() { val (u, t) = creds ?: return; signal?.close()
-        signal = CallSignalClient(u, t).also { sc ->
-            sc.onMessage = { m -> main.post { onSignal(m) } }
-            sc.onUiEvent = { ty, m -> host?.emit(JSONObject(m.toString()).put("type", ty).toString()) }
-            sc.connect() } }
-    /** FCM call_incoming woke us: reopen the signal socket so call-signal re-delivers the ring. */
-    @JvmStatic fun onPushWake() = main.post { connectSignal() }
-
-    @JvmStatic fun ensureSignalCreds(ctx: Context): Boolean {
-        val token = CallApi.freshAccessToken(ctx) ?: return false
-        val ws = CallApi.origin(ctx).replace(Regex("^http"), "ws") + "/ws"
-        creds = ws to token
-        return true
-    }
+    // ol-call-wake cut: the native call-signal socket (CallSignalClient) is gone. It sent {"t":"call:…"} frames and a
+    // ?token= query that the server's /ws never accepted (server/ws.ts dispatch: no string `ev` → rejected; auth is
+    // session:resume), so it never rang or answered anything. Push wake is PushWake; accept stays on the page.
 
     /** Answer from IncomingCallActivity / Telecom — no /call/id?accept=1 WebView path. */
     @JvmStatic @JvmOverloads fun acceptIncoming(ctx: Context, callId: String, video: Boolean = false): Boolean {
@@ -169,17 +154,13 @@ object CallMediaCoordinator {
             CallDiskLog.mark("accept-native-fail", "permission")
             return false
         }
-        if (!ensureSignalCreds(ctx)) { CallDiskLog.mark("accept-native-fail", "no token"); return false }
         main.post {
-            connectSignal()
-            val ok = signal?.accept(callId) == true
-            CallDiskLog.mark("accept-native", "callId=$callId ok=$ok")
+            CallDiskLog.mark("accept-native", "callId=$callId")
             host?.emit(JSONObject().put("type", "call:answering").put("callId", callId).toString())
             this.callId = callId
         }
         return true
     }
-    private fun onSignal(m: JSONObject) { if (m.optString("t") == "call:ended") closeAll("signal-call-ended") }
 
     private fun ensurePerms(action: OlCallPermissions.Action, then: (Boolean) -> Unit) {
         main.post {

@@ -94,6 +94,11 @@
             android:name=".CallService"
             android:exported="false"
             android:foregroundServiceType="phoneCall|microphone" />
+        <!-- ol-call-wake: holds the process a few seconds while a push-woken ring confirms with the server -->
+        <service
+            android:name=".PushWakeService"
+            android:exported="false"
+            android:foregroundServiceType="phoneCall" />
         <service
             android:name=".OpenLoungeMessagingService"
             android:exported="false">

@@ -32,7 +32,7 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 
 /**
- * FSI trampoline (Claude native-UI first cut): lock-screen ring chrome. Accept → native CallSignalClient
+ * FSI trampoline (Claude native-UI first cut): lock-screen ring chrome. Accept → (CallSignalClient cut, ol-call-wake)
  * call:accept, then forward into CallActivity (active phase, no WebView call paint). Decline → POST
  * /api/calls/<id>/decline. Finishes on call_cancel and at expiresAt.
  */
