@@ -39,6 +39,19 @@ object NativeCallVideo {
         listOfNotNull(olRemote, olLocal).forEach { v -> (v.parent as? ViewGroup)?.removeView(v) }
         olRemote = null; olLocal = null
     }
+    /** Self-view frame (px, top-left in the parent) with the PiP's rounded corners; slot and renderer move together. */
+    fun placeLocal(x: Int, y: Int, w: Int, h: Int, radius: Float) {
+        listOfNotNull(localSlot, olLocal).forEach { v ->
+            val lp = (v.layoutParams as? android.widget.FrameLayout.LayoutParams) ?: return@forEach
+            lp.width = w; lp.height = h; lp.gravity = android.view.Gravity.TOP or android.view.Gravity.START
+            lp.setMargins(0, 0, 0, 0); v.layoutParams = lp
+            v.translationX = x.toFloat(); v.translationY = y.toFloat()
+            v.outlineProvider = object : android.view.ViewOutlineProvider() {
+                override fun getOutline(view: View, o: android.graphics.Outline) { o.setRoundRect(0, 0, view.width, view.height, radius) }
+            }
+            v.clipToOutline = true
+        }
+    }
     /** MainActivity.nativeCallVideo: show/hide the current call's renderer pair (slots stay hidden). */
     @JvmStatic fun show(on: Boolean) {
         val v = if (on) View.VISIBLE else View.GONE

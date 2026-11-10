@@ -36,6 +36,26 @@ import org.json.JSONObject
  * Kill switch: Prefs native_call_ui.
  */
 class NativeCallScreen(private val act: Activity, private val root: FrameLayout, private val actions: Actions) {
+    companion object {
+        /** Engine-branch "ringing acknowledged" page types (t5456). */
+        val RINGING_ACK = setOf("call:ringing")
+        /** olcall onConnected, relayed by MainActivity.emit: media up, but not proof of an answer. */
+        const val MEDIA_NATIVE = "call:media-native"
+        /** Engine-branch "media flowing" page types (posted after the answer), plus the native relay. */
+        val MEDIA_FLOWING = setOf("call:mediaFlowing", MEDIA_NATIVE)
+        private val mediaUp = mutableSetOf<String>()
+        private val screens = java.util.Collections.newSetFromMap(java.util.WeakHashMap<NativeCallScreen, Boolean>())
+
+        /** Main thread. Native media for [id] is flowing: tell every call screen (MainActivity and CallActivity). */
+        @JvmStatic fun onNativeMediaFlowing(id: String) {
+            if (id.isEmpty()) return
+            mediaUp.add(id)
+            screens.toList().forEach { it.onPageCall(MEDIA_NATIVE, JSONObject().put("callId", id)) }
+        }
+        @JvmStatic fun onNativeMediaEnded(id: String) { mediaUp.remove(id) }
+    }
+    init { screens.add(this) }
+
     interface Actions {
         fun pageCall(detailJson: String): Boolean
         fun speaker(on: Boolean)
@@ -79,15 +99,28 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
             "call:incoming" -> if (id.isNotEmpty()) { incoming = id to m.optString("name", ""); incomingPhoto = id to m.optString("photo", ""); if (CallPresence.hasField(m)) incomingPresence = id to CallPresence.fromMessage(m) }
             "call:outgoing" -> if (id.isNotEmpty()) { begin(id, m.optString("name", ""), m.optBoolean("video"), m.optString("photo", ""), if (CallPresence.hasField(m)) CallPresence.fromMessage(m) else null); set(NativeCallFlow.State.WAITING) }
             "call:answering" -> if (id.isNotEmpty()) { if (callId != id) begin(id, m.optString("name", "").ifEmpty { incoming?.takeIf { it.first == id }?.second.orEmpty() }, m.optBoolean("video"), m.optString("photo", "").ifEmpty { incomingPhoto?.takeIf { it.first == id }?.second.orEmpty() }, if (CallPresence.hasField(m)) CallPresence.fromMessage(m) else incomingPresence?.takeIf { it.first == id }?.second); set(NativeCallFlow.State.WAIT_INIT) }
-            "call:connected" -> if (view != null && (id.isEmpty() || id == callId)) {
+            // t5456 engine branch (ol-call-fixes): the callee's phone acknowledged the ring -> "Ringing…",
+            // which stays until media flows.
+            in RINGING_ACK -> if (view != null && (id.isEmpty() || id == callId) && !live) { ringingAck = true; render() }
+            // Server-confirmed answer (call:answered; call:connected on engines that do not post it yet). Not live
+            // on its own: the pre-answer card (avatar, name, Calling…/Ringing…, one Cancel) stays until media flows.
+            "call:answered", "call:connected" -> if (view != null && (id.isEmpty() || id == callId)) {
+                answered = true
                 video = video || m.optBoolean("video")
-                set(NativeCallFlow.State.ESTABLISHED)
-                // Native-UI first cut: never hide for WebView. Stay visible; avatar/status cover until native tiles up.
-                if (hidden) { hidden = false; view?.visibility = View.VISIBLE }
+                goLiveIfReady()
+            }
+            // Media flowing (engine mediaFlowing state, or olcall onConnected via MainActivity.emit). After answer it
+            // switches to the full row (Video/Speaker/Mute/End) and starts the timer.
+            in MEDIA_FLOWING -> if (view != null && (id.isEmpty() || id == callId)) {
+                media = true
+                if (type != MEDIA_NATIVE) answered = true // the engine posts mediaFlowing only after the answer
+                goLiveIfReady()
             }
             "call:ended" -> if (id.isEmpty() || id == callId) {
+                if (id.isNotEmpty()) mediaUp.remove(id)
                 val text = CallPresence.messageFromEnd(m)
                 if (CallPresence.isFailure(m.optString("reason", ""), text)) showFailed(CallPresence.failureText(text))
+                else if (live && establishedAt > 0L && view != null) showEndCard()
                 else { set(NativeCallFlow.State.ENDED); dismiss() }
             }
             "call:muted" -> { muted = m.optBoolean("muted"); render() }
@@ -99,12 +132,27 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     /** MainActivity.nativeCallVideo: native tiles are up (remote full screen, self-view PiP) -> transparent screen. */
     fun onNativeVideo(on: Boolean) { nativeVideo = on; if (on) { video = true; camOn = true; if (hidden) { hidden = false; view?.visibility = View.VISIBLE } }; render() }
     private var hidden = false
+    /** Server answered (call:answered, or call:connected on engines that do not post it yet). */
+    private var answered = false
+    /** Media flowing (engine mediaFlowing / olcall onConnected). */
+    private var media = false
+    /** t5456: full call UI (row, timer, video, minimize) only once media flows after the answer. */
+    private val live get() = answered && media
+
+    private fun goLiveIfReady() {
+        if (!live) { render(); return }
+        set(NativeCallFlow.State.ESTABLISHED)
+        // Native-UI first cut: never hide for WebView. Stay visible; avatar/status cover until native tiles up.
+        if (hidden) { hidden = false; view?.visibility = View.VISIBLE }
+    }
+    private var ringingAck = false
+    private lateinit var endBtn: Btn
     private var incoming: Pair<String, String>? = null
     private var incomingPhoto: Pair<String, String>? = null
     private var incomingPresence: Pair<String, String?>? = null
 
     private fun begin(id: String, peer: String, v: Boolean, photo: String = "", presence: String? = null) {
-        dismiss(); callId = id; video = v; camOn = v; muted = false; speakerOn = v; facing = "user"; failed = false; failedText = null
+        dismiss(); callId = id; video = v; camOn = v; muted = false; speakerOn = v; facing = "user"; failed = false; failedText = null; answered = false; media = id in mediaUp; ringingAck = false
         if (!Prefs.nativeCallUi(act)) { callId = null; return }
         build(); name.text = peer.ifEmpty { act.getString(R.string.app_name) }; loadPhoto(id, photo)
         applyPresence(presence ?: incomingPresence?.takeIf { it.first == id }?.second)
@@ -130,20 +178,31 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         render()
     }
 
-    private fun dismiss() { ui.removeCallbacks(tick); ui.removeCallbacks(hideCtl); ui.removeCallbacks(presenceTick); view?.let { root.removeView(it) }; view = null; state = null; callId = null; hidden = false; establishedAt = 0L; nativeVideo = false; minimized = false; failed = false; failedText = null }
+    private val endLinger = Runnable { dismiss() }
+    private fun showEndCard() {
+        endedSecs = (SystemClock.elapsedRealtime() - establishedAt) / 1000
+        endedCard = true; minimized = false; nativeVideo = false; hidden = false
+        ui.removeCallbacks(tick)
+        state = NativeCallFlow.State.ENDED
+        view?.visibility = View.VISIBLE
+        render()
+        ui.postDelayed(endLinger, 1800) // web engine.ts:93 ENDED_LINGER_MS
+    }
+
+    private fun dismiss() { ui.removeCallbacks(endLinger); endedCard = false; ui.removeCallbacks(tick); ui.removeCallbacks(hideCtl); ui.removeCallbacks(presenceTick); view?.let { root.removeView(it) }; view = null; state = null; callId = null; hidden = false; establishedAt = 0L; nativeVideo = false; minimized = false; failed = false; failedText = null }
 
     private fun dp(v: Int) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), act.resources.displayMetrics).toInt()
 
     // Open Lounge call screen look (web CallOverlay.tsx / calls.module.css / Avatar.tsx): #0b1220 stage + shade,
     // xl initials avatar, 28sp semibold name, 15sp white/80 status, RoundBtn 56dp white/15 (active = white, zinc-900
-    // icon), End call 56dp red-500, 12sp white/85 label under each button. lucide icons rendered to ol_call_*.png.
+    // icon), End call 56dp red-500, 12sp white/85 label under each button. lucide vectors ol_call_* (same set as iOS).
     private class Btn(val box: LinearLayout, val disc: FrameLayout, val icon: android.widget.ImageView, val label: TextView)
     private fun btn(danger: Boolean, click: () -> Unit): Btn {
         val size = dp(56)
         val disc = FrameLayout(act).apply { background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(if (danger) 0xFFEF4444.toInt() else 0x26FFFFFF) } }
         val icon = android.widget.ImageView(act)
         disc.addView(icon, FrameLayout.LayoutParams(dp(24), dp(24), Gravity.CENTER))
-        val label = TextView(act).apply { setTextColor(0xD9FFFFFF.toInt()); textSize = 12f; typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL); gravity = Gravity.CENTER; maxLines = 1 }
+        val label = TextView(act).apply { setTextColor(0xD9FFFFFF.toInt()); textSize = 12f; typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL); gravity = Gravity.CENTER; maxLines = 1; includeFontPadding = false }
         val box = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setOnClickListener { click() } }
         box.addView(disc, LinearLayout.LayoutParams(size, size))
         box.addView(label, LinearLayout.LayoutParams(dp(76), -2).apply { topMargin = dp(6) })
@@ -196,7 +255,8 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         if (callId != id || view == null) return
         CallAvatar.setPhoto(photoView, bmp)
         avatar.text = ""
-        bgPhoto.setImageBitmap(bmp)
+        // Same pixels on every Android version and in Robolectric (software pre-blur, no RenderEffect).
+        CallBackdrop.attach(bgPhoto, bmp)
         bgPhoto.alpha = 1f
         // Photo present: first-design backdrop is the dark blurred portrait, not the indigo blobs.
         blobs.forEach { it.visibility = android.view.View.GONE }
@@ -225,12 +285,20 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         blobs.add(blob(0xFF64748B.toInt(), Gravity.TOP or Gravity.START, 0.18f, 0.14f))
         blobs.add(blob(0xFF6366F1.toInt(), Gravity.BOTTOM or Gravity.END, -0.16f, -0.12f))
         blobs.forEach { bg.addView(it) }
-        bgPhoto = android.widget.ImageView(act).apply { scaleType = android.widget.ImageView.ScaleType.CENTER_CROP; alpha = 0f; scaleX = 1.15f; scaleY = 1.15f
-            if (android.os.Build.VERSION.SDK_INT >= 31) setRenderEffect(android.graphics.RenderEffect.createBlurEffect(dp(36).toFloat(), dp(36).toFloat(), android.graphics.Shader.TileMode.CLAMP))
-            setColorFilter(0x73000000) }
+        // iOS CallBackdrop parameters (1.15× zoom, σ 36, saturation 1.3, brightness −0.15) via CallBackdrop.attach.
+        bgPhoto = android.widget.ImageView(act).apply { scaleType = android.widget.ImageView.ScaleType.FIT_XY; alpha = 0f }
         bg.addView(bgPhoto, FrameLayout.LayoutParams(-1, -1))
         v.addView(bg, FrameLayout.LayoutParams(-1, -1))
         v.addView(View(act).apply { background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0x40000000, 0x0D000000, 0x8C000000.toInt())) }, FrameLayout.LayoutParams(-1, -1))
+        // Video stage: controls sit over the full-bleed remote video on Telegram's two 160dp shadows
+        // (DrKLO 3de37c8 VoIPFragment.java:917-923: top black 40% -> clear, bottom clear -> black 50%).
+        topShadow = View(act).apply { background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0x66000000, Color.TRANSPARENT)); visibility = View.GONE }
+        bottomShadow = View(act).apply { background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(Color.TRANSPARENT, 0x80000000.toInt())); visibility = View.GONE }
+        v.addView(topShadow, FrameLayout.LayoutParams(-1, dp(160), Gravity.TOP))
+        v.addView(bottomShadow, FrameLayout.LayoutParams(-1, dp(160), Gravity.BOTTOM))
+        // Self-view PiP touch target (the renderer is a SurfaceView under this window, NativeCallVideo.placeLocal).
+        pipTouch = View(act).apply { contentDescription = "Self view"; visibility = View.GONE; setOnTouchListener(PipDrag()) }
+        v.addView(pipTouch, FrameLayout.LayoutParams(dp(CallPip.WIDTH), dp(CallPip.HEIGHT), Gravity.TOP or Gravity.START))
         top = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding(dp(24), 0, dp(24), 0) }
         avatar = TextView(act).apply { setTextColor(Color.WHITE); textSize = 30f; gravity = Gravity.CENTER; typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
             }
@@ -242,8 +310,8 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         photoView = android.widget.ImageView(act).apply { scaleType = android.widget.ImageView.ScaleType.CENTER_CROP; alpha = 0f }
         avatarBox.addView(avatar, FrameLayout.LayoutParams(-1, -1)); avatarBox.addView(photoView, FrameLayout.LayoutParams(-1, -1))
         name = TextView(act).apply { setTextColor(Color.WHITE); textSize = 28f; gravity = Gravity.CENTER; maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
-            typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.BOLD); letterSpacing = -0.01f }
-        status = TextView(act).apply { setTextColor(0xCCFFFFFF.toInt()); textSize = 15f; gravity = Gravity.CENTER; fontFeatureSettings = "tnum" }
+            typeface = CallChrome.semibold(); letterSpacing = -0.01f; includeFontPadding = false }
+        status = TextView(act).apply { setTextColor(0xCCFFFFFF.toInt()); textSize = 15f; gravity = Gravity.CENTER; fontFeatureSettings = "tnum"; includeFontPadding = false }
         val ringBox = FrameLayout(act).apply { clipChildren = false }
         rings.clear()
         repeat(3) { i -> val rv = View(act).apply { background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setStroke(dp(2), 0x59FFFFFF) }; alpha = 0f }
@@ -258,7 +326,9 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         top.clipChildren = false; v.clipChildren = false
         top.addView(ringBox, LinearLayout.LayoutParams(dp(112), dp(112)).apply { bottomMargin = dp(12) })
         top.addView(name, LinearLayout.LayoutParams(-1, -2)); top.addView(status, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
-        v.addView(top, FrameLayout.LayoutParams(-1, -2, Gravity.CENTER).apply { bottomMargin = dp(80) })
+        // Centered between the 56dp top bar and the bottom row (SwiftUI CallScreen / IncomingCallScreen).
+        // FrameLayout CENTER offsets by (topMargin - bottomMargin), so these put the block in the middle of the space between them.
+        v.addView(top, FrameLayout.LayoutParams(-1, -2, Gravity.CENTER).apply { topMargin = 0; bottomMargin = dp(CallChrome.CENTER_LIFT) })
         val row = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER or Gravity.BOTTOM; setPadding(dp(16), 0, dp(16), 0) }
         bFirst = btn(false) { speakerOn = !speakerOn; actions.speaker(speakerOn); render() }
         bFlip = btn(false) { facing = if (facing == "user") "environment" else "user"; actions.camera(true, facing) { } }
@@ -270,9 +340,9 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         }
         bMic = btn(false) { actions.pageCall(JSONObject().put("type", "call:mute").put("muted", !muted).toString()) }
         val end = btn(true) { actions.pageCall(JSONObject().put("type", "call:hangup").toString()) }
-        end.label.text = "End call"; end.icon.setImageResource(R.drawable.ol_call_phone_off)
+        end.label.text = "End call"; end.icon.setImageResource(R.drawable.ol_call_end); endBtn = end
         row.addView(bFirst.box); row.addView(bFlip.box); row.addView(bVid.box); row.addView(bMic.box); row.addView(end.box)
-        v.addView(row, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply { bottomMargin = dp(40) })
+        v.addView(row, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply { bottomMargin = dp(CallChrome.ROW_BOTTOM) })
         this.row = row
         // minimize (chevron, first UI) — UI-only: collapses to the green top bar; does not hang up
         minBtn = FrameLayout(act).apply {
@@ -281,7 +351,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
             contentDescription = "Minimize call"
         }
         minBtn.addView(android.widget.ImageView(act).apply { setImageResource(R.drawable.ol_call_chevron_down); setColorFilter(Color.WHITE) }, FrameLayout.LayoutParams(dp(24), dp(24), Gravity.CENTER))
-        v.addView(minBtn, FrameLayout.LayoutParams(dp(40), dp(40), Gravity.TOP or Gravity.START).apply { topMargin = dp(16); leftMargin = dp(12) })
+        v.addView(minBtn, FrameLayout.LayoutParams(dp(40), dp(40), Gravity.TOP or Gravity.START).apply { topMargin = dp(8); leftMargin = dp(12) })
         closeBtn = FrameLayout(act).apply {
             background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0x1AFFFFFF) }
             setOnClickListener { dismiss() }
@@ -289,16 +359,17 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
             visibility = View.GONE
         }
         closeBtn.addView(android.widget.ImageView(act).apply { setImageResource(R.drawable.ol_call_close); setColorFilter(Color.WHITE) }, FrameLayout.LayoutParams(dp(20), dp(20), Gravity.CENTER))
-        v.addView(closeBtn, FrameLayout.LayoutParams(dp(40), dp(40), Gravity.TOP or Gravity.END).apply { topMargin = dp(16); rightMargin = dp(12) })
+        v.addView(closeBtn, FrameLayout.LayoutParams(dp(40), dp(40), Gravity.TOP or Gravity.END).apply { topMargin = dp(8); rightMargin = dp(12) })
         failBanner = TextView(act).apply {
             setTextColor(Color.WHITE)
             textSize = 12f
             gravity = Gravity.CENTER
             background = GradientDrawable().apply { setColor(0x99000000.toInt()); cornerRadius = dp(16).toFloat() }
             setPadding(dp(12), dp(6), dp(12), dp(6))
+            maxWidth = dp(260); includeFontPadding = false; setLineSpacing(0f, 1.15f)
             visibility = View.GONE
         }
-        v.addView(failBanner, FrameLayout.LayoutParams(dp(280), -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = dp(72) })
+        v.addView(failBanner, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = dp(64) })
         miniBar = LinearLayout(act).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -308,7 +379,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         }
         miniDot = View(act).apply { background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.WHITE) } }
         miniLabel = TextView(act).apply {
-            setTextColor(Color.WHITE); textSize = 13f; typeface = android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.BOLD)
+            setTextColor(Color.WHITE); textSize = 13f; typeface = CallChrome.semibold()
             gravity = Gravity.CENTER; maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
         }
         miniBar.addView(miniDot, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(8) })
@@ -319,6 +390,64 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     }
 
     private lateinit var row: LinearLayout
+    private lateinit var topShadow: View
+    private lateinit var bottomShadow: View
+    private lateinit var pipTouch: View
+    private var pipCorner = CallPip.Corner.BOTTOM_RIGHT
+    /** Normal hang-up after a live call: the end card (avatar, name, "Call ended · m:ss"), web ENDED_LINGER_MS. */
+    private var endedCard = false
+    private var endedSecs = 0L
+
+    private fun pipInsets(): CallPip.Insets {
+        val d = act.resources.displayMetrics.density
+        return CallPip.insets(showCtl, 0f, CallChrome.ROW_RESERVE * d, d)
+    }
+
+    /** Put the PiP (touch target + renderer) in its corner slot. */
+    private fun placePip(animate: Boolean) {
+        val v = view ?: return
+        if (v.width == 0) { v.post { placePip(false) }; return }
+        val pw = dp(CallPip.WIDTH).toFloat(); val ph = dp(CallPip.HEIGHT).toFloat()
+        val (x, y) = CallPip.origin(pipCorner, v.width.toFloat(), v.height.toFloat(), pw, ph, pipInsets())
+        if (animate) pipTouch.animate().translationX(x).translationY(y).setDuration(150).setUpdateListener { syncRenderer() }.start()
+        else { pipTouch.translationX = x; pipTouch.translationY = y; syncRenderer() }
+    }
+    private fun syncRenderer() {
+        NativeCallVideo.placeLocal(pipTouch.translationX.toInt(), pipTouch.translationY.toInt(), dp(CallPip.WIDTH), dp(CallPip.HEIGHT), dp(CallPip.RADIUS).toFloat())
+    }
+
+    /** Drag the self-view anywhere; on release snap to the corner Telegram's fling projection picks. */
+    private inner class PipDrag : View.OnTouchListener {
+        private var vt: android.view.VelocityTracker? = null
+        private var sx = 0f; private var sy = 0f; private var tx = 0f; private var ty = 0f
+        override fun onTouch(t: View, e: android.view.MotionEvent): Boolean {
+            when (e.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    t.animate().cancel(); vt?.recycle(); vt = android.view.VelocityTracker.obtain()
+                    sx = e.rawX; sy = e.rawY; tx = t.translationX; ty = t.translationY
+                }
+                android.view.MotionEvent.ACTION_MOVE -> {
+                    t.translationX = tx + e.rawX - sx; t.translationY = ty + e.rawY - sy; syncRenderer()
+                }
+                android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
+                    vt?.computeCurrentVelocity(1000)
+                    val v = view
+                    if (v != null) pipCorner = CallPip.snap(t.translationX + t.width / 2f, t.translationY + t.height / 2f,
+                        vt?.xVelocity ?: 0f, vt?.yVelocity ?: 0f, v.width.toFloat(), v.height.toFloat(), pipInsets())
+                    vt?.recycle(); vt = null
+                    placePip(true)
+                }
+            }
+            vt?.let { val m = android.view.MotionEvent.obtain(e); m.setLocation(e.rawX, e.rawY); it.addMovement(m); m.recycle() }
+            return true
+        }
+    }
+    /** Test hook: release the PiP at centre (cx, cy) with velocity (vx, vy) px/s. */
+    internal fun releasePipForTest(cx: Float, cy: Float, vx: Float, vy: Float) {
+        val v = view ?: return
+        pipCorner = CallPip.snap(cx, cy, vx, vy, v.width.toFloat(), v.height.toFloat(), pipInsets()); placePip(false)
+    }
+    internal val pipCornerForTest get() = pipCorner
     private lateinit var minBtn: FrameLayout
     private lateinit var closeBtn: FrameLayout
     private lateinit var failBanner: TextView
@@ -377,20 +506,26 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
             v.layoutParams = lp
         }
         v.isClickable = true
-        v.setBackgroundColor(if (nativeVideo) Color.TRANSPARENT else 0xFF0B1220.toInt())
+        v.setBackgroundColor(if (nativeVideo && live && !failed) Color.TRANSPARENT else 0xFF0B1220.toInt())
         for (i in 0 until v.childCount) {
             val c = v.getChildAt(i)
             c.visibility = if (c === miniBar) View.GONE else View.VISIBLE
         }
-        bg.visibility = if (nativeVideo && !failed) View.GONE else View.VISIBLE
-        val hide = nativeVideo && !showCtl && !failed
-        row.visibility = if (hide || failed) View.GONE else View.VISIBLE
-        minBtn.visibility = if (hide || incomingOrEnded) View.GONE else View.VISIBLE
-        closeBtn.visibility = if (failed) View.VISIBLE else View.GONE
+        val stage = nativeVideo && !failed && live
+        bg.visibility = if (stage) View.GONE else View.VISIBLE
+        val hide = stage && !showCtl
+        topShadow.visibility = if (stage && !hide) View.VISIBLE else View.GONE
+        bottomShadow.visibility = topShadow.visibility
+        pipTouch.visibility = if (stage) View.VISIBLE else View.GONE
+        if (stage) placePip(false)
+        row.visibility = if (hide || failed || endedCard) View.GONE else View.VISIBLE
+        minBtn.visibility = if (hide || incomingOrEnded || !live) View.GONE else View.VISIBLE
+        closeBtn.visibility = if (failed || endedCard) View.VISIBLE else View.GONE
         failBanner.visibility = if (failed) View.VISIBLE else View.GONE
         top.visibility = if (hide) View.INVISIBLE else View.VISIBLE
-        if (nativeVideo) NativeCallVideo.show(true)
-        if (nativeVideo && showCtl) {
+        // Pre-answer card is opaque: tiles stay hidden (engine keeps running) until the answered event.
+        if (nativeVideo) NativeCallVideo.show(stage)
+        if (stage && showCtl) {
             ui.removeCallbacks(hideCtl)
             ui.postDelayed(hideCtl, 4000)
         }
@@ -405,29 +540,41 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
 
     private fun render() {
         val v = view ?: return
-        v.setBackgroundColor(if (nativeVideo) Color.TRANSPARENT else 0xFF0B1220.toInt())
-        val videoStage = nativeVideo && !failed
+        v.setBackgroundColor(if (nativeVideo && live && !failed) Color.TRANSPARENT else 0xFF0B1220.toInt())
+        val videoStage = nativeVideo && !failed && live
         avatarBox.visibility = if (videoStage) View.GONE else View.VISIBLE
         bg.visibility = if (videoStage) View.GONE else View.VISIBLE
         (avatarBox.parent as View).visibility = avatarBox.visibility
         val ringing = state == NativeCallFlow.State.WAITING && !failed
         rings.forEachIndexed { i, rv -> if (ringing && rv.tag == null) { rv.tag = 1; pulse(rv, i * 800L) } else if (!ringing) { rv.tag = null; rv.animate().cancel(); rv.alpha = 0f } }
         name.textSize = if (videoStage) 20f else 28f
-        (top.layoutParams as FrameLayout.LayoutParams).apply { gravity = if (videoStage) Gravity.TOP else Gravity.CENTER; topMargin = if (videoStage) dp(64) else 0; bottomMargin = if (videoStage) 0 else dp(80) }
+        (top.layoutParams as FrameLayout.LayoutParams).apply { gravity = if (videoStage) Gravity.TOP else Gravity.CENTER; topMargin = if (videoStage) dp(64) else 0; bottomMargin = if (videoStage) 0 else dp(CallChrome.CENTER_LIFT) }
         top.requestLayout()
         if (photoView.alpha < 1f) avatar.text = initials(name.text?.toString().orEmpty())
         if (failed) {
             status.text = failedText ?: CallPresence.FAIL_MSG
             failBanner.text = failedText ?: CallPresence.FAIL_MSG
+        } else if (endedCard) {
+            // end card: same structure as the calling screen (avatar, name, status), status = duration
+            status.text = "Call ended · " + NativeCallFlow.timer(endedSecs)
         } else if (state != NativeCallFlow.State.ESTABLISHED) {
-            status.text = NativeCallFlow.statusText(state)
+            status.text = if (!live && ringingAck && state == NativeCallFlow.State.WAITING) "Ringing…" else NativeCallFlow.statusText(state)
+        } else if (establishedAt > 0L) {
+            // answered: the timer shows at once (0:00), not only from the first tick
+            status.text = NativeCallFlow.timer((SystemClock.elapsedRealtime() - establishedAt) / 1000)
         }
         // First UI always offers Video (audio→video upgrade). Flip is shown once the local camera is on.
         // "Camera" (not "Stop video") keeps five even 56dp labeled circles on one row.
-        bFlip.box.visibility = if (camOn && !failed) View.VISIBLE else View.GONE
-        bFlip.set("Flip", R.drawable.ol_call_refresh_cw)
-        bFirst.set(if (speakerOn) "Speaker" else "Phone", if (speakerOn) R.drawable.ol_call_volume2 else R.drawable.ol_call_ear, active = speakerOn)
-        bVid.box.visibility = if (failed) View.GONE else View.VISIBLE
+        // Pre-answer (calling / ringing / connecting): one red Cancel. Video, Speaker, Mute, End after answered.
+        val pre = !live && !failed && !endedCard
+        endBtn.label.text = if (pre) "Cancel" else "End call"
+        bFirst.box.visibility = if (pre) View.GONE else View.VISIBLE
+        bMic.box.visibility = if (pre) View.GONE else View.VISIBLE
+        bFlip.box.visibility = if (camOn && !failed && !pre) View.VISIBLE else View.GONE
+        // Same lucide glyphs as iOS (Assets.xcassets ol_call_*): speaker without/with second wave, plain hung-up handset.
+        bFlip.set("Flip", R.drawable.ol_call_flip)
+        bFirst.set(if (speakerOn) "Speaker" else "Phone", if (speakerOn) R.drawable.ol_call_speaker else R.drawable.ol_call_speaker_off, active = speakerOn)
+        bVid.box.visibility = if (failed || pre) View.GONE else View.VISIBLE
         bVid.set(if (camOn) "Camera" else "Video", if (camOn) R.drawable.ol_call_video else R.drawable.ol_call_video_off, active = camOn)
         bMic.set(if (muted) "Unmute" else "Mute", if (muted) R.drawable.ol_call_mic_off else R.drawable.ol_call_mic, active = muted)
         applyChrome(v)

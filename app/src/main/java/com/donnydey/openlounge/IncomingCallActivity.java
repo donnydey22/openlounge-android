@@ -7,8 +7,6 @@ import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
-import android.graphics.RenderEffect;
-import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
@@ -271,13 +269,9 @@ public class IncomingCallActivity extends Activity {
         for (View b : blobs) bg.addView(b);
         ImageView backdrop = new ImageView(this);
         this.backdrop = backdrop;
-        backdrop.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        backdrop.setScaleX(1.15f);
-        backdrop.setScaleY(1.15f);
+        // iOS CallBackdrop parameters (1.15× zoom, σ 36, saturation 1.3, brightness −0.15), software pre-blur via CallBackdrop.
+        backdrop.setScaleType(ImageView.ScaleType.FIT_XY);
         backdrop.setAlpha(0f);
-        if (Build.VERSION.SDK_INT >= 31) {
-            backdrop.setRenderEffect(RenderEffect.createBlurEffect(dp(36), dp(36), Shader.TileMode.CLAMP));
-        }
         bg.addView(backdrop, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         View shade = new View(this);
         shade.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, new int[]{0x40000000, 0x0D000000, 0x8C000000}));
@@ -288,9 +282,16 @@ public class IncomingCallActivity extends Activity {
         col.setOrientation(LinearLayout.VERTICAL);
         col.setGravity(Gravity.CENTER_HORIZONTAL);
         col.setClipChildren(false);
-        int padTop = dp(24) + (Build.VERSION.SDK_INT >= 35 ? 0 : 0);
-        col.setPadding(dp(24), dp(96), dp(24), dp(32));
+        // Same frame as the call screen / SwiftUI: 56dp top bar, centered block, 16dp row inset, 24dp bottom.
+        col.setPadding(0, dp(CallChrome.TOP_BAR), 0, dp(CallChrome.ROW_BOTTOM));
         root.addView(col, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        col.addView(new View(this), new LinearLayout.LayoutParams(1, 0, 1f));
+        // Edge-to-edge (target 36): keep the bar and the row inside the system bars, like SwiftUI's safe area.
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(col, (v, insets) -> {
+            androidx.core.graphics.Insets bars = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars() | androidx.core.view.WindowInsetsCompat.Type.displayCutout());
+            v.setPadding(0, dp(CallChrome.TOP_BAR) + bars.top, 0, dp(CallChrome.ROW_BOTTOM) + bars.bottom);
+            return insets;
+        });
 
         FrameLayout ringBox = new FrameLayout(this);
         ringBox.setClipChildren(false);
@@ -342,10 +343,12 @@ public class IncomingCallActivity extends Activity {
         title.setText(name);
         title.setTextColor(Color.WHITE);
         title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 28);
-        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+        title.setTypeface(CallChrome.semibold());
         title.setLetterSpacing(-0.01f);
         title.setGravity(Gravity.CENTER);
         title.setMaxLines(2);
+        title.setIncludeFontPadding(false);
+        title.setPadding(dp(24), 0, dp(24), 0);
         LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         col.addView(title, tl);
 
@@ -353,6 +356,7 @@ public class IncomingCallActivity extends Activity {
         sub.setText(getString(video ? R.string.call_incoming_video : R.string.call_incoming_audio));
         sub.setTextColor(0xCCFFFFFF);
         sub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        sub.setIncludeFontPadding(false);
         LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         sl.topMargin = dp(4);
         col.addView(sub, sl);
@@ -364,7 +368,8 @@ public class IncomingCallActivity extends Activity {
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
         row.setClipChildren(false);
-        row.addView(roundAction(getString(R.string.call_decline), 0xFFEF4444, R.drawable.ol_call_phone_off, v -> decline()), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row.setPadding(dp(CallChrome.ROW_PAD), 0, dp(CallChrome.ROW_PAD), 0);
+        row.addView(roundAction(getString(R.string.call_decline), 0xFFEF4444, R.drawable.ol_call_end, v -> decline()), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         row.addView(roundAction(getString(R.string.call_message), 0x26FFFFFF, R.drawable.ol_call_message, v -> showReplies(true)), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         row.addView(acceptButton(video), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         col.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -426,6 +431,7 @@ public class IncomingCallActivity extends Activity {
         t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         t.setGravity(Gravity.CENTER);
+        t.setIncludeFontPadding(false);
         t.setOnClickListener(onClick);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.topMargin = dp(6);
@@ -497,10 +503,11 @@ public class IncomingCallActivity extends Activity {
         t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         t.setGravity(Gravity.CENTER);
+        t.setIncludeFontPadding(false);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.topMargin = dp(6);
         b.addView(t, lp);
-        swipeHint(swipe);
+        if (runCallAnimations()) swipeHint(swipe); // looping; skipped under Robolectric like the rings
         // insert swipe hint as a sibling above the disc column by wrapping? first UI has hint above the button.
         // We add it as translation animation on a small label above: rebuild order — hint is already animated; put it in wrap top.
         TextView hint = swipe;
@@ -663,10 +670,9 @@ public class IncomingCallActivity extends Activity {
         CallAvatar.setPhoto(photo, bmp);
         if (initialView != null) initialView.setText("");
         if (backdrop != null) {
-            backdrop.setImageBitmap(bmp);
+            // Same pixels on every Android version and in Robolectric (no RenderEffect).
+            CallBackdrop.attach(backdrop, bmp);
             backdrop.setAlpha(1f);
-            if (Build.VERSION.SDK_INT >= 31) backdrop.setRenderEffect(RenderEffect.createBlurEffect(dp(36), dp(36), Shader.TileMode.CLAMP));
-            else backdrop.setAlpha(0.15f);
         }
         for (View b : blobs) b.setVisibility(View.GONE);
     }
