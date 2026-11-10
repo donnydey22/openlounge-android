@@ -20,7 +20,12 @@ object CallMediaCoordinator {
         fun nativeCallAudio(on: Boolean)
         /** show/hide the native remote + local video tiles under the (transparent) WebView */
         fun nativeCallVideo(on: Boolean) {}
+        /** t5456: first inbound media for [id]; the call screen's timer may start (MainActivity gates call:connected on it) */
+        fun callMediaFlowing(id: String) {}
     }
+    /** t5456: id of the call whose media is flowing (main thread). */
+    @JvmStatic @Volatile var mediaFlowingId: String? = null
+        private set
 
     @JvmStatic @Volatile var host: Host? = null
     private val main = Handler(Looper.getMainLooper())
@@ -119,6 +124,11 @@ object CallMediaCoordinator {
                     if (!answered) { answered = true
                         done(true, JSONObject().put("engine", "tgcalls").put("path", "olcall").put("video", wantVideo).toString(), null) }
                 },
+                onMediaFlowing = {
+                    CallDiskLog.mark("media-flowing", "callId=$id")
+                    mediaFlowingId = id
+                    host?.callMediaFlowing(id)
+                },
                 onRemoteVideo = {
                     if (!videoOn) { videoOn = true; host?.nativeCallVideo(true) }
                     host?.emit(JSONObject().put("state", "remote-video").put("callId", id).put("on", true).toString())
@@ -175,7 +185,7 @@ object CallMediaCoordinator {
     /** [cause] names the path that ended the call (t5450), so an automatic end never reads like a tap. */
     @JvmStatic @JvmOverloads fun closeAll(cause: String = "app") = main.post {
         olcall?.let { it.hangup(cause); olcall = null; NativeCallVideo.endOlcall() }
-        callId = null; muted = false; speakerPick = null; CallDiskLog.mark("close-all", "cause=$cause")
+        callId = null; muted = false; speakerPick = null; mediaFlowingId = null; CallDiskLog.mark("close-all", "cause=$cause")
         if (videoOn) { videoOn = false; host?.nativeCallVideo(false) }
         if (active) { active = false; host?.nativeCallAudio(false) }
     }

@@ -72,6 +72,11 @@ class OlCallSession(
         val audioError: String? = null,
         /** Where call audio plays: speaker / earpiece / wired / usb / bluetooth (OlAudioRouting). */
         val audioRoute: String = if (isVideoCall) "speaker" else "earpiece",
+        /**
+         * t5456: first inbound media after connect: the server's stats frame shows audio packets sent to this
+         * phone, or a remote video frame was rendered. The call timer starts on this (not on the answer/join).
+         */
+        val mediaFlowing: Boolean = false,
     )
 
     private val app = context.applicationContext
@@ -106,7 +111,11 @@ class OlCallSession(
         override fun onRemoteMedia(audioActive: Boolean, video: OlTgcallsEngine.RemoteVideo) = update {
             it.copy(remoteMuted = !audioActive, remoteVideoOn = video == OlTgcallsEngine.RemoteVideo.Active)
         }
-        override fun onStats(json: JSONObject) {}
+        override fun onStats(json: JSONObject) {
+            // Pion stats frame (every 2 s): PacketsOut[0] = audio packets the server forwarded to this phone
+            val audioToUs = json.optJSONArray("PacketsOut")?.optLong(0) ?: 0L
+            if (audioToUs > 0) main.post { markFlowing("audio-packets") }
+        }
         override fun onEnded(reason: String) { main.post { finish(reason) } }
     }
 
@@ -115,13 +124,13 @@ class OlCallSession(
     private val crumbs = crumbs
 
     // ---- t5450 video health: counting sinks in front of the renderers, 5 s stats, frozen-frame watchdog
-    private class CountingSink(private val target: VideoSink) : VideoSink {
+    private inner class CountingSink(private val side: String, private val target: VideoSink) : VideoSink {
         @Volatile var frames = 0
-        @Volatile var rotation = 0
+        @Volatile var rotation = -1
         @Volatile var size = ""
         override fun onFrame(frame: VideoFrame) {
             frames++
-            rotation = frame.rotation
+            if (frame.rotation != rotation) { rotation = frame.rotation; crumbs.event("video.rotation", "$side:${frame.rotation}") }
             size = "${frame.rotatedWidth}x${frame.rotatedHeight}"
             target.onFrame(frame)
         }
@@ -146,8 +155,11 @@ class OlCallSession(
     fun start() {
         startAudio()
         val (url, token, crumbs) = engineArgs
-        remoteCount = remote?.let { CountingSink(it) }
-        localCount = local?.let { CountingSink(it) }
+        remoteCount = remote?.let { CountingSink("remote", it) }
+        localCount = local?.let { CountingSink("local", it) }
+        // t5457 portrait capture: Telegram's own switch in the capturer (OrientationHelper.getOrientation returns 0,
+        // so Camera2Session.getFrameOrientation = SENSOR_ORIENTATION): frames stay portrait whatever the tilt.
+        org.olwrtc.OrientationHelper.cameraRotationDisabled = true
         engine = OlTgcallsEngine(url, token, crumbs, engineListener, startWithVideo = video,
             remoteVideoSink = remoteCount, localVideoSink = localCount, appIceServers = appIceServers, callLog = callLog)
         engine.start(device = Build.MODEL, os = "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
@@ -178,10 +190,28 @@ class OlCallSession(
 
     fun hangup(cause: String = "app") = engine.hangup(cause)
 
+    /** Main thread; once per call, only after media connected. */
+    private fun markFlowing(source: String) {
+        val st = state
+        if (st.mediaFlowing || st.phase != Phase.InCall) return
+        crumbs.event("call", "media-flowing:$source")
+        runCatching { callLog?.event("media_flowing", source) }
+        update { it.copy(mediaFlowing = true) }
+    }
+
+    /** t5457: freeze start: when, the last remote frame, and the media path state (relay -> Pion; no candidate pair exposed). */
+    private fun logFreeze(nowMs: Long, stalledMs: Long) {
+        val wall = System.currentTimeMillis()
+        val detail = "at=$wall:lastFrame=${wall - stalledMs}:phase=${state.phase}:path=relay-pion"
+        crumbs.event("video", "freeze:$detail", "warning")
+        runCatching { callLog?.event("video_freeze", "remote", detail) }
+    }
+
     private fun videoTick() {
         val st = state
         if (st.phase == Phase.Ended) return
         val r = remoteCount?.take() ?: 0
+        if (r > 0) markFlowing("video")
         val l = localCount?.take() ?: 0
         window[0] += r; window[1] += l; window[2]++
         if (window[2] >= 5 && (st.cameraOn || st.remoteVideoOn || window[0] + window[1] > 0)) {
@@ -193,8 +223,9 @@ class OlCallSession(
         } else if (window[2] >= 5) window = IntArray(3)
         val now = SystemClock.elapsedRealtime()
         val inCall = st.phase == Phase.InCall
-        when (val a = remoteWatch.tick(now, r, inCall && st.remoteVideoOn && remoteCount != null)) {
-            is OlStallWatch.Action.First -> { crumbs.event("video", "stall:remote:${a.stalledMs}ms:keyframe-request", "warning"); engine.requestKeyframe("stall-${a.stalledMs}ms") }
+        val stallsBefore = remoteWatch.stalls
+        when (val a = remoteWatch.tick(now, r, inCall && st.mediaFlowing && st.remoteVideoOn && remoteCount != null)) {
+            is OlStallWatch.Action.First -> { if (remoteWatch.stalls != stallsBefore) logFreeze(now, a.stalledMs); crumbs.event("video", "stall:remote:${a.stalledMs}ms:keyframe-request", "warning"); engine.requestKeyframe("stall-${a.stalledMs}ms") }
             is OlStallWatch.Action.Second -> { crumbs.event("video", "stall:remote:${a.stalledMs}ms:keyframe-request", "warning"); engine.requestKeyframe("stall-${a.stalledMs}ms") }
             is OlStallWatch.Action.Recovered -> crumbs.event("video", "recovered:remote:after=${a.stalledMs}ms")
             OlStallWatch.Action.None -> {}
@@ -238,6 +269,7 @@ class OlCallSession(
     private fun finish(reason: String) {
         if (state.phase == Phase.Ended) return
         update { it.copy(phase = Phase.Ended, endReason = reason) }
+        org.olwrtc.OrientationHelper.cameraRotationDisabled = false
         stopAudio()
         remote?.release(); local?.release()
         remote = null; local = null
