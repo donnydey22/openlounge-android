@@ -97,6 +97,27 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     private boolean migrating = false;
     // 0.3.1 calls: the live activity (for notification Hang up / Decline fallback) + call audio state
     private static WeakReference<MainActivity> live = new WeakReference<>(null);
+
+    static final String EXTRA_MINIBAR_CALL_ID = "ol_minibar_call_id";
+    static final String EXTRA_MINIBAR_NAME = "ol_minibar_name";
+    static final String EXTRA_MINIBAR_PHOTO = "ol_minibar_photo";
+    static final String EXTRA_MINIBAR_VIDEO = "ol_minibar_video";
+    private String pendingMiniId, pendingMiniName, pendingMiniPhoto;
+    private boolean pendingMiniVideo;
+
+    /** Read-only: existing page call-screen presence (data-presence), if the WebView is up. */
+    static void peekLivePresence(android.webkit.ValueCallback<String> done) {
+        MainActivity a = live.get();
+        if (a == null || a.webView == null) { done.onReceiveValue(null); return; }
+        a.webView.evaluateJavascript(CallPresence.PEEK_JS, done);
+    }
+
+    /** Read-only: existing page call-screen profile photo src, if the WebView is up. */
+    static void peekLivePhoto(android.webkit.ValueCallback<String> done) {
+        MainActivity a = live.get();
+        if (a == null || a.webView == null) { done.onReceiveValue(null); return; }
+        a.webView.evaluateJavascript(CallPresence.PEEK_PHOTO_JS, done);
+    }
     private volatile boolean pageLoaded = false;
     /** Main activity is resumed; only then may an FCM payload be exposed to the already-visible WebView. */
     private volatile boolean activityForeground = false;
@@ -301,6 +322,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 androidx.webkit.WebViewCompat.addDocumentStartJavaScript(webView, SessionBridge.BIOMETRICS_SHIM, origins);
                 androidx.webkit.WebViewCompat.addDocumentStartJavaScript(webView, SessionBridge.CALLS_FLAG, origins);
                 androidx.webkit.WebViewCompat.addDocumentStartJavaScript(webView, SessionBridge.NATIVE_MEDIA_SHIM, origins);
+                if (Prefs.nativeCallUi(this)) androidx.webkit.WebViewCompat.addDocumentStartJavaScript(webView, CallWebOverlay.HIDE_JS, origins);
             } catch (Exception ignored) {
             }
         }
@@ -353,6 +375,8 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 view.evaluateJavascript(SessionBridge.BIOMETRICS_SHIM, null); // no-op if already defined
                 view.evaluateJavascript(SessionBridge.CALLS_FLAG, null);
                 view.evaluateJavascript(SessionBridge.NATIVE_MEDIA_SHIM, null);
+                // one call screen: the native first design; the page's CallOverlay stays hidden under it
+                if (Prefs.nativeCallUi(MainActivity.this)) view.evaluateJavascript(CallWebOverlay.HIDE_JS, null);
                 pageLoaded = true;
                 showWeb();
                 launchOverlay.markReady();
@@ -664,6 +688,8 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
+        setIntent(intent);
+        applyMinimizedBar(intent);
         String p = openPathFrom(intent);
         if (p == null || webView == null) return;
         bypassLockForCallPath(p);
@@ -1073,6 +1099,14 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
 
     @Override
     public void emit(String detailJson) {
+        // t5456: olcall media is flowing -> the call screens leave the pre-answer card once the answer is in.
+        try {
+            org.json.JSONObject d = new org.json.JSONObject(detailJson);
+            String st = d.optString("state", "");
+            String cid = d.optString("callId", "");
+            if ("connected".equals(st)) handler.post(() -> NativeCallScreen.onNativeMediaFlowing(cid));
+            else if ("failed".equals(st) || "ended".equals(st)) handler.post(() -> NativeCallScreen.onNativeMediaEnded(cid));
+        } catch (Exception ignored) {}
         if (webView == null || !pageLoaded) return;
         String js = "(function(){try{window.dispatchEvent(new CustomEvent('openlounge:native-media',{detail:"
                 + detailJson + "}))}catch(e){}})()";
@@ -1088,8 +1122,8 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         remoteVideo = NativeCallVideo.INSTANCE.renderer(this, false);
         localVideo = NativeCallVideo.INSTANCE.renderer(this, true); // PiP above the full-screen remote surface
         float d = getResources().getDisplayMetrics().density;
-        FrameLayout.LayoutParams pip = new FrameLayout.LayoutParams((int) (110 * d), (int) (160 * d), android.view.Gravity.TOP | android.view.Gravity.END);
-        pip.setMargins(0, (int) (96 * d), (int) (16 * d), 0);
+        // first UI PiP (101e00a) 100×150 dp; NativeCallScreen puts it in its Telegram corner slot (CallPip, NativeCallVideo.placeLocal)
+        FrameLayout.LayoutParams pip = new FrameLayout.LayoutParams((int) (100 * d), (int) (150 * d), android.view.Gravity.TOP | android.view.Gravity.START);
         int at = root.indexOfChild(webView);
         root.addView(remoteVideo, at, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         root.addView(localVideo, at + 1, pip);
@@ -1113,7 +1147,15 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                             (ok, r, e) -> { done.invoke(ok); return kotlin.Unit.INSTANCE; });
                 } catch (Exception ignored) { done.invoke(false); }
             }
+            @Override public void peekCallPresence(kotlin.jvm.functions.Function1<? super String, kotlin.Unit> done) {
+                peekLivePresence(v -> done.invoke(v));
+            }
+            @Override public void peekCallPhoto(kotlin.jvm.functions.Function1<? super String, kotlin.Unit> done) {
+                peekLivePhoto(v -> done.invoke(v));
+            }
+            @Override public void revealAppWhenMinimized() { /* already the real app */ }
         });
+        if (pendingMiniId != null) applyMinimizedBar(getIntent());
     }
     private NativeCallScreen callScreen;
     /** t5456: the page's call:connected, waiting for the first inbound media (main thread). */
@@ -1128,6 +1170,35 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             CallDiskLog.mark("connected-released", "media flowing");
             if (callScreen != null) callScreen.onPageCall("call:connected", m);
         });
+    }
+
+    /** Green MiniBar over the real app (first UI). Does not hang up. */
+    private void applyMinimizedBar(Intent i) {
+        if (i == null) return;
+        String id = i.getStringExtra(EXTRA_MINIBAR_CALL_ID);
+        if (id == null || id.isEmpty()) {
+            id = pendingMiniId;
+        } else {
+            pendingMiniId = id;
+            pendingMiniName = i.getStringExtra(EXTRA_MINIBAR_NAME);
+            pendingMiniPhoto = i.getStringExtra(EXTRA_MINIBAR_PHOTO);
+            pendingMiniVideo = i.getBooleanExtra(EXTRA_MINIBAR_VIDEO, false);
+        }
+        if (id == null || callScreen == null) return;
+        try {
+            org.json.JSONObject m = new org.json.JSONObject()
+                    .put("callId", id)
+                    .put("name", pendingMiniName == null ? "" : pendingMiniName)
+                    .put("photo", pendingMiniPhoto == null ? "" : pendingMiniPhoto)
+                    .put("video", pendingMiniVideo);
+            if (!callScreen.getShowing()) {
+                callScreen.onPageCall("call:outgoing", m);
+                callScreen.onPageCall("call:connected", m);
+                callScreen.onPageCall("call:mediaFlowing", m); // restoring a running call: media is already up
+            }
+            callScreen.setMinimized(true);
+            pendingMiniId = null;
+        } catch (Exception ignored) {}
     }
 
     @Override
