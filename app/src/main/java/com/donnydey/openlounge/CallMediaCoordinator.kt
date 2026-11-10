@@ -58,17 +58,26 @@ object CallMediaCoordinator {
                 if (callId != id) { soundGeneration++; localFailure = null }
                 localFailure?.let { return done(false, null, it) }
                 callId = id
-                startRtc(id, c.optBoolean("caller"), c.optJSONObject("media"), c.optBoolean("video"), done)
+                val media = c.optJSONObject("media")
+                // olcall/tgcalls only when the backend says so (CallMedia.provider "olcall") on API 27+; else unchanged
+                if (OlcallRoute.eligible(media, android.os.Build.VERSION.SDK_INT, android.os.Build.SUPPORTED_ABIS.toList()))
+                    startOlcall(id, c.optBoolean("caller"), media!!, c.optBoolean("video"), c.optString("peerId"), done)
+                else startRtc(id, c.optBoolean("caller"), media, c.optBoolean("video"), done)
             }
             "camera" -> { val on = c.optBoolean("on"); val face = c.optString("facing", "user"); main.post { camera(on, face, done) } }
-            "mute" -> { val m = c.optBoolean("muted"); muted = m; rtc?.setMute(m); CallAudioEngine.setMute(m); done(true, "true", null) }
-            "restartIce" -> { main.post { rtc?.networkChanged() }; done(true, "true", null) }
+            "mute" -> { val m = c.optBoolean("muted"); muted = m; rtc?.setMute(m); olcall?.setMuted(m); CallAudioEngine.setMute(m); done(true, "true", null) }
+            "restartIce" -> { main.post { rtc?.networkChanged() }; done(true, "true", null) } // tgcalls handles network changes itself
             "end" -> { closeAll(); done(true, "true", null) }
             else -> done(false, null, "unknown op: $op")
         }
     }
 
     private fun camera(on: Boolean, face: String, done: (Boolean, String?, String?) -> Unit) {
+        olcall?.let { oc ->
+            oc.camera(on, face)
+            if (on && !videoOn) { videoOn = true; host?.nativeCallVideo(true) }
+            return done(true, "true", null)
+        }
         OlVideo.camera(on, face) { ok, e ->
             if (ok && on && !videoOn) { videoOn = true; host?.nativeCallVideo(true) }
             if (!ok) host?.emit(JSONObject().put("state", "camera-unavailable").put("callId", callId ?: "").toString())
@@ -181,6 +190,46 @@ object CallMediaCoordinator {
         } } }
     }
 
+    // ---- olcall (self-hosted Pion olcall + coturn, tgcalls engine from the :olcall module)
+    @Volatile private var olcall: OlcallCall? = null
+    private fun startOlcall(id: String, caller: Boolean, media: JSONObject, wantVideo: Boolean, peerId: String, done: (Boolean, String?, String?) -> Unit) {
+        CallDiskLog.begin(id)
+        // counts only: the relay list's credentials are never logged
+        CallDiskLog.mark("connect-olcall", "video=$wantVideo appIce=${OlcallRoute.appIceServers(media)?.length() ?: 0}")
+        main.post {
+            val ctx = appCtx ?: return@post done(false, null, "no context")
+            if (callId != id) return@post done(false, null, "cancelled")
+            RcCallManager.begin(id, caller); RcCallManager.connecting(id)
+            var answered = false
+            val oc = OlcallCall(ctx, id, media, wantVideo, peerId,
+                onConnected = {
+                    active = true; host?.nativeCallAudio(true)
+                    if (muted) olcall?.setMuted(true)
+                    RcCallManager.connected(id)
+                    host?.emit(JSONObject().put("state", "connected").put("callId", id).toString())
+                    if (!answered) { answered = true
+                        done(true, JSONObject().put("engine", "tgcalls").put("path", "olcall").put("video", wantVideo).toString(), null) }
+                },
+                onRemoteVideo = {
+                    if (!videoOn) { videoOn = true; host?.nativeCallVideo(true) }
+                    host?.emit(JSONObject().put("state", "remote-video").put("callId", id).put("on", true).toString())
+                },
+                onEnded = { reason, wasConnected ->
+                    CallDiskLog.mark("olcall-ended", "reason=$reason connected=$wasConnected")
+                    if (olcall != null && callId == id) {
+                    val normal = reason == "local-hangup" || reason.startsWith("bye")
+                    RcCallManager.end(id, if (normal) RcHangup.NORMAL else RcHangup.FAILED,
+                        if (normal) RcCallEvent.LOCAL_HANGUP else RcCallEvent.ENDED_CONNECTION_FAILURE, reason)
+                    if (!normal) host?.emit(JSONObject().put("state", "failed").put("callId", id).toString())
+                    if (!answered) { answered = true; done(false, null, "network:olcall:$reason") }
+                    }
+                })
+            olcall = oc
+            oc.start()
+            if (wantVideo && !videoOn) { videoOn = true; host?.nativeCallVideo(true) }
+        }
+    }
+
     // ---- native call-signal socket (ring / accept without the WebView)
     @Volatile private var signal: CallSignalClient? = null
     @Volatile private var creds: Pair<String, String>? = null // in-memory only; never logged
@@ -231,6 +280,7 @@ object CallMediaCoordinator {
 
     @JvmStatic fun closeAll() = main.post {
         rtc?.close(); rtc = null; rcTransport?.close(); rcTransport = null
+        olcall?.let { it.hangup(); olcall = null; NativeCallVideo.endOlcall() }
         callId?.let { RcCallManager.end(it, RcHangup.NORMAL, RcCallEvent.LOCAL_HANGUP) }; callId = null
         soundGeneration++; localFailure = null; muted = false; CallDiskLog.mark("close-all")
         OlVideo.end(); if (videoOn) { videoOn = false; host?.nativeCallVideo(false) }

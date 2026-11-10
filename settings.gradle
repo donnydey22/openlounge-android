@@ -15,3 +15,6 @@ dependencyResolutionManagement {
 rootProject.name = "OpenLounge"
 include ':app'
 include ':callengine'
+
+include ':olcall'
+project(':olcall').projectDir = file('olcall/android/olcall')

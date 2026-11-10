@@ -1108,9 +1108,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             if (remoteVideo == null || webView == null) return;
             if (on && checkSelfPermission(android.Manifest.permission.CAMERA) != android.content.pm.PackageManager.PERMISSION_GRANTED)
                 requestPermissions(new String[]{android.Manifest.permission.CAMERA}, 0x0C4);
-            int v = on ? View.VISIBLE : View.GONE;
-            remoteVideo.setVisibility(v);
-            localVideo.setVisibility(v);
+            NativeCallVideo.show(on); // org.webrtc pair, or the org.olwrtc pair during an olcall call
             if (on && savedWebBg == null) savedWebBg = webView.getSolidColor();
             webView.setBackgroundColor(on ? android.graphics.Color.TRANSPARENT : (savedWebBg != null ? savedWebBg : android.graphics.Color.BLACK));
             if (!on) savedWebBg = null;

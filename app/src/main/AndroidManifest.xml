@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <!-- :olcall (tgcalls engine) is built for API 27+ (AAudio); the app stays minSdk 24 and only
+         uses it on API 27+ (CallMediaCoordinator gate). Older phones keep the existing engine. -->
+    <uses-sdk tools:overrideLibrary="com.donnydey.openlounge.olcall" />
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
