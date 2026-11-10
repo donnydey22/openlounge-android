@@ -9,6 +9,7 @@ import android.os.SystemClock
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -41,6 +42,8 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         fun camera(on: Boolean, facing: String, done: (Boolean) -> Unit)
         /** Read-only peek of the page's existing call-screen presence (data-presence). */
         fun peekCallPresence(done: (String?) -> Unit) { done(null) }
+        /** When minimized from a host with no WebView, bring the real app forward. No hang-up. */
+        fun revealAppWhenMinimized() {}
     }
 
 
@@ -260,9 +263,12 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     private var showCtl = true
     private val hideCtl = Runnable { showCtl = false; view?.let { applyChrome(it) } }
 
-    private fun setMinimized(on: Boolean) {
+    fun setMinimized(on: Boolean) {
         minimized = on
-        if (on) showCtl = true
+        if (on) {
+            showCtl = true
+            actions.revealAppWhenMinimized()
+        }
         view?.let { applyChrome(it) }
     }
 
@@ -273,22 +279,49 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         view?.let { applyChrome(it) }
     }
 
-    private fun applyChrome(v: View) {
+    private fun applyChrome(v: ViewGroup) {
         val incomingOrEnded = state == NativeCallFlow.State.ENDED
+        val lp = v.layoutParams as? FrameLayout.LayoutParams
         if (minimized && !incomingOrEnded) {
+            // First UI MiniBar: only the green bar, over the real app — no blank full-screen stage.
             miniBar.visibility = View.VISIBLE
             miniLabel.text = "${name.text}  ${status.text}  · Tap to return"
-            row.visibility = View.GONE
-            minBtn.visibility = View.GONE
-            top.visibility = View.GONE
+            for (i in 0 until v.childCount) {
+                val c = v.getChildAt(i)
+                c.visibility = if (c === miniBar) View.VISIBLE else View.GONE
+            }
+            v.setBackgroundColor(Color.TRANSPARENT)
+            v.isClickable = false
+            v.isFocusable = false
+            if (lp != null) {
+                lp.width = FrameLayout.LayoutParams.MATCH_PARENT
+                lp.height = dp(28)
+                lp.gravity = Gravity.TOP
+                v.layoutParams = lp
+            }
+            // Hide tiles only (engine keeps running).
+            NativeCallVideo.show(false)
             pulseMiniDot()
             return
         }
-        miniBar.visibility = View.GONE
+        if (lp != null) {
+            lp.width = FrameLayout.LayoutParams.MATCH_PARENT
+            lp.height = FrameLayout.LayoutParams.MATCH_PARENT
+            lp.gravity = Gravity.NO_GRAVITY
+            v.layoutParams = lp
+        }
+        v.isClickable = true
+        v.setBackgroundColor(if (nativeVideo) Color.TRANSPARENT else 0xFF0B1220.toInt())
+        for (i in 0 until v.childCount) {
+            val c = v.getChildAt(i)
+            c.visibility = if (c === miniBar) View.GONE else View.VISIBLE
+        }
+        bg.visibility = if (nativeVideo) View.GONE else View.VISIBLE
         val hide = nativeVideo && !showCtl
         row.visibility = if (hide) View.GONE else View.VISIBLE
         minBtn.visibility = if (hide || incomingOrEnded) View.GONE else View.VISIBLE
         top.visibility = if (hide) View.INVISIBLE else View.VISIBLE
+        if (nativeVideo) NativeCallVideo.show(true)
         if (nativeVideo && showCtl) {
             ui.removeCallbacks(hideCtl)
             ui.postDelayed(hideCtl, 4000)

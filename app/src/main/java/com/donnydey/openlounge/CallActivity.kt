@@ -95,6 +95,19 @@ class CallActivity : Activity() {
                     CallMediaCoordinator.handle("""{"op":"camera","on":false,"facing":"$facing"}""") { granted, _, _ -> done(granted) }
                 }
             }
+            override fun revealAppWhenMinimized() {
+                // This host has no WebView. Hand the green bar to MainActivity over the real app; do not hang up.
+                val id = callId ?: return
+                startActivity(
+                    Intent(this@CallActivity, MainActivity::class.java)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                        .putExtra(MainActivity.EXTRA_MINIBAR_CALL_ID, id)
+                        .putExtra(MainActivity.EXTRA_MINIBAR_NAME, peerName)
+                        .putExtra(MainActivity.EXTRA_MINIBAR_PHOTO, peerPhoto)
+                        .putExtra(MainActivity.EXTRA_MINIBAR_VIDEO, video)
+                )
+                finish()
+            }
         })
         applyIntent(intent)
     }

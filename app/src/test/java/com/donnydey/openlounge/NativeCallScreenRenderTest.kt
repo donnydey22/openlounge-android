@@ -54,6 +54,15 @@ class NativeCallScreenRenderTest {
     @Test fun audioCallFlow() {
         val act = Robolectric.buildActivity(Activity::class.java).setup().get()
         val root = FrameLayout(act); act.setContentView(root)
+        // Stand-in for the real app (WebView) so minimized is a green bar over the app, not a blank stage.
+        val app = android.widget.TextView(act).apply {
+            text = "Open Lounge hallway"
+            setBackgroundColor(0xFF111827.toInt())
+            setTextColor(android.graphics.Color.WHITE)
+            textSize = 18f
+            gravity = android.view.Gravity.CENTER
+        }
+        root.addView(app, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         val s = NativeCallScreen(act, root, object : NativeCallScreen.Actions {
             override fun pageCall(detailJson: String): Boolean { sent += detailJson; return true }
             override fun speaker(on: Boolean) {}
@@ -70,7 +79,9 @@ class NativeCallScreenRenderTest {
         val expect = Math.round(56f * act.resources.displayMetrics.density)
         assertEquals("56dp in-call discs", expect, sizes[0])
         s.onPageCall("call:answering", JSONObject().put("callId", "t1"))
-        t = texts(root); snap(root, "2-connecting"); assertTrue(t.toString(), t.contains("Connecting…"))
+        t = texts(root); snap(root, "2-connecting")
+        assertTrue(t.toString(), t.contains("Connecting…"))
+        assertTrue("connecting keeps the same bottom icon row", t.containsAll(listOf("Phone", "Video", "Mute", "End call")))
         s.onPageCall("call:connected", JSONObject().put("callId", "t1"))
         org.robolectric.shadows.ShadowLooper.idleMainLooper(1, java.util.concurrent.TimeUnit.SECONDS)
         t = texts(root); snap(root, "3-active"); assertTrue(t.toString(), t.any { Regex("^\\d+:\\d\\d$").matches(it) })
@@ -78,6 +89,7 @@ class NativeCallScreenRenderTest {
         findDesc(root, "Minimize call")!!.performClick()
         t = texts(root); assertTrue("minimized bar shows the peer and Tap to return", t.any { it.contains("Ada Lovelace") && it.contains("Tap to return") })
         assertTrue("controls hidden while minimized", !t.contains("End call"))
+        assertTrue("real app stays visible under the bar (no blank stage)", t.contains("Open Lounge hallway"))
         snap(root, "5-minimized")
         fun findBar(v: View): View? {
             if (v is android.widget.TextView && v.text.toString().contains("Tap to return") && (v.parent as? View)?.hasOnClickListeners() == true) return v.parent as View

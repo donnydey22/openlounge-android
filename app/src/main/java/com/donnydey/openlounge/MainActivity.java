@@ -98,6 +98,13 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     // 0.3.1 calls: the live activity (for notification Hang up / Decline fallback) + call audio state
     private static WeakReference<MainActivity> live = new WeakReference<>(null);
 
+    static final String EXTRA_MINIBAR_CALL_ID = "ol_minibar_call_id";
+    static final String EXTRA_MINIBAR_NAME = "ol_minibar_name";
+    static final String EXTRA_MINIBAR_PHOTO = "ol_minibar_photo";
+    static final String EXTRA_MINIBAR_VIDEO = "ol_minibar_video";
+    private String pendingMiniId, pendingMiniName, pendingMiniPhoto;
+    private boolean pendingMiniVideo;
+
     /** Read-only: existing page call-screen presence (data-presence), if the WebView is up. */
     static void peekLivePresence(android.webkit.ValueCallback<String> done) {
         MainActivity a = live.get();
@@ -671,6 +678,8 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
+        setIntent(intent);
+        applyMinimizedBar(intent);
         String p = openPathFrom(intent);
         if (p == null || webView == null) return;
         bypassLockForCallPath(p);
@@ -1121,9 +1130,39 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             @Override public void peekCallPresence(kotlin.jvm.functions.Function1<? super String, kotlin.Unit> done) {
                 peekLivePresence(v -> done.invoke(v));
             }
+            @Override public void revealAppWhenMinimized() { /* already the real app */ }
         });
+        if (pendingMiniId != null) applyMinimizedBar(getIntent());
     }
     private NativeCallScreen callScreen;
+
+    /** Green MiniBar over the real app (first UI). Does not hang up. */
+    private void applyMinimizedBar(Intent i) {
+        if (i == null) return;
+        String id = i.getStringExtra(EXTRA_MINIBAR_CALL_ID);
+        if (id == null || id.isEmpty()) {
+            id = pendingMiniId;
+        } else {
+            pendingMiniId = id;
+            pendingMiniName = i.getStringExtra(EXTRA_MINIBAR_NAME);
+            pendingMiniPhoto = i.getStringExtra(EXTRA_MINIBAR_PHOTO);
+            pendingMiniVideo = i.getBooleanExtra(EXTRA_MINIBAR_VIDEO, false);
+        }
+        if (id == null || callScreen == null) return;
+        try {
+            org.json.JSONObject m = new org.json.JSONObject()
+                    .put("callId", id)
+                    .put("name", pendingMiniName == null ? "" : pendingMiniName)
+                    .put("photo", pendingMiniPhoto == null ? "" : pendingMiniPhoto)
+                    .put("video", pendingMiniVideo);
+            if (!callScreen.getShowing()) {
+                callScreen.onPageCall("call:outgoing", m);
+                callScreen.onPageCall("call:connected", m);
+            }
+            callScreen.setMinimized(true);
+            pendingMiniId = null;
+        } catch (Exception ignored) {}
+    }
 
     @Override
     public void nativeCallVideo(boolean on) {
