@@ -133,8 +133,9 @@ class NativeCallScreenRenderTest {
             if (b != null && b.width > 8 && b.height == b.width) {
                 val a00 = Color.alpha(b.getPixel(0, 0))
                 val mid = Color.alpha(b.getPixel(b.width / 2, b.height / 2))
-                val top = Color.alpha(b.getPixel(b.width / 2, 0))
-                if (a00 < 16 && mid > 200 && top < 16) return true
+                // y=0 at the squircle's flat top (47/112) is opaque on a squircle and outside a circle.
+                val side = Color.alpha(b.getPixel(b.width * 47 / 112, 0))
+                if (a00 < 16 && mid > 200 && side < 16) return true
             }
         }
         if (v is ViewGroup) for (i in 0 until v.childCount) if (circlePhoto(v.getChildAt(i))) return true
