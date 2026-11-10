@@ -68,7 +68,7 @@ import android.net.Network;
 import android.net.NetworkCapabilities;
 import java.util.List;
 
-public class MainActivity extends AppCompatActivity implements SessionBridge.Host, CallMediaCoordinator.Host {
+public class MainActivity extends AppCompatActivity implements SessionBridge.Host, CallMediaCoordinator.Host, OlCallPermissionPrompt.Launcher {
     private NativePhoneAuth phoneAuth;
 
     @Override
@@ -136,6 +136,16 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
      *  (microphone) request was never answered, its getUserMedia hung and the call sat on "Connecting". */
     private final java.util.ArrayDeque<PermissionRequest> webPermQueue = new java.util.ArrayDeque<>();
     private ValueCallback<Uri[]> fileCallback;
+
+    /** Call-flow permissions only (tap-to-call / mid-call video). Separate from the WebView queue. */
+    private final ActivityResultLauncher<String[]> callPermLauncher =
+            registerForActivityResult(new ActivityResultContracts.RequestMultiplePermissions(),
+                    OlCallPermissionPrompt::onLaunchResult);
+
+    @Override
+    public void launchCallPermissions(String[] permissions) {
+        callPermLauncher.launch(permissions);
+    }
 
     private final ActivityResultLauncher<String[]> permissionLauncher =
             registerForActivityResult(new ActivityResultContracts.RequestMultiplePermissions(), result -> {
@@ -949,6 +959,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     @Override
     protected void onPause() {
         activityForeground = false;
+        OlCallPermissionPrompt.detach(this);
         super.onPause();
         CookieManager.getInstance().flush();
         dispatchNativeVisibility(CallLockPolicy.shouldReportVisible(false, locked));
@@ -974,6 +985,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     protected void onResume() {
         super.onResume();
         activityForeground = true;
+        OlCallPermissionPrompt.attach(this);
         dispatchNativeVisibility(CallLockPolicy.shouldReportVisible(true, locked));
         if (locked) dispatchNativeLock(true);
         scheduleFsiPrompt();
@@ -1092,11 +1104,11 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 com.donnydey.openlounge.audio.CallAudioManager.get(MainActivity.this).select(on ? com.donnydey.openlounge.audio.CallAudioDevices.Kind.SPEAKER : com.donnydey.openlounge.audio.CallAudioDevices.Kind.EARPIECE);
                 if (callAudioOn) applyCallRoute(); // rooms only now; reportCallRoute tells the page (openlounge:native-audio-route)
             }
-            @Override public void camera(boolean on, String facing) {
+            @Override public void camera(boolean on, String facing, kotlin.jvm.functions.Function1<? super Boolean, kotlin.Unit> done) {
                 try {
                     CallMediaCoordinator.handle(new JSONObject().put("op", "camera").put("on", on).put("facing", facing).toString(),
-                            (ok, r, e) -> kotlin.Unit.INSTANCE);
-                } catch (Exception ignored) {}
+                            (ok, r, e) -> { done.invoke(ok); return kotlin.Unit.INSTANCE; });
+                } catch (Exception ignored) { done.invoke(false); }
             }
         });
     }
@@ -1106,8 +1118,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     public void nativeCallVideo(boolean on) {
         handler.post(() -> {
             if (remoteVideo == null || webView == null) return;
-            if (on && checkSelfPermission(android.Manifest.permission.CAMERA) != android.content.pm.PackageManager.PERMISSION_GRANTED)
-                requestPermissions(new String[]{android.Manifest.permission.CAMERA}, 0x0C4);
+            // Camera is requested only on a video-call tap or a mid-call video toggle, never when tiles appear.
             NativeCallVideo.show(on); // org.webrtc pair, or the org.olwrtc pair during an olcall call
             if (on && savedWebBg == null) savedWebBg = webView.getSolidColor();
             webView.setBackgroundColor(on ? android.graphics.Color.TRANSPARENT : (savedWebBg != null ? savedWebBg : android.graphics.Color.BLACK));

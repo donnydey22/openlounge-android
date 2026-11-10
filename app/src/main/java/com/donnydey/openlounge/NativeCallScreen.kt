@@ -37,7 +37,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     interface Actions {
         fun pageCall(detailJson: String): Boolean
         fun speaker(on: Boolean)
-        fun camera(on: Boolean, facing: String)
+        fun camera(on: Boolean, facing: String, done: (Boolean) -> Unit)
     }
 
 
@@ -197,8 +197,14 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         v.addView(top, FrameLayout.LayoutParams(-1, -2, Gravity.CENTER).apply { bottomMargin = dp(80) })
         val row = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER or Gravity.BOTTOM; setPadding(dp(16), 0, dp(16), 0) }
         bFirst = btn(false, false) { speakerOn = !speakerOn; actions.speaker(speakerOn); render() }
-        bFlip = btn(false, false) { facing = if (facing == "user") "environment" else "user"; actions.camera(true, facing) }
-        bVid = btn(false, false) { if (!video) return@btn; camOn = !camOn; actions.camera(camOn, facing); render() }
+        bFlip = btn(false, false) { facing = if (facing == "user") "environment" else "user"; actions.camera(true, facing) { } }
+        bVid = btn(false, false) {
+            if (!video) return@btn
+            val want = !camOn
+            if (!want) { camOn = false; actions.camera(false, facing) { }; render(); return@btn }
+            // camera permission is requested here (toggle on), not up front; a denial leaves the button off
+            actions.camera(true, facing) { ok -> if (ok) { camOn = true; render() } }
+        }
         bMic = btn(false, false) { actions.pageCall(JSONObject().put("type", "call:mute").put("muted", !muted).toString()) }
         val end = btn(false, true) { actions.pageCall(JSONObject().put("type", "call:hangup").toString()) }
         end.label.text = "End call"; end.icon.setImageResource(R.drawable.ol_call_phone_off)

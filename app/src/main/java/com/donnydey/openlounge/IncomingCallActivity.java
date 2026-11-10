@@ -93,27 +93,56 @@ public class IncomingCallActivity extends Activity {
         }
         callId = id;
         current = new WeakReference<>(this);
-        if (ACTION_ACCEPT.equals(i.getAction())) { accept(); return; }
         String name = i.getStringExtra(CallNotifications.EXTRA_CALLER);
         boolean video = i.getBooleanExtra(CallNotifications.EXTRA_VIDEO, false);
+        if (ACTION_ACCEPT.equals(i.getAction())) {
+            OlCallPermissions.Action action = video
+                    ? OlCallPermissions.Action.START_OR_ACCEPT_VIDEO
+                    : OlCallPermissions.Action.START_OR_ACCEPT_AUDIO;
+            if (OlCallPermissions.decide(action, OlCallPermissionPrompt.granted(this))
+                    == OlCallPermissions.Decision.PROCEED) {
+                acceptAfterPermission();
+                return;
+            }
+            // Need a prompt (or a prior silent deny): show the ring so denial isn't a blank screen.
+            buildUi(name == null ? getString(R.string.app_name) : name, video, i.getStringExtra(CallNotifications.EXTRA_PHOTO));
+            MAIN.removeCallbacks(expire);
+            if (expiresAt > 0) MAIN.postDelayed(expire, expiresAt - System.currentTimeMillis());
+            accept();
+            return;
+        }
         buildUi(name == null ? getString(R.string.app_name) : name, video, i.getStringExtra(CallNotifications.EXTRA_PHOTO));
         MAIN.removeCallbacks(expire);
         if (expiresAt > 0) MAIN.postDelayed(expire, expiresAt - System.currentTimeMillis());
     }
 
     private void accept() {
+        boolean video = getIntent().getBooleanExtra(CallNotifications.EXTRA_VIDEO, false);
+        OlCallPermissions.Action action = video
+                ? OlCallPermissions.Action.START_OR_ACCEPT_VIDEO
+                : OlCallPermissions.Action.START_OR_ACCEPT_AUDIO;
+        // Same rule as an outgoing tap: mic on accept, mic+camera together for a video call.
+        // Denial fails this accept silently (no rationale, no re-prompt). The ring stays up.
+        OlCallPermissionPrompt.ensure(this, action, ok -> {
+            if (!ok) return;
+            acceptAfterPermission();
+        });
+    }
+
+    private void acceptAfterPermission() {
         String id = callId;
         CallNotifications.cancel(this, id);
+        boolean video = getIntent().getBooleanExtra(CallNotifications.EXTRA_VIDEO, false);
         // Android 12+: the call FGS must be up before media; starting it from this user tap (visible
         // activity) is exempt from background-start limits and lets Android 14+ grant the microphone type.
         CallService.start(getApplicationContext(), id, getIntent().getStringExtra(CallNotifications.EXTRA_CALLER), false, true);
         // Linphone cut: native owns accept signaling — no /call/<id>?accept=1 WebView path.
-        boolean nativeOk = CallMediaCoordinator.acceptIncoming(getApplicationContext(), id);
+        boolean nativeOk = CallMediaCoordinator.acceptIncoming(getApplicationContext(), id, video);
         // Native-UI first cut: CallActivity owns in-app call chrome (no WebView call path).
         startActivity(CallActivity.intent(this, id,
                 getIntent().getStringExtra(CallNotifications.EXTRA_CALLER),
                 getIntent().getStringExtra(CallNotifications.EXTRA_PHOTO),
-                getIntent().getBooleanExtra(CallNotifications.EXTRA_VIDEO, false),
+                video,
                 CallActivity.PHASE_ACTIVE));
         Intent open = new Intent(this, MainActivity.class)
                 .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP)
@@ -156,6 +185,24 @@ public class IncomingCallActivity extends Activity {
         MAIN.removeCallbacks(expire);
         if (current.get() == this) current = new WeakReference<>(null);
         if (!isFinishing()) finish();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        OlCallPermissionPrompt.attach(this);
+    }
+
+    @Override
+    protected void onPause() {
+        OlCallPermissionPrompt.detach(this);
+        super.onPause();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        if (!OlCallPermissionPrompt.onResult(requestCode, permissions, grantResults))
+            super.onRequestPermissionsResult(requestCode, permissions, grantResults);
     }
 
     @Override

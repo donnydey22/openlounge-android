@@ -59,12 +59,28 @@ object CallMediaCoordinator {
                 localFailure?.let { return done(false, null, it) }
                 callId = id
                 val media = c.optJSONObject("media")
-                // olcall/tgcalls only when the backend says so (CallMedia.provider "olcall") on API 27+; else unchanged
-                if (OlcallRoute.eligible(media, android.os.Build.VERSION.SDK_INT, android.os.Build.SUPPORTED_ABIS.toList()))
-                    startOlcall(id, c.optBoolean("caller"), media!!, c.optBoolean("video"), c.optString("peerId"), done)
-                else startRtc(id, c.optBoolean("caller"), media, c.optBoolean("video"), done)
+                val wantVideo = c.optBoolean("video")
+                val action = if (wantVideo) OlCallPermissions.Action.START_OR_ACCEPT_VIDEO
+                    else OlCallPermissions.Action.START_OR_ACCEPT_AUDIO
+                // mic (audio) or mic+camera in one combined request (video), only at this connect tap; denial is silent
+                ensurePerms(action) { ok ->
+                    if (!ok) return@ensurePerms done(false, null, "permission-denied")
+                    if (callId != id) return@ensurePerms done(false, null, "cancelled")
+                    // olcall/tgcalls only when the backend says so (CallMedia.provider "olcall") on API 27+; else unchanged
+                    if (OlcallRoute.eligible(media, android.os.Build.VERSION.SDK_INT, android.os.Build.SUPPORTED_ABIS.toList()))
+                        startOlcall(id, c.optBoolean("caller"), media!!, wantVideo, c.optString("peerId"), done)
+                    else startRtc(id, c.optBoolean("caller"), media, wantVideo, done)
+                }
             }
-            "camera" -> { val on = c.optBoolean("on"); val face = c.optString("facing", "user"); main.post { camera(on, face, done) } }
+            "camera" -> {
+                val on = c.optBoolean("on"); val face = c.optString("facing", "user")
+                if (!on) main.post { camera(false, face, done) }
+                else ensurePerms(OlCallPermissions.Action.TOGGLE_VIDEO_ON) { ok ->
+                    // denied camera mid-call: leave the call on audio, no rationale / no camera-unavailable toast
+                    if (!ok) return@ensurePerms done(false, null, "permission-denied")
+                    camera(true, face, done)
+                }
+            }
             "mute" -> { val m = c.optBoolean("muted"); muted = m; rtc?.setMute(m); olcall?.setMuted(m); CallAudioEngine.setMute(m); done(true, "true", null) }
             "restartIce" -> { main.post { rtc?.networkChanged() }; done(true, "true", null) } // tgcalls handles network changes itself
             "end" -> { closeAll(); done(true, "true", null) }
@@ -250,8 +266,14 @@ object CallMediaCoordinator {
     }
 
     /** Answer from IncomingCallActivity / Telecom — no /call/id?accept=1 WebView path. */
-    @JvmStatic fun acceptIncoming(ctx: Context, callId: String): Boolean {
+    @JvmStatic @JvmOverloads fun acceptIncoming(ctx: Context, callId: String, video: Boolean = false): Boolean {
         if (callId.isEmpty()) return false
+        val action = if (video) OlCallPermissions.Action.START_OR_ACCEPT_VIDEO
+            else OlCallPermissions.Action.START_OR_ACCEPT_AUDIO
+        if (OlCallPermissions.decide(action, OlCallPermissionPrompt.granted(ctx)) != OlCallPermissions.Decision.PROCEED) {
+            CallDiskLog.mark("accept-native-fail", "permission")
+            return false
+        }
         if (!ensureSignalCreds(ctx)) { CallDiskLog.mark("accept-native-fail", "no token"); return false }
         main.post {
             connectSignal()
@@ -276,6 +298,13 @@ object CallMediaCoordinator {
     }
 
     /** Network changed (Wi-Fi <-> cellular): fresh ICE on the same PC (caller restarts; callee asks). */
+    private fun ensurePerms(action: OlCallPermissions.Action, then: (Boolean) -> Unit) {
+        main.post {
+            val ctx = appCtx ?: return@post then(false)
+            OlCallPermissionPrompt.ensure(action, ctx, then)
+        }
+    }
+
     @JvmStatic fun onNetworkChange() = main.post { rtc?.networkChanged() }
 
     @JvmStatic fun closeAll() = main.post {

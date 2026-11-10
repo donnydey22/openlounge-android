@@ -47,7 +47,7 @@ class NativeCallScreenRenderTest {
         val s = NativeCallScreen(act, root, object : NativeCallScreen.Actions {
             override fun pageCall(detailJson: String): Boolean { sent += detailJson; return true }
             override fun speaker(on: Boolean) {}
-            override fun camera(on: Boolean, facing: String) {}
+            override fun camera(on: Boolean, facing: String, done: (Boolean) -> Unit) { done(true) }
         })
         s.onPageCall("call:outgoing", JSONObject().put("callId", "t1").put("name", "Ada Lovelace").put("video", false))
         var t = texts(root); snap(root, "1-calling")

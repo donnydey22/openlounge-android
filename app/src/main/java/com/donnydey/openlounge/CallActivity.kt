@@ -85,8 +85,15 @@ class CallActivity : Activity() {
                     }
                 } catch (_: RuntimeException) {}
             }
-            override fun camera(on: Boolean, facing: String) {
-                CallMediaCoordinator.handle("""{"op":"camera","on":$on,"facing":"$facing"}""") { _, _, _ -> }
+            override fun camera(on: Boolean, facing: String, done: (Boolean) -> Unit) {
+                if (on) {
+                    OlCallPermissionPrompt.ensure(this@CallActivity, OlCallPermissions.Action.TOGGLE_VIDEO_ON) { ok ->
+                        if (!ok) { done(false); return@ensure }
+                        CallMediaCoordinator.handle("""{"op":"camera","on":true,"facing":"$facing"}""") { granted, _, _ -> done(granted) }
+                    }
+                } else {
+                    CallMediaCoordinator.handle("""{"op":"camera","on":false,"facing":"$facing"}""") { granted, _, _ -> done(granted) }
+                }
             }
         })
         applyIntent(intent)
@@ -96,6 +103,21 @@ class CallActivity : Activity() {
         super.onNewIntent(intent)
         setIntent(intent)
         applyIntent(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        OlCallPermissionPrompt.attach(this)
+    }
+
+    override fun onPause() {
+        OlCallPermissionPrompt.detach(this)
+        super.onPause()
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        if (!OlCallPermissionPrompt.onResult(requestCode, permissions, grantResults))
+            super.onRequestPermissionsResult(requestCode, permissions, grantResults)
     }
 
     private fun applyIntent(i: Intent) {
