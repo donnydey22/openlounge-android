@@ -240,6 +240,9 @@ public class IncomingCallActivity extends Activity {
     private float acceptDragY;
     private Float acceptStartY;
     private final Runnable presenceTick = this::peekPresence;
+    private ImageView photoView;
+    private ImageView backdrop;
+    private TextView initialView;
 
     private void buildUi(String name, boolean video, String photoUrl) {
         FrameLayout root = new FrameLayout(this);
@@ -252,6 +255,7 @@ public class IncomingCallActivity extends Activity {
         bg.addView(blob(0xFF64748B, Gravity.TOP | Gravity.START, 0.18f, 0.14f, vmax));
         bg.addView(blob(0xFF6366F1, Gravity.BOTTOM | Gravity.END, -0.16f, -0.12f, vmax));
         ImageView backdrop = new ImageView(this);
+        this.backdrop = backdrop;
         backdrop.setScaleType(ImageView.ScaleType.CENTER_CROP);
         backdrop.setScaleX(1.15f);
         backdrop.setScaleY(1.15f);
@@ -293,12 +297,14 @@ public class IncomingCallActivity extends Activity {
         avatar.setBackground(squircle);
         avatar.setClipToOutline(true);
         TextView initial = new TextView(this);
+        initialView = initial;
         initial.setText(initials(name));
         initial.setTextColor(Color.WHITE);
         initial.setTextSize(TypedValue.COMPLEX_UNIT_SP, 30);
         initial.setGravity(Gravity.CENTER);
         avatar.addView(initial, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         ImageView photo = new ImageView(this);
+        photoView = photo;
         photo.setScaleType(ImageView.ScaleType.CENTER_CROP);
         avatar.addView(photo, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         ringBox.addView(avatar, new FrameLayout.LayoutParams(dp(112), dp(112)));
@@ -607,6 +613,14 @@ public class IncomingCallActivity extends Activity {
             String t = CallPresence.rawFromJs(raw);
             if (t == null || t.isEmpty()) t = raw == null ? "" : raw.trim();
             if (!t.isEmpty()) applyPresence(CallPresence.of(t));
+            if (photoView != null && photoView.getDrawable() == null) {
+                MainActivity.peekLivePhoto(photoRaw -> {
+                    if (isFinishing() || photoView == null) return;
+                    String u = CallPresence.rawFromJs(photoRaw);
+                    if (u == null || u.isEmpty()) u = photoRaw == null ? "" : photoRaw.trim();
+                    if (u.startsWith("http://") || u.startsWith("https://")) loadPhoto(u, photoView, IncomingCallActivity.this.backdrop);
+                });
+            }
             if (!isFinishing()) MAIN.postDelayed(presenceTick, 2000);
         });
     }
@@ -626,26 +640,40 @@ public class IncomingCallActivity extends Activity {
         }
     }
 
-    /** https photo only, ≤ 2 MB, decoded downsampled off the main thread. */
+    /** http(s) photo, or file:// under this app's cache/files; ≤ 2 MB, decoded off the main thread. */
     private void loadPhoto(String url, ImageView photo, ImageView backdrop) {
-        if (url == null || !url.startsWith("https://") || url.length() > 2048) return;
+        if (!CallPresence.allowedPhotoUrl(url, getCacheDir(), getFilesDir()) || photo == null) return;
+        final String src = url;
         new Thread(() -> {
             HttpURLConnection c = null;
             try {
-                c = (HttpURLConnection) new URL(url).openConnection();
-                c.setConnectTimeout(5000);
-                c.setReadTimeout(5000);
-                if (c.getResponseCode() != 200) return;
-                ByteArrayOutputStream out = new ByteArrayOutputStream();
-                try (InputStream in = c.getInputStream()) {
-                    byte[] buf = new byte[16384];
-                    int n;
-                    while ((n = in.read(buf)) > 0) {
-                        out.write(buf, 0, n);
-                        if (out.size() > 2_000_000) return;
+                byte[] data;
+                if (src.startsWith("file:")) {
+                    java.io.File f = new java.io.File(new java.net.URI(src).getPath());
+                    if (!f.isFile() || f.length() > 2_000_000) return;
+                    ByteArrayOutputStream out = new ByteArrayOutputStream();
+                    try (InputStream in = new java.io.FileInputStream(f)) {
+                        byte[] buf = new byte[16384];
+                        int n;
+                        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
                     }
+                    data = out.toByteArray();
+                } else {
+                    c = (HttpURLConnection) new URL(src).openConnection();
+                    c.setConnectTimeout(5000);
+                    c.setReadTimeout(5000);
+                    if (c.getResponseCode() != 200) return;
+                    ByteArrayOutputStream out = new ByteArrayOutputStream();
+                    try (InputStream in = c.getInputStream()) {
+                        byte[] buf = new byte[16384];
+                        int n;
+                        while ((n = in.read(buf)) > 0) {
+                            out.write(buf, 0, n);
+                            if (out.size() > 2_000_000) return;
+                        }
+                    }
+                    data = out.toByteArray();
                 }
-                byte[] data = out.toByteArray();
                 BitmapFactory.Options o = new BitmapFactory.Options();
                 o.inJustDecodeBounds = true;
                 BitmapFactory.decodeByteArray(data, 0, data.length, o);
@@ -658,10 +686,13 @@ public class IncomingCallActivity extends Activity {
                 MAIN.post(() -> {
                     if (isFinishing()) return;
                     photo.setImageBitmap(bmp);
-                    backdrop.setImageBitmap(bmp);
-                    backdrop.animate().alpha(1f).setDuration(200).start();
-                    if (Build.VERSION.SDK_INT >= 31) backdrop.setRenderEffect(RenderEffect.createBlurEffect(dp(36), dp(36), Shader.TileMode.CLAMP));
-                    else backdrop.setAlpha(0.15f);
+                    if (initialView != null) initialView.setText("");
+                    if (backdrop != null) {
+                        backdrop.setImageBitmap(bmp);
+                        backdrop.animate().alpha(1f).setDuration(200).start();
+                        if (Build.VERSION.SDK_INT >= 31) backdrop.setRenderEffect(RenderEffect.createBlurEffect(dp(36), dp(36), Shader.TileMode.CLAMP));
+                        else backdrop.setAlpha(0.15f);
+                    }
                 });
             } catch (Exception ignored) {
             } finally {

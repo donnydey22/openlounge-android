@@ -2,6 +2,7 @@ package com.donnydey.openlounge
 
 import org.json.JSONObject
 import org.json.JSONTokener
+import java.io.File
 
 /**
  * Call-screen presence (read-only). Matches the Avatar component at 101e00a as the
@@ -66,6 +67,50 @@ object CallPresence {
             JSONTokener(json).nextValue()?.toString() ?: ""
         } catch (_: Exception) {
             json.trim().trim('"')
+        }
+    }
+
+    const val FAIL_MSG = "Can't connect the call on this network. Try another Wi-Fi or mobile data."
+
+    /** Read-only peek of the page call-screen profile photo, if it already painted one. */
+    const val PEEK_PHOTO_JS =
+        "(function(){try{var img=document.querySelector('[data-testid=\"call-screen\"] img')||document.querySelector('[data-testid=\"incoming-call\"] img');var s=img&&img.src||'';if(s.indexOf('http')===0)return s;return '';}catch(e){return '';}})()"
+
+    @JvmStatic
+    fun isFailure(reason: String?, text: String?): Boolean {
+        if (reason == "failed") return true
+        val t = text?.trim().orEmpty()
+        return t.contains("Can't connect the call on this network") || t.contains("Try another Wi-Fi")
+    }
+
+    @JvmStatic
+    fun failureText(text: String?): String {
+        val t = text?.trim().orEmpty()
+        return t.ifEmpty { FAIL_MSG }
+    }
+
+    @JvmStatic
+    fun messageFromEnd(m: JSONObject): String? {
+        for (k in arrayOf("endedText", "error", "message", "text")) {
+            val t = m.optString(k, "").trim()
+            if (t.isNotEmpty()) return t
+        }
+        return null
+    }
+
+    /** https/http profile URLs, or a file:// under this app's cache/files (tests / local decode). */
+    @JvmStatic
+    fun allowedPhotoUrl(url: String?, cacheDir: File, filesDir: File): Boolean {
+        if (url.isNullOrBlank() || url.length > 2048) return false
+        if (url.startsWith("https://") || url.startsWith("http://")) return true
+        if (!url.startsWith("file:")) return false
+        return try {
+            val path = java.net.URI(url).path ?: return false
+            val canon = File(path).canonicalPath
+            canon.startsWith(cacheDir.canonicalPath + "/") || canon.startsWith(filesDir.canonicalPath + "/") ||
+                canon == cacheDir.canonicalPath || canon == filesDir.canonicalPath
+        } catch (_: Exception) {
+            false
         }
     }
 }

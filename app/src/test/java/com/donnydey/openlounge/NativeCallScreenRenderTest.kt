@@ -51,6 +51,23 @@ class NativeCallScreenRenderTest {
         return box.width
     }
 
+
+    private fun fixturePhoto(act: Activity): String {
+        val dest = File(act.cacheDir, "avatar-placeholder.jpg")
+        dest.outputStream().use { out ->
+            javaClass.classLoader!!.getResourceAsStream("avatar-placeholder.jpg")!!.copyTo(out)
+        }
+        return dest.toURI().toString()
+    }
+    private fun idlePhoto() {
+        // file:// photos decode on the main thread; nothing to idle.
+    }
+    private fun hasPhoto(v: View): Boolean {
+        if (v is android.widget.ImageView && v.drawable != null && v.alpha > 0f && v.width > 0) return true
+        if (v is android.view.ViewGroup) for (i in 0 until v.childCount) if (hasPhoto(v.getChildAt(i))) return true
+        return false
+    }
+
     @Test fun audioCallFlow() {
         val act = Robolectric.buildActivity(Activity::class.java).setup().get()
         val root = FrameLayout(act); act.setContentView(root)
@@ -68,9 +85,12 @@ class NativeCallScreenRenderTest {
             override fun speaker(on: Boolean) {}
             override fun camera(on: Boolean, facing: String, done: (Boolean) -> Unit) { done(true) }
         })
-        s.onPageCall("call:outgoing", JSONObject().put("callId", "t1").put("name", "Ada Lovelace").put("video", false).put("presence", "online"))
+        val photo = fixturePhoto(act)
+        s.onPageCall("call:outgoing", JSONObject().put("callId", "t1").put("name", "Ada Lovelace").put("video", false).put("photo", photo).put("presence", "online"))
+        idlePhoto()
         var t = texts(root); snap(root, "1-calling")
-        assertTrue(t.toString(), t.containsAll(listOf("AL", "Ada Lovelace", "Calling…", "Phone", "Video", "Mute", "End call")))
+        assertTrue(t.toString(), t.containsAll(listOf("Ada Lovelace", "Calling…", "Phone", "Video", "Mute", "End call")))
+        assertTrue("profile photo is painted (initials only as a fallback)", hasPhoto(root))
         assertTrue("first UI offers Video on voice calls (audio→video upgrade)", t.contains("Video"))
         assertTrue("Flip stays hidden until the local camera is on", !t.contains("Flip"))
         assertTrue("online presence dot on the calling avatar", findDesc(root, "online") != null)
@@ -98,9 +118,31 @@ class NativeCallScreenRenderTest {
         }
         findBar(root)!!.performClick()
         t = texts(root); assertTrue("restored controls", t.contains("End call")); snap(root, "6-restored")
+        findClickable(root, "Video")!!.performClick()
+        root.measure(View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(2340, View.MeasureSpec.EXACTLY))
+        root.layout(0, 0, 1080, 2340)
+        t = texts(root)
+        assertTrue("short Camera label when the local camera is on", t.contains("Camera"))
+        assertTrue("Flip appears once the camera is on", t.contains("Flip"))
+        assertTrue("Stop video is not used (it overflowed the even row)", !t.contains("Stop video"))
+        val videoSizes = listOf("Speaker", "Flip", "Camera", "Mute", "End call").map { discWidth(root, it) }
+        assertTrue("even in-call video discs: $videoSizes", videoSizes.all { it == videoSizes[0] && it == expect })
+        s.onNativeVideo(true)
+        snap(root, "7-video")
         findClickable(root, "End call")!!.performClick()
         assertEquals("call:hangup", JSONObject(sent.last()).getString("type"))
         s.onPageCall("call:ended", JSONObject().put("callId", "t1"))
-        assertTrue("dismissed on ENDED", texts(root).none { it == "End call" })
+        assertTrue("normal hangup still dismisses immediately", texts(root).none { it == "End call" })
+
+        s.onPageCall("call:outgoing", JSONObject().put("callId", "t2").put("name", "Ada Lovelace").put("video", false).put("photo", photo).put("presence", "online"))
+        idlePhoto()
+        s.onPageCall("call:ended", JSONObject().put("callId", "t2").put("reason", "failed"))
+        t = texts(root)
+        assertTrue(t.toString(), t.any { it.contains("Can't connect the call on this network") })
+        assertTrue("failure screen has no bottom row", !t.contains("End call"))
+        assertTrue("Close control is in the top-right", findDesc(root, "Close") != null)
+        snap(root, "8-failed")
+        findDesc(root, "Close")!!.performClick()
+        assertTrue("X dismisses the failure screen", texts(root).none { it.contains("Can't connect the call") })
     }
 }

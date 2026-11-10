@@ -42,6 +42,8 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         fun camera(on: Boolean, facing: String, done: (Boolean) -> Unit)
         /** Read-only peek of the page's existing call-screen presence (data-presence). */
         fun peekCallPresence(done: (String?) -> Unit) { done(null) }
+        /** Read-only peek of the page call-screen profile photo src, when the message had none. */
+        fun peekCallPhoto(done: (String?) -> Unit) { done(null) }
         /** When minimized from a host with no WebView, bring the real app forward. No hang-up. */
         fun revealAppWhenMinimized() {}
     }
@@ -83,7 +85,11 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
                 // Native-UI first cut: never hide for WebView. Stay visible; avatar/status cover until native tiles up.
                 if (hidden) { hidden = false; view?.visibility = View.VISIBLE }
             }
-            "call:ended" -> if (id.isEmpty() || id == callId) { set(NativeCallFlow.State.ENDED); dismiss() }
+            "call:ended" -> if (id.isEmpty() || id == callId) {
+                val text = CallPresence.messageFromEnd(m)
+                if (CallPresence.isFailure(m.optString("reason", ""), text)) showFailed(CallPresence.failureText(text))
+                else { set(NativeCallFlow.State.ENDED); dismiss() }
+            }
             "call:muted" -> { muted = m.optBoolean("muted"); render() }
             "call:audioRoute" -> if (m.has("speaker")) { speakerOn = m.optBoolean("speaker"); render() }
         }
@@ -98,7 +104,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     private var incomingPresence: Pair<String, String?>? = null
 
     private fun begin(id: String, peer: String, v: Boolean, photo: String = "", presence: String? = null) {
-        dismiss(); callId = id; video = v; camOn = v; muted = false; speakerOn = v; facing = "user"
+        dismiss(); callId = id; video = v; camOn = v; muted = false; speakerOn = v; facing = "user"; failed = false; failedText = null
         if (!Prefs.nativeCallUi(act)) { callId = null; return }
         build(); name.text = peer.ifEmpty { act.getString(R.string.app_name) }; loadPhoto(id, photo)
         applyPresence(presence ?: incomingPresence?.takeIf { it.first == id }?.second)
@@ -109,7 +115,22 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         if (s == NativeCallFlow.State.ESTABLISHED && establishedAt == 0L) { establishedAt = SystemClock.elapsedRealtime(); ui.post(tick) }
         render() }
 
-    private fun dismiss() { ui.removeCallbacks(tick); ui.removeCallbacks(hideCtl); ui.removeCallbacks(presenceTick); view?.let { root.removeView(it) }; view = null; state = null; callId = null; hidden = false; establishedAt = 0L; nativeVideo = false; minimized = false }
+    private var failed = false
+    private var failedText: String? = null
+
+    private fun showFailed(text: String) {
+        failed = true
+        failedText = text
+        minimized = false
+        nativeVideo = false
+        hidden = false
+        set(NativeCallFlow.State.ENDED)
+        if (view == null) return
+        view?.visibility = View.VISIBLE
+        render()
+    }
+
+    private fun dismiss() { ui.removeCallbacks(tick); ui.removeCallbacks(hideCtl); ui.removeCallbacks(presenceTick); view?.let { root.removeView(it) }; view = null; state = null; callId = null; hidden = false; establishedAt = 0L; nativeVideo = false; minimized = false; failed = false; failedText = null }
 
     private fun dp(v: Int) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), act.resources.displayMetrics).toInt()
 
@@ -149,17 +170,36 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     private lateinit var presenceDot: View
 
     /** web AvatarPhoto.tsx: initials stay underneath, the photo fades in once decoded, a broken URL keeps the initials.
-     *  http(s) only, like server/calls/index.ts voipPayload callerPhoto. */
+     *  http(s) profile URLs, or a file:// under this app's cache/files (Robolectric fixtures). */
     private fun loadPhoto(id: String, url: String) {
-        if (!url.startsWith("http://") && !url.startsWith("https://")) return
+        if (!CallPresence.allowedPhotoUrl(url, act.cacheDir, act.filesDir)) return
+        // Local cache files are small and already on disk — decode on this thread so tests
+        // (and a just-written cache file) show the photo without waiting on a background post.
+        if (url.startsWith("file:")) {
+            try {
+                val bmp = android.graphics.BitmapFactory.decodeFile(java.net.URI(url).path) ?: return
+                applyDecodedPhoto(id, bmp)
+            } catch (_: Throwable) {}
+            return
+        }
         Thread {
             val bmp = try {
                 val c = java.net.URL(url).openConnection() as java.net.HttpURLConnection
                 c.connectTimeout = 8000; c.readTimeout = 8000
                 c.inputStream.use { android.graphics.BitmapFactory.decodeStream(it) }.also { c.disconnect() }
             } catch (_: Throwable) { null } ?: return@Thread
-            ui.post { if (callId == id && view != null) { photoView.setImageBitmap(bmp); bgPhoto.setImageBitmap(bmp); bgPhoto.animate().alpha(1f).setDuration(200).start(); photoView.animate().alpha(1f).setDuration(200).withEndAction { avatar.text = "" }.start() } }
+            ui.post { applyDecodedPhoto(id, bmp) }
         }.start()
+    }
+
+    private fun applyDecodedPhoto(id: String, bmp: android.graphics.Bitmap) {
+        if (callId != id || view == null) return
+        photoView.setImageBitmap(bmp)
+        photoView.alpha = 1f
+        avatar.text = ""
+        bgPhoto.setImageBitmap(bmp)
+        bgPhoto.alpha = 1f
+        bgPhoto.animate().alpha(1f).setDuration(200).start()
     }
     private lateinit var bFirst: Btn
     private lateinit var bFlip: Btn
@@ -235,6 +275,23 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         }
         minBtn.addView(android.widget.ImageView(act).apply { setImageResource(R.drawable.ol_call_chevron_down); setColorFilter(Color.WHITE) }, FrameLayout.LayoutParams(dp(24), dp(24), Gravity.CENTER))
         v.addView(minBtn, FrameLayout.LayoutParams(dp(40), dp(40), Gravity.TOP or Gravity.START).apply { topMargin = dp(16); leftMargin = dp(12) })
+        closeBtn = FrameLayout(act).apply {
+            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0x1AFFFFFF) }
+            setOnClickListener { dismiss() }
+            contentDescription = "Close"
+            visibility = View.GONE
+        }
+        closeBtn.addView(android.widget.ImageView(act).apply { setImageResource(R.drawable.ol_call_close); setColorFilter(Color.WHITE) }, FrameLayout.LayoutParams(dp(20), dp(20), Gravity.CENTER))
+        v.addView(closeBtn, FrameLayout.LayoutParams(dp(40), dp(40), Gravity.TOP or Gravity.END).apply { topMargin = dp(16); rightMargin = dp(12) })
+        failBanner = TextView(act).apply {
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply { setColor(0x99000000.toInt()); cornerRadius = dp(16).toFloat() }
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+            visibility = View.GONE
+        }
+        v.addView(failBanner, FrameLayout.LayoutParams(dp(280), -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = dp(72) })
         miniBar = LinearLayout(act).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -256,6 +313,8 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
 
     private lateinit var row: LinearLayout
     private lateinit var minBtn: FrameLayout
+    private lateinit var closeBtn: FrameLayout
+    private lateinit var failBanner: TextView
     private lateinit var miniBar: LinearLayout
     private lateinit var miniDot: View
     private lateinit var miniLabel: TextView
@@ -280,7 +339,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     }
 
     private fun applyChrome(v: ViewGroup) {
-        val incomingOrEnded = state == NativeCallFlow.State.ENDED
+        val incomingOrEnded = state == NativeCallFlow.State.ENDED || failed
         val lp = v.layoutParams as? FrameLayout.LayoutParams
         if (minimized && !incomingOrEnded) {
             // First UI MiniBar: only the green bar, over the real app — no blank full-screen stage.
@@ -316,10 +375,12 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
             val c = v.getChildAt(i)
             c.visibility = if (c === miniBar) View.GONE else View.VISIBLE
         }
-        bg.visibility = if (nativeVideo) View.GONE else View.VISIBLE
-        val hide = nativeVideo && !showCtl
-        row.visibility = if (hide) View.GONE else View.VISIBLE
+        bg.visibility = if (nativeVideo && !failed) View.GONE else View.VISIBLE
+        val hide = nativeVideo && !showCtl && !failed
+        row.visibility = if (hide || failed) View.GONE else View.VISIBLE
         minBtn.visibility = if (hide || incomingOrEnded) View.GONE else View.VISIBLE
+        closeBtn.visibility = if (failed) View.VISIBLE else View.GONE
+        failBanner.visibility = if (failed) View.VISIBLE else View.GONE
         top.visibility = if (hide) View.INVISIBLE else View.VISIBLE
         if (nativeVideo) NativeCallVideo.show(true)
         if (nativeVideo && showCtl) {
@@ -338,22 +399,29 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     private fun render() {
         val v = view ?: return
         v.setBackgroundColor(if (nativeVideo) Color.TRANSPARENT else 0xFF0B1220.toInt())
-        avatarBox.visibility = if (nativeVideo) View.GONE else View.VISIBLE
-        bg.visibility = if (nativeVideo) View.GONE else View.VISIBLE
+        val videoStage = nativeVideo && !failed
+        avatarBox.visibility = if (videoStage) View.GONE else View.VISIBLE
+        bg.visibility = if (videoStage) View.GONE else View.VISIBLE
         (avatarBox.parent as View).visibility = avatarBox.visibility
-        val ringing = state == NativeCallFlow.State.WAITING
+        val ringing = state == NativeCallFlow.State.WAITING && !failed
         rings.forEachIndexed { i, rv -> if (ringing && rv.tag == null) { rv.tag = 1; pulse(rv, i * 800L) } else if (!ringing) { rv.tag = null; rv.animate().cancel(); rv.alpha = 0f } }
-        name.textSize = if (nativeVideo) 20f else 28f
-        (top.layoutParams as FrameLayout.LayoutParams).apply { gravity = if (nativeVideo) Gravity.TOP else Gravity.CENTER; topMargin = if (nativeVideo) dp(64) else 0; bottomMargin = if (nativeVideo) 0 else dp(80) }
+        name.textSize = if (videoStage) 20f else 28f
+        (top.layoutParams as FrameLayout.LayoutParams).apply { gravity = if (videoStage) Gravity.TOP else Gravity.CENTER; topMargin = if (videoStage) dp(64) else 0; bottomMargin = if (videoStage) 0 else dp(80) }
         top.requestLayout()
         if (photoView.alpha < 1f) avatar.text = initials(name.text?.toString().orEmpty())
-        if (state != NativeCallFlow.State.ESTABLISHED) status.text = NativeCallFlow.statusText(state)
+        if (failed) {
+            status.text = failedText ?: CallPresence.FAIL_MSG
+            failBanner.text = failedText ?: CallPresence.FAIL_MSG
+        } else if (state != NativeCallFlow.State.ESTABLISHED) {
+            status.text = NativeCallFlow.statusText(state)
+        }
         // First UI always offers Video (audio→video upgrade). Flip is shown once the local camera is on.
-        bFlip.box.visibility = if (camOn) View.VISIBLE else View.GONE
+        // "Camera" (not "Stop video") keeps five even 56dp labeled circles on one row.
+        bFlip.box.visibility = if (camOn && !failed) View.VISIBLE else View.GONE
         bFlip.set("Flip", R.drawable.ol_call_refresh_cw)
         bFirst.set(if (speakerOn) "Speaker" else "Phone", if (speakerOn) R.drawable.ol_call_volume2 else R.drawable.ol_call_ear, active = speakerOn)
-        bVid.box.visibility = View.VISIBLE
-        bVid.set(if (camOn) "Stop video" else "Video", if (camOn) R.drawable.ol_call_video else R.drawable.ol_call_video_off, active = camOn)
+        bVid.box.visibility = if (failed) View.GONE else View.VISIBLE
+        bVid.set(if (camOn) "Camera" else "Video", if (camOn) R.drawable.ol_call_video else R.drawable.ol_call_video_off, active = camOn)
         bMic.set(if (muted) "Unmute" else "Mute", if (muted) R.drawable.ol_call_mic_off else R.drawable.ol_call_mic, active = muted)
         applyChrome(v)
     }
@@ -364,8 +432,14 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
             actions.peekCallPresence { raw ->
                 val t = CallPresence.rawFromJs(raw).ifBlank { raw?.trim().orEmpty() }
                 if (t.isNotEmpty()) applyPresence(CallPresence.of(t))
-                if (view != null) ui.postDelayed(this, 2000)
             }
+            if (view != null && photoView.alpha < 1f) {
+                actions.peekCallPhoto { raw ->
+                    val t = CallPresence.rawFromJs(raw).ifBlank { raw?.trim().orEmpty() }
+                    if (t.startsWith("http://") || t.startsWith("https://")) callId?.let { loadPhoto(it, t) }
+                }
+            }
+            if (view != null) ui.postDelayed(this, 2000)
         }
     }
 
