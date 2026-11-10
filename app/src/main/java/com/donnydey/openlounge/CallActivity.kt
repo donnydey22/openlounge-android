@@ -62,7 +62,6 @@ class CallActivity : Activity() {
             @Suppress("DEPRECATION")
             window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON)
         }
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         val r = FrameLayout(this).also { it.setBackgroundColor(0xFF0B1220.toInt()); root = it }
         setContentView(r)
         screen = NativeCallScreen(this, r, object : NativeCallScreen.Actions {
