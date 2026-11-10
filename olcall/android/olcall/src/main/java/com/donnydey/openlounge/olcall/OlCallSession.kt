@@ -45,6 +45,8 @@ class OlCallSession(
     crumbs: OlBreadcrumbs = OlBreadcrumbs(OlCallKit.crumbUrlFor(serverUrl), OlTgcallsEngine.ENGINE),
     /** CallMedia.iceServers from the OL JS layer (optional; the server's joined frame wins). */
     private val appIceServers: org.json.JSONArray? = null,
+    /** Durable call log for this leg (OlCallLog); null = not logged. */
+    private val callLog: OlCallLog? = null,
 ) {
     data class Peer(val userId: String, val displayName: String, val avatarUrl: String?)
 
@@ -122,7 +124,7 @@ class OlCallSession(
         startAudio()
         val (url, token, crumbs) = engineArgs
         engine = OlTgcallsEngine(url, token, crumbs, engineListener, startWithVideo = video,
-            remoteVideoSink = remote, localVideoSink = local, appIceServers = appIceServers)
+            remoteVideoSink = remote, localVideoSink = local, appIceServers = appIceServers, callLog = callLog)
         engine.start(device = Build.MODEL, os = "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
         tick()
         push()

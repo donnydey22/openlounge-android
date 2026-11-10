@@ -27,7 +27,7 @@ object CallMediaCoordinator {
     private val main = Handler(Looper.getMainLooper())
     @Volatile private var active = false
     private var appCtx: Context? = null
-    @JvmStatic fun init(ctx: Context) { appCtx = ctx.applicationContext; CallDiskLog.init(ctx) }
+    @JvmStatic fun init(ctx: Context) { appCtx = ctx.applicationContext; CallDiskLog.init(ctx); runCatching { OlCallLogs.init(ctx) } }
     @Volatile private var videoOn = false
     @Volatile private var muted = false
     @Volatile private var callId: String? = null
@@ -54,10 +54,11 @@ object CallMediaCoordinator {
                     else OlCallPermissions.Action.START_OR_ACCEPT_AUDIO
                 // mic (audio) or mic+camera in one combined request (video), only at this connect tap; denial is silent
                 ensurePerms(action) { ok ->
-                    if (!ok) return@ensurePerms done(false, null, "permission-denied")
+                    if (!ok) { OlCallLogs.failedBeforeStart(id, media?.optString("token"), wantVideo, "permission-denied"); return@ensurePerms done(false, null, "permission-denied") }
                     if (callId != id) return@ensurePerms done(false, null, "cancelled")
                     if (!OlcallRoute.eligible(media, android.os.Build.VERSION.SDK_INT, android.os.Build.SUPPORTED_ABIS.toList())) {
                         CallDiskLog.mark("olcall-unavailable", "sdk=${android.os.Build.VERSION.SDK_INT} provider=${media?.optString("provider") ?: ""}")
+                        OlCallLogs.failedBeforeStart(id, media?.optString("token"), wantVideo, "olcall-unavailable")
                         return@ensurePerms done(false, null, "olcall-unavailable")
                     }
                     startOlcall(id, media!!, wantVideo, c.optString("peerId"), done)
@@ -128,6 +129,7 @@ object CallMediaCoordinator {
                 },
                 onEnded = { reason, wasConnected ->
                     CallDiskLog.mark("olcall-ended", "reason=$reason connected=$wasConnected")
+                    OlCallLogs.kick()
                     if (olcall != null && callId == id) {
                         val normal = reason == "local-hangup" || reason.startsWith("bye")
                         if (!normal) host?.emit(JSONObject().put("state", "failed").put("callId", id).toString())

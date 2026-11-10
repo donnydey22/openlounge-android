@@ -43,7 +43,8 @@ internal class OlcallCall(
         }
         session = OlCallSession(ctx.applicationContext, media.optString("url"), media.optString("token"),
             OlCallSession.Peer(peerId, "", null), video, ui,
-            appIceServers = OlcallRoute.appIceServers(media))
+            appIceServers = OlcallRoute.appIceServers(media),
+            callLog = OlCallLogs.recorder(id, media.optString("token"), video))
         val (remote, local) = NativeCallVideo.olcallRenderers(ctx)
         session.attachRenderers(remote, local)
     }

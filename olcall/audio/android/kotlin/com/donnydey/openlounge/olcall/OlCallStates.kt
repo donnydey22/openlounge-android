@@ -39,6 +39,9 @@ class OlCallStates(
 
     private val started = nowMs()
 
+    /** Call log (OlCallLog): every transition with its from/to/reason/t. Set by the engine; never throws into it. */
+    @Volatile var onTransition: ((from: State, to: State, reason: String, ms: Long) -> Unit)? = null
+
     companion object {
         fun line(from: State, to: State, reason: String, ms: Long, callId: String): String {
             val id = if (callId.isEmpty()) "-" else callId
@@ -54,9 +57,11 @@ class OlCallStates(
         if (to == state || state == State.failed) return null
         val ms = nowMs() - started
         val l = line(from = state, to = to, reason = reason, ms = ms, callId = callId)
+        val from = state
         state = to
         lines.add(l)
         sink(l)
+        onTransition?.let { runCatching { it(from, to, reason, ms) } }
         return l
     }
 

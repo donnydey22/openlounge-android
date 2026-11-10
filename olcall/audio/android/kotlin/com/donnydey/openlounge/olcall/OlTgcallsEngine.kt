@@ -46,6 +46,8 @@ class OlTgcallsEngine(
      * shape). Used only if the server's joined frame carries none; see [OlRtcServers].
      */
     private val appIceServers: JSONArray? = null,
+    /** Durable call log (OlCallLog): every state transition + engine events, uploaded to the OL backend. */
+    private val callLog: OlCallLog? = null,
 ) {
     interface Listener {
         fun onState(state: State)
@@ -75,6 +77,8 @@ class OlTgcallsEngine(
         Log.i("olcall", line)
         crumbs.event("state", line, if (" -> failed " in line) "error" else "info")
     }
+
+    init { callLog?.attach(states) }
 
     /** The tgcalls version this phone joins with: the newest one both this build and the server speak. */
     val version: String = OlVersions.pick(nativeVersions().toList())
@@ -119,6 +123,8 @@ class OlTgcallsEngine(
                 // and the TURN relay is only the fallback. Credentials are never logged.
                 val (rtc, source) = OlRtcServers.select(f.optJSONArray("iceServers"), appIceServers)
                 crumbs.event("tg", "rtc-servers:source=$source:" + OlRtcServers.summary(rtc))
+                callLog?.let { l -> l.turnServers = rtc.count { it.isTurn }
+                    runCatching { l.event("rtc_servers", detail = "source=$source", extra = mapOf("turnServers" to rtc.count { it.isTurn }, "stunServers" to rtc.count { !it.isTurn })) } }
                 handle = nativeCreate(version, key, outgoing, "{}", startWithVideo, remoteVideoSink, localVideoSink,
                     rtc.map { it.host }.toTypedArray(), rtc.map { it.port }.toIntArray(),
                     rtc.map { it.login }.toTypedArray(), rtc.map { it.password }.toTypedArray(),
@@ -134,7 +140,9 @@ class OlTgcallsEngine(
             }
             "stats" -> f.optJSONObject("stats")?.let { listener.onStats(it) }
             "bye" -> end("bye:" + f.optString("reason"))
-            "error" -> { crumbs.event("ws", "server-error:" + f.optString("error"), "error"); end("server-error") }
+            "error" -> { crumbs.event("ws", "server-error:" + f.optString("error"), "error")
+                runCatching { callLog?.event("server_error", OlCallLogTags.tag("server-error:" + f.optString("error")), f.optString("error").take(60)) }
+                end("server-error") }
         }
     }
 
@@ -160,6 +168,8 @@ class OlTgcallsEngine(
         if (handle != 0L) { nativeStop(handle); handle = 0L }
         ws?.close(1000, null); ws = null
         crumbs.event("call", "ended:$reason")
+        runCatching { callLog?.event("ended", if (normal) "normal" else if (states.state == OlCallStates.State.connected) OlCallLogTags.tag("after-connect:$reason") else null,
+            reason, mapOf("connected" to (states.state == OlCallStates.State.connected), "blobsSent" to states.blobsSent, "blobsReceived" to states.blobsReceived)) }
         crumbs.flush()
         listener.onEnded(reason)
     }
@@ -193,6 +203,7 @@ class OlTgcallsEngine(
     private fun onNativeAudioOpenReport(json: String) {
         val ok = JSONObject(json).optInt("ok") == 1
         crumbs.event("adm", "open-report:" + json, if (ok) "info" else "error") // report holds codes/rates only
+        if (!ok) runCatching { callLog?.event("audio_session", "audio_session_handoff_failure", "adm-open-report:" + json) }
         worker.execute { listener.onAudioOpenReport(json) }
     }
 
