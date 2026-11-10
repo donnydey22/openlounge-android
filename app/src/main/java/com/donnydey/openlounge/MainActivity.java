@@ -1088,8 +1088,9 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         remoteVideo = NativeCallVideo.INSTANCE.renderer(this, false);
         localVideo = NativeCallVideo.INSTANCE.renderer(this, true); // PiP above the full-screen remote surface
         float d = getResources().getDisplayMetrics().density;
-        FrameLayout.LayoutParams pip = new FrameLayout.LayoutParams((int) (110 * d), (int) (160 * d), android.view.Gravity.TOP | android.view.Gravity.END);
-        pip.setMargins(0, (int) (96 * d), (int) (16 * d), 0);
+        // first UI PiP (101e00a): 100×150 dp, 12 dp inset, 64 dp from the top
+        FrameLayout.LayoutParams pip = new FrameLayout.LayoutParams((int) (100 * d), (int) (150 * d), android.view.Gravity.TOP | android.view.Gravity.END);
+        pip.setMargins(0, (int) (64 * d), (int) (12 * d), 0);
         int at = root.indexOfChild(webView);
         root.addView(remoteVideo, at, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         root.addView(localVideo, at + 1, pip);

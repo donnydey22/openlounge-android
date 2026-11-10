@@ -51,14 +51,31 @@ class NativeCallScreenRenderTest {
         })
         s.onPageCall("call:outgoing", JSONObject().put("callId", "t1").put("name", "Ada Lovelace").put("video", false))
         var t = texts(root); snap(root, "1-calling")
-        assertTrue(t.toString(), t.containsAll(listOf("AL", "Ada Lovelace", "Calling…", "Phone", "Mute", "End call")))
-        assertTrue("no Video button on voice calls", !t.contains("Video"))
+        assertTrue(t.toString(), t.containsAll(listOf("AL", "Ada Lovelace", "Calling…", "Phone", "Video", "Mute", "End call")))
+        assertTrue("first UI offers Video on voice calls (audio→video upgrade)", t.contains("Video"))
+        assertTrue("Flip stays hidden until the local camera is on", !t.contains("Flip"))
         s.onPageCall("call:answering", JSONObject().put("callId", "t1"))
         t = texts(root); snap(root, "2-connecting"); assertTrue(t.toString(), t.contains("Connecting…"))
         s.onPageCall("call:connected", JSONObject().put("callId", "t1"))
         org.robolectric.shadows.ShadowLooper.idleMainLooper(1, java.util.concurrent.TimeUnit.SECONDS)
         t = texts(root); snap(root, "3-active"); assertTrue(t.toString(), t.any { Regex("^\\d+:\\d\\d$").matches(it) })
         findClickable(root, "Phone")!!.performClick(); t = texts(root); assertTrue(t.contains("Speaker")); snap(root, "4-speaker")
+        fun findDesc(v: View, d: String): View? {
+            if (v.contentDescription == d) return v
+            if (v is ViewGroup) for (i in 0 until v.childCount) findDesc(v.getChildAt(i), d)?.let { return it }
+            return null
+        }
+        findDesc(root, "Minimize call")!!.performClick()
+        t = texts(root); assertTrue("minimized bar shows the peer and Tap to return", t.any { it.contains("Ada Lovelace") && it.contains("Tap to return") })
+        assertTrue("controls hidden while minimized", !t.contains("End call"))
+        snap(root, "5-minimized")
+        fun findBar(v: View): View? {
+            if (v is android.widget.TextView && v.text.toString().contains("Tap to return") && (v.parent as? View)?.hasOnClickListeners() == true) return v.parent as View
+            if (v is ViewGroup) for (i in 0 until v.childCount) findBar(v.getChildAt(i))?.let { return it }
+            return null
+        }
+        findBar(root)!!.performClick()
+        t = texts(root); assertTrue("restored controls", t.contains("End call")); snap(root, "6-restored")
         findClickable(root, "End call")!!.performClick()
         assertEquals("call:hangup", JSONObject(sent.last()).getString("type"))
         s.onPageCall("call:ended", JSONObject().put("callId", "t1"))

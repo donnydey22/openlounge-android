@@ -16,6 +16,12 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.TypedValue;
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
+import android.animation.ObjectAnimator;
+import android.animation.ValueAnimator;
+import android.view.MotionEvent;
+import android.view.animation.PathInterpolator;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -23,6 +29,7 @@ import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
 import java.io.ByteArrayOutputStream;
@@ -212,32 +219,73 @@ public class IncomingCallActivity extends Activity {
         super.onDestroy();
     }
 
-    // ---------- UI (programmatic: dark backdrop, avatar, name, two round buttons) ----------
+    // ---------- UI: first Open Lounge call screen (web 101e00a, 2026-10-07 MST) ----------
+    // Full-screen #0b1220 stage, drifting blobs + blurred photo, squircle avatar, 72dp red Decline,
+    // 48dp Message, 72dp pulsing emerald Accept with swipe-up. Quick-reply sheet declines the call.
+    // Accept / Decline / permission paths above this line are unchanged.
 
     private int dp(float v) {
         return Math.round(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, getResources().getDisplayMetrics()));
     }
 
+    private final java.util.ArrayList<View> rings = new java.util.ArrayList<>();
+    private View acceptDisc;
+    private View haloA;
+    private View haloB;
+    private View replies;
+    private float acceptDragY;
+    private Float acceptStartY;
+
     private void buildUi(String name, boolean video, String photoUrl) {
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(Color.parseColor("#0B1220"));
+        root.setClipChildren(false);
+        int vmax = Math.max(getResources().getDisplayMetrics().widthPixels, getResources().getDisplayMetrics().heightPixels);
 
+        // drifting colour blobs (peer slate + indigo #6366F1) + blurred photo + shade
+        FrameLayout bg = new FrameLayout(this);
+        bg.addView(blob(0xFF64748B, Gravity.TOP | Gravity.START, 0.18f, 0.14f, vmax));
+        bg.addView(blob(0xFF6366F1, Gravity.BOTTOM | Gravity.END, -0.16f, -0.12f, vmax));
         ImageView backdrop = new ImageView(this);
         backdrop.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        backdrop.setAlpha(0.55f);
-        root.addView(backdrop, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        backdrop.setScaleX(1.15f);
+        backdrop.setScaleY(1.15f);
+        backdrop.setAlpha(0f);
+        if (Build.VERSION.SDK_INT >= 31) {
+            backdrop.setRenderEffect(RenderEffect.createBlurEffect(dp(36), dp(36), Shader.TileMode.CLAMP));
+        }
+        bg.addView(backdrop, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        View shade = new View(this);
+        shade.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, new int[]{0x40000000, 0x0D000000, 0x8C000000}));
+        bg.addView(shade, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        root.addView(bg, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
         col.setGravity(Gravity.CENTER_HORIZONTAL);
-        col.setPadding(dp(24), dp(96), dp(24), dp(64));
+        col.setClipChildren(false);
+        int padTop = dp(24) + (Build.VERSION.SDK_INT >= 35 ? 0 : 0);
+        col.setPadding(dp(24), dp(96), dp(24), dp(32));
         root.addView(col, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
+        FrameLayout ringBox = new FrameLayout(this);
+        ringBox.setClipChildren(false);
+        rings.clear();
+        for (int i = 0; i < 3; i++) {
+            View rv = new View(this);
+            GradientDrawable ring = new GradientDrawable();
+            ring.setShape(GradientDrawable.OVAL);
+            ring.setStroke(dp(2), 0x59FFFFFF);
+            rv.setBackground(ring);
+            rv.setAlpha(0f);
+            rings.add(rv);
+            ringBox.addView(rv, new FrameLayout.LayoutParams(dp(112), dp(112)));
+        }
         FrameLayout avatar = new FrameLayout(this);
-        GradientDrawable circle = new GradientDrawable();
-        circle.setCornerRadius(dp(47));
-        circle.setColor(Color.parseColor("#64748B"));
-        avatar.setBackground(circle);
+        GradientDrawable squircle = new GradientDrawable();
+        squircle.setCornerRadius(dp(47));
+        squircle.setColor(Color.parseColor("#64748B"));
+        avatar.setBackground(squircle);
         avatar.setClipToOutline(true);
         TextView initial = new TextView(this);
         initial.setText(initials(name));
@@ -248,17 +296,20 @@ public class IncomingCallActivity extends Activity {
         ImageView photo = new ImageView(this);
         photo.setScaleType(ImageView.ScaleType.CENTER_CROP);
         avatar.addView(photo, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        col.addView(avatar, new LinearLayout.LayoutParams(dp(112), dp(112)));
+        ringBox.addView(avatar, new FrameLayout.LayoutParams(dp(112), dp(112)));
+        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(dp(112), dp(112));
+        rlp.bottomMargin = dp(12);
+        col.addView(ringBox, rlp);
 
         TextView title = new TextView(this);
         title.setText(name);
         title.setTextColor(Color.WHITE);
         title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 28);
         title.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+        title.setLetterSpacing(-0.01f);
         title.setGravity(Gravity.CENTER);
         title.setMaxLines(2);
         LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        tl.topMargin = dp(12);
         col.addView(title, tl);
 
         TextView sub = new TextView(this);
@@ -274,35 +325,64 @@ public class IncomingCallActivity extends Activity {
 
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER);
-        row.addView(button(getString(R.string.call_decline), "#EF4444", R.drawable.ol_call_phone_off, v -> decline()), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        row.addView(button(getString(R.string.call_accept), "#10B981", video ? R.drawable.ol_call_video : R.drawable.ol_call_phone, v -> accept()), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row.setGravity(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        row.setClipChildren(false);
+        row.addView(roundAction(getString(R.string.call_decline), 0xFFEF4444, R.drawable.ol_call_phone_off, 72, 8, 13, v -> decline()), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(roundAction(getString(R.string.call_message), 0x26FFFFFF, R.drawable.ol_call_message, 48, 5, 12, v -> showReplies(true)), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(acceptButton(video), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         col.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        replies = buildReplies();
+        replies.setVisibility(View.GONE);
+        root.addView(replies, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         setContentView(root);
         loadPhoto(photoUrl, photo, backdrop);
+        for (int i = 0; i < rings.size(); i++) pulseRing(rings.get(i), i * 800L);
+        pulseAccept();
     }
 
-    private View button(String label, String color, int iconRes, View.OnClickListener onClick) {
+    private View blob(int color, int gravity, float dx, float dy, int vmax) {
+        View v = new View(this);
+        GradientDrawable g = new GradientDrawable();
+        g.setGradientType(GradientDrawable.RADIAL_GRADIENT);
+        g.setGradientRadius(vmax * 0.35f);
+        g.setColors(new int[]{(0x8C << 24) | (color & 0xFFFFFF), color & 0xFFFFFF});
+        v.setBackground(g);
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams((int) (vmax * 0.7), (int) (vmax * 0.7), gravity);
+        if ((gravity & Gravity.START) == Gravity.START) {
+            lp.leftMargin = (int) (-vmax * 0.25);
+            lp.topMargin = (int) (-vmax * 0.2);
+        } else {
+            lp.rightMargin = (int) (-vmax * 0.3);
+            lp.bottomMargin = (int) (-vmax * 0.25);
+        }
+        v.setLayoutParams(lp);
+        v.animate().translationX(dx * vmax).translationY(dy * vmax).setDuration(14000).start();
+        return v;
+    }
+
+    private View roundAction(String label, int color, int iconRes, int sizeDp, int iconDp, int labelSp, View.OnClickListener onClick) {
         LinearLayout b = new LinearLayout(this);
         b.setOrientation(LinearLayout.VERTICAL);
         b.setGravity(Gravity.CENTER_HORIZONTAL);
         FrameLayout disc = new FrameLayout(this);
         GradientDrawable g = new GradientDrawable();
         g.setShape(GradientDrawable.OVAL);
-        g.setColor(Color.parseColor(color));
+        g.setColor(color);
         disc.setBackground(g);
-        disc.setElevation(dp(8));
+        disc.setElevation(sizeDp >= 72 ? dp(8) : 0);
         ImageView ic = new ImageView(this);
         ic.setImageResource(iconRes);
-        disc.addView(ic, new FrameLayout.LayoutParams(dp(32), dp(32), Gravity.CENTER));
+        if (color == 0x26FFFFFF) ic.setColorFilter(Color.WHITE);
+        disc.addView(ic, new FrameLayout.LayoutParams(dp(iconDp == 8 ? 32 : (iconDp == 5 ? 20 : 32)), dp(iconDp == 8 ? 32 : (iconDp == 5 ? 20 : 32)), Gravity.CENTER));
         disc.setContentDescription(label);
         disc.setOnClickListener(onClick);
-        b.addView(disc, new LinearLayout.LayoutParams(dp(72), dp(72)));
+        b.addView(disc, new LinearLayout.LayoutParams(dp(sizeDp), dp(sizeDp)));
         TextView t = new TextView(this);
         t.setText(label);
         t.setTextColor(0xD9FFFFFF);
-        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, labelSp);
         t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         t.setGravity(Gravity.CENTER);
         t.setOnClickListener(onClick);
@@ -310,6 +390,184 @@ public class IncomingCallActivity extends Activity {
         lp.topMargin = dp(8);
         b.addView(t, lp);
         return b;
+    }
+
+    private View acceptButton(boolean video) {
+        LinearLayout b = new LinearLayout(this);
+        b.setOrientation(LinearLayout.VERTICAL);
+        b.setGravity(Gravity.CENTER_HORIZONTAL);
+        b.setClipChildren(false);
+        FrameLayout wrap = new FrameLayout(this);
+        wrap.setClipChildren(false);
+        haloA = halo();
+        haloB = halo();
+        wrap.addView(haloA, new FrameLayout.LayoutParams(dp(72), dp(72), Gravity.CENTER));
+        wrap.addView(haloB, new FrameLayout.LayoutParams(dp(72), dp(72), Gravity.CENTER));
+        FrameLayout disc = new FrameLayout(this);
+        GradientDrawable g = new GradientDrawable();
+        g.setShape(GradientDrawable.OVAL);
+        g.setColor(0xFF10B981);
+        disc.setBackground(g);
+        disc.setElevation(dp(8));
+        ImageView ic = new ImageView(this);
+        ic.setImageResource(video ? R.drawable.ol_call_video : R.drawable.ol_call_phone);
+        ic.setColorFilter(Color.WHITE);
+        disc.addView(ic, new FrameLayout.LayoutParams(dp(32), dp(32), Gravity.CENTER));
+        String label = getString(R.string.call_accept);
+        disc.setContentDescription(video ? "Accept video call" : label);
+        disc.setOnClickListener(v -> accept());
+        disc.setOnTouchListener((v, ev) -> {
+            switch (ev.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    acceptStartY = ev.getRawY();
+                    acceptDragY = 0;
+                    v.getParent().requestDisallowInterceptTouchEvent(true);
+                    return true;
+                case MotionEvent.ACTION_MOVE:
+                    if (acceptStartY != null) {
+                        acceptDragY = Math.min(0, ev.getRawY() - acceptStartY);
+                        float dy = Math.max(-120, acceptDragY);
+                        disc.setTranslationY(dy);
+                    }
+                    return true;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    if (acceptDragY < -dp(60)) accept();
+                    else if (ev.getActionMasked() == MotionEvent.ACTION_UP && Math.abs(acceptDragY) < dp(8)) accept();
+                    acceptStartY = null;
+                    acceptDragY = 0;
+                    disc.animate().translationY(0).setDuration(140).start();
+                    return true;
+            }
+            return false;
+        });
+        acceptDisc = disc;
+        wrap.addView(disc, new FrameLayout.LayoutParams(dp(72), dp(72), Gravity.CENTER));
+        b.addView(wrap, new LinearLayout.LayoutParams(dp(72), dp(72)));
+        TextView swipe = new TextView(this);
+        swipe.setText(getString(R.string.call_swipe_up));
+        swipe.setTextColor(0x99FFFFFF);
+        swipe.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        swipe.setGravity(Gravity.CENTER);
+        // place the hint above the button visually: add it first then move via index — keep below for compactness on short screens
+        TextView t = new TextView(this);
+        t.setText(label);
+        t.setTextColor(0xD9FFFFFF);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        t.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(8);
+        b.addView(t, lp);
+        swipeHint(swipe);
+        // insert swipe hint as a sibling above the disc column by wrapping? first UI has hint above the button.
+        // We add it as translation animation on a small label above: rebuild order — hint is already animated; put it in wrap top.
+        TextView hint = swipe;
+        FrameLayout.LayoutParams hlp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER_HORIZONTAL | Gravity.TOP);
+        hlp.topMargin = -dp(22);
+        wrap.addView(hint, hlp);
+        return b;
+    }
+
+    private View halo() {
+        View v = new View(this);
+        GradientDrawable g = new GradientDrawable();
+        g.setShape(GradientDrawable.OVAL);
+        g.setColor(0x7334D399);
+        v.setBackground(g);
+        v.setAlpha(0.7f);
+        return v;
+    }
+
+    private void pulseAccept() {
+        if (acceptDisc == null || isFinishing()) return;
+        ObjectAnimator a = ObjectAnimator.ofFloat(acceptDisc, View.SCALE_X, 1f, 1.08f, 1f);
+        ObjectAnimator b = ObjectAnimator.ofFloat(acceptDisc, View.SCALE_Y, 1f, 1.08f, 1f);
+        a.setDuration(1400);
+        b.setDuration(1400);
+        a.setRepeatCount(ValueAnimator.INFINITE);
+        b.setRepeatCount(ValueAnimator.INFINITE);
+        a.start();
+        b.start();
+        pulseHalo(haloA, 0);
+        pulseHalo(haloB, 700);
+    }
+
+    private void pulseHalo(View v, long delay) {
+        if (v == null) return;
+        v.setScaleX(1f);
+        v.setScaleY(1f);
+        v.setAlpha(0.7f);
+        v.animate().setStartDelay(delay).scaleX(1.8f).scaleY(1.8f).alpha(0f).setDuration(1400)
+                .withEndAction(() -> { if (!isFinishing()) pulseHalo(v, 0); }).start();
+    }
+
+    private void pulseRing(View rv, long delay) {
+        if (isFinishing()) return;
+        rv.setScaleX(1f);
+        rv.setScaleY(1f);
+        rv.setAlpha(0.8f);
+        rv.animate().setStartDelay(delay).scaleX(1.9f).scaleY(1.9f).alpha(0f).setDuration(2400)
+                .setInterpolator(new PathInterpolator(0.2f, 0.6f, 0.35f, 1f))
+                .withEndAction(() -> { if (!isFinishing()) pulseRing(rv, 0); }).start();
+    }
+
+    private void swipeHint(View v) {
+        v.setAlpha(0.5f);
+        v.animate().translationY(-dp(6)).alpha(1f).setDuration(800)
+                .withEndAction(() -> v.animate().translationY(0).alpha(0.5f).setDuration(800)
+                        .withEndAction(() -> { if (!isFinishing()) swipeHint(v); }).start())
+                .start();
+    }
+
+    private View buildReplies() {
+        FrameLayout sheet = new FrameLayout(this);
+        sheet.setBackgroundColor(0x66000000);
+        sheet.setOnClickListener(v -> showReplies(false));
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(0xF217171A);
+        bg.setCornerRadii(new float[]{dp(24), dp(24), dp(24), dp(24), 0, 0, 0, 0});
+        col.setBackground(bg);
+        col.setPadding(dp(12), dp(12), dp(12), dp(24));
+        col.setOnClickListener(v -> { /* swallow */ });
+        View handle = new View(this);
+        GradientDrawable hg = new GradientDrawable();
+        hg.setColor(0x33FFFFFF);
+        hg.setCornerRadius(dp(2));
+        handle.setBackground(hg);
+        LinearLayout.LayoutParams hlp = new LinearLayout.LayoutParams(dp(40), dp(4));
+        hlp.gravity = Gravity.CENTER_HORIZONTAL;
+        hlp.bottomMargin = dp(8);
+        col.addView(handle, hlp);
+        int[] ids = {R.string.call_quick_1, R.string.call_quick_2, R.string.call_quick_3, R.string.call_quick_4};
+        for (int id : ids) {
+            TextView row = new TextView(this);
+            row.setText(getString(id));
+            row.setTextColor(Color.WHITE);
+            row.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+            row.setPadding(dp(16), dp(14), dp(16), dp(14));
+            row.setOnClickListener(v -> decline()); // same decline path; canned text is not posted (native decline has no message field)
+            col.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        }
+        TextView cancel = new TextView(this);
+        cancel.setText(getString(R.string.call_cancel));
+        cancel.setTextColor(0xFF34D399);
+        cancel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        cancel.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+        cancel.setGravity(Gravity.CENTER);
+        cancel.setPadding(dp(16), dp(14), dp(16), dp(14));
+        cancel.setOnClickListener(v -> showReplies(false));
+        col.addView(cancel);
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
+        sheet.addView(col, lp);
+        return sheet;
+    }
+
+    private void showReplies(boolean on) {
+        if (replies == null) return;
+        replies.setVisibility(on ? View.VISIBLE : View.GONE);
     }
 
     /** web utils initials(): one word -> first two, 2+ words -> first + last. */
@@ -353,6 +611,7 @@ public class IncomingCallActivity extends Activity {
                     if (isFinishing()) return;
                     photo.setImageBitmap(bmp);
                     backdrop.setImageBitmap(bmp);
+                    backdrop.animate().alpha(1f).setDuration(200).start();
                     if (Build.VERSION.SDK_INT >= 31) backdrop.setRenderEffect(RenderEffect.createBlurEffect(dp(36), dp(36), Shader.TileMode.CLAMP));
                     else backdrop.setAlpha(0.15f);
                 });

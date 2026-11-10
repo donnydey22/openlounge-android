@@ -25,8 +25,9 @@ import org.json.JSONObject
  *   call:answering -> STATE_WAIT_INIT      ("Connecting…")
  *   call:connected -> STATE_ESTABLISHED    (showTimer; = engine reported connected, VoIPService.onConnectionStateChanged)
  *   call:ended     -> STATE_ENDED          (no rating -> windowView.finish(): screen removed)
- * Placement = VoIPFragment.updateButtons: [speaker | flip camera when my video is on] [video] [mute] [end].
- * Look = Open Lounge's own call screen (web CallOverlay.tsx), not Telegram's.
+ * Placement (first UI 101e00a): [Speaker] [Video] [Mute] [End call], plus Flip when the local camera is on
+ * so a video call can still switch lenses (the first commit listed flip as an in-call control).
+ * Look = the first Open Lounge call screen (web CallOverlay.tsx / calls.module.css at 101e00a, 2026-10-07 MST).
  * Refs: DrKLO/Telegram@3de37c8 TMessagesProj/.../ui/VoIPFragment.java, .../messenger/voip/VoIPService.java.
  *
  * Native-UI first cut (Claude step 5): this screen owns all four phases — never hands the call paint back to the
@@ -99,7 +100,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         if (s == NativeCallFlow.State.ESTABLISHED && establishedAt == 0L) { establishedAt = SystemClock.elapsedRealtime(); ui.post(tick) }
         render() }
 
-    private fun dismiss() { ui.removeCallbacks(tick); view?.let { root.removeView(it) }; view = null; state = null; callId = null; hidden = false; establishedAt = 0L; nativeVideo = false }
+    private fun dismiss() { ui.removeCallbacks(tick); ui.removeCallbacks(hideCtl); view?.let { root.removeView(it) }; view = null; state = null; callId = null; hidden = false; establishedAt = 0L; nativeVideo = false; minimized = false }
 
     private fun dp(v: Int) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), act.resources.displayMetrics).toInt()
 
@@ -199,7 +200,6 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         bFirst = btn(false, false) { speakerOn = !speakerOn; actions.speaker(speakerOn); render() }
         bFlip = btn(false, false) { facing = if (facing == "user") "environment" else "user"; actions.camera(true, facing) { } }
         bVid = btn(false, false) {
-            if (!video) return@btn
             val want = !camOn
             if (!want) { camOn = false; actions.camera(false, facing) { }; render(); return@btn }
             // camera permission is requested here (toggle on), not up front; a denial leaves the button off
@@ -210,7 +210,83 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         end.label.text = "End call"; end.icon.setImageResource(R.drawable.ol_call_phone_off)
         row.addView(bFirst.box); row.addView(bFlip.box); row.addView(bVid.box); row.addView(bMic.box); row.addView(end.box)
         v.addView(row, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply { bottomMargin = dp(40) })
+        this.row = row
+        // minimize (chevron, first UI) — UI-only: collapses to the green top bar; does not hang up
+        minBtn = FrameLayout(act).apply {
+            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0x1AFFFFFF) }
+            setOnClickListener { setMinimized(true) }
+            contentDescription = "Minimize call"
+        }
+        minBtn.addView(android.widget.ImageView(act).apply { setImageResource(R.drawable.ol_call_chevron_down); setColorFilter(Color.WHITE) }, FrameLayout.LayoutParams(dp(24), dp(24), Gravity.CENTER))
+        v.addView(minBtn, FrameLayout.LayoutParams(dp(40), dp(40), Gravity.TOP or Gravity.START).apply { topMargin = dp(16); leftMargin = dp(12) })
+        miniBar = LinearLayout(act).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setBackgroundColor(0xFF10B981.toInt())
+            visibility = View.GONE
+            setOnClickListener { setMinimized(false) }
+        }
+        miniDot = View(act).apply { background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.WHITE) } }
+        miniLabel = TextView(act).apply {
+            setTextColor(Color.WHITE); textSize = 13f; typeface = android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.BOLD)
+            gravity = Gravity.CENTER; maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        miniBar.addView(miniDot, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(8) })
+        miniBar.addView(miniLabel, LinearLayout.LayoutParams(-2, -2))
+        v.addView(miniBar, FrameLayout.LayoutParams(-1, dp(28), Gravity.TOP))
+        v.setOnClickListener { if (nativeVideo) pokeControls() }
         root.addView(v, FrameLayout.LayoutParams(-1, -1)); view = v
+    }
+
+    private lateinit var row: LinearLayout
+    private lateinit var minBtn: FrameLayout
+    private lateinit var miniBar: LinearLayout
+    private lateinit var miniDot: View
+    private lateinit var miniLabel: TextView
+    private var minimized = false
+    private var showCtl = true
+    private val hideCtl = Runnable { showCtl = false; view?.let { applyChrome(it) } }
+
+    private fun setMinimized(on: Boolean) {
+        minimized = on
+        if (on) showCtl = true
+        view?.let { applyChrome(it) }
+    }
+
+    private fun pokeControls() {
+        showCtl = true
+        ui.removeCallbacks(hideCtl)
+        if (nativeVideo) ui.postDelayed(hideCtl, 4000)
+        view?.let { applyChrome(it) }
+    }
+
+    private fun applyChrome(v: View) {
+        val incomingOrEnded = state == NativeCallFlow.State.ENDED
+        if (minimized && !incomingOrEnded) {
+            miniBar.visibility = View.VISIBLE
+            miniLabel.text = "${name.text}  ${status.text}  · Tap to return"
+            row.visibility = View.GONE
+            minBtn.visibility = View.GONE
+            top.visibility = View.GONE
+            pulseMiniDot()
+            return
+        }
+        miniBar.visibility = View.GONE
+        val hide = nativeVideo && !showCtl
+        row.visibility = if (hide) View.GONE else View.VISIBLE
+        minBtn.visibility = if (hide || incomingOrEnded) View.GONE else View.VISIBLE
+        top.visibility = if (hide) View.INVISIBLE else View.VISIBLE
+        if (nativeVideo && showCtl) {
+            ui.removeCallbacks(hideCtl)
+            ui.postDelayed(hideCtl, 4000)
+        }
+    }
+
+    private fun pulseMiniDot() {
+        if (miniBar.visibility != View.VISIBLE) return
+        miniDot.animate().alpha(0.35f).setDuration(600).withEndAction {
+            miniDot.animate().alpha(1f).setDuration(600).withEndAction { pulseMiniDot() }.start()
+        }.start()
     }
 
     private fun render() {
@@ -226,12 +302,14 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         top.requestLayout()
         if (photoView.alpha < 1f) avatar.text = initials(name.text?.toString().orEmpty())
         if (state != NativeCallFlow.State.ESTABLISHED) status.text = NativeCallFlow.statusText(state)
+        // First UI always offers Video (audio→video upgrade). Flip is shown once the local camera is on.
         bFlip.box.visibility = if (camOn) View.VISIBLE else View.GONE
         bFlip.set("Flip", R.drawable.ol_call_refresh_cw)
         bFirst.set(if (speakerOn) "Speaker" else "Phone", if (speakerOn) R.drawable.ol_call_volume2 else R.drawable.ol_call_ear, active = speakerOn)
-        bVid.box.visibility = if (video) View.VISIBLE else View.GONE // web: native voice calls keep their audio-only policy
+        bVid.box.visibility = View.VISIBLE
         bVid.set(if (camOn) "Stop video" else "Video", if (camOn) R.drawable.ol_call_video else R.drawable.ol_call_video_off, active = camOn)
         bMic.set(if (muted) "Unmute" else "Mute", if (muted) R.drawable.ol_call_mic_off else R.drawable.ol_call_mic, active = muted)
+        applyChrome(v)
     }
 
     private fun pulse(rv: View, delay: Long) {
