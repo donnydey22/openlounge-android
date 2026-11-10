@@ -1,6 +1,7 @@
 package com.donnydey.openlounge.olcall
 
 import android.util.Base64
+import android.util.Log
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -69,6 +70,12 @@ class OlTgcallsEngine(
     private val wsSeq = AtomicLong()
     val traceId: String = UUID.randomUUID().toString().replace("-", "").substring(0, 16)
 
+    /** idle/joining/offering/answering/connected/failed; one log line per transition (OlCallStates). */
+    val states = OlCallStates { line ->
+        Log.i("olcall", line)
+        crumbs.event("state", line, if (" -> failed " in line) "error" else "info")
+    }
+
     /** The tgcalls version this phone joins with: the newest one both this build and the server speak. */
     val version: String = OlVersions.pick(nativeVersions().toList())
 
@@ -80,6 +87,7 @@ class OlTgcallsEngine(
                 send(JSONObject().put("t", "join").put("token", joinToken).put("traceId", traceId)
                     .put("surface", "tgcalls").put("platform", "android").put("device", device).put("os", os)
                     .put("engine", ENGINE).put("version", version))
+                states.setState(OlCallStates.State.joining, "join-sent")
                 crumbs.event("ws", "open")
             }
             override fun onMessage(webSocket: WebSocket, text: String) = worker.execute { onFrame(JSONObject(text)) }
@@ -101,8 +109,10 @@ class OlTgcallsEngine(
         when (f.optString("t")) {
             "joined" -> {
                 crumbs.callId = f.optString("callId"); crumbs.leg = f.optString("leg")
+                states.callId = crumbs.callId
                 val key = Base64.decode(f.getString("key"), Base64.NO_WRAP)
                 val outgoing = f.getBoolean("isOutgoing")
+                states.setState(if (outgoing) OlCallStates.State.offering else OlCallStates.State.answering, "joined")
                 crumbs.event("tg", "joined:outgoing=$outgoing:version=$version")
                 // Relay list: coturn STUN + TURN UDP/TCP with the short-lived REST login.
                 // enableP2P stays on in the JNI, so direct host/srflx pairs are tried first
@@ -117,6 +127,7 @@ class OlTgcallsEngine(
                 if (handle == 0L) end("native-create-failed")
             }
             "blob" -> {
+                states.blobReceived()
                 val b = Base64.decode(f.getString("b64"), Base64.NO_WRAP)
                 crumbs.blob("recv", "tg.blob", "signaling", b)
                 if (handle != 0L) nativeReceiveSignaling(handle, b)
@@ -143,6 +154,9 @@ class OlTgcallsEngine(
     private fun end(reason: String) {
         if (ended) return
         ended = true
+        // Normal ends (local hangup, far side's bye) are not failures; everything else before Established is.
+        val normal = reason == "local-hangup" || reason.startsWith("bye:")
+        if (states.state != OlCallStates.State.connected && !normal) states.fail(reason)
         if (handle != 0L) { nativeStop(handle); handle = 0L }
         ws?.close(1000, null); ws = null
         crumbs.event("call", "ended:$reason")
@@ -153,6 +167,7 @@ class OlTgcallsEngine(
     // ---- called from JNI (tgcalls threads): enqueue only ----
     @Suppress("unused")
     private fun onNativeSignalingData(data: ByteArray) {
+        states.blobSent()
         crumbs.blob("send", "tg.blob", "signaling", data)
         val b64 = Base64.encodeToString(data, Base64.NO_WRAP)
         worker.execute { if (!ended) send(JSONObject().put("t", "blob").put("b64", b64)) }
@@ -161,6 +176,8 @@ class OlTgcallsEngine(
     @Suppress("unused")
     private fun onNativeState(state: Int) {
         val s = State.values().getOrElse(state) { State.Failed }
+        if (s == State.Established) states.setState(OlCallStates.State.connected, "tg-established")
+        if (s == State.Failed) states.fail("tg-failed")
         crumbs.event("tg.state", s.name, if (s == State.Failed) "error" else "info")
         worker.execute { listener.onState(s) }
     }
