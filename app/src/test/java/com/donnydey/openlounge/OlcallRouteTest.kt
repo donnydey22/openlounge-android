@@ -12,7 +12,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
-/** The "connect" op's engine choice + the relay list hand-off (joined frame wins, CallMedia.iceServers is the fallback). */
+/** Whether a "connect" op can run on olcall (the only engine) + the relay list hand-off (joined frame wins, CallMedia.iceServers second). */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
 class OlcallRouteTest {
@@ -26,13 +26,20 @@ class OlcallRouteTest {
     @Test fun olcallOnlyWhenBackendSaysSoOnApi27Plus() {
         assertTrue(OlcallRoute.eligible(media(), 27))
         assertTrue(OlcallRoute.eligible(media(), 35))
-        assertFalse("today's p2p media keeps RtcCallSession", OlcallRoute.eligible(media(provider = "p2p"), 35))
+        assertFalse("p2p media is refused (no other engine)", OlcallRoute.eligible(media(provider = "p2p"), 35))
         assertFalse("module minSdk is 27", OlcallRoute.eligible(media(), 26))
         assertFalse(OlcallRoute.eligible(media(url = "https://x/v1/call"), 35))
         assertFalse(OlcallRoute.eligible(media(token = ""), 35))
         assertFalse(OlcallRoute.eligible(null, 35))
-        assertFalse("no x86 engine build (emulators keep RtcCallSession)", OlcallRoute.eligible(media(), 35, listOf("x86_64", "arm64-v8a")))
+        assertFalse("no x86 engine build", OlcallRoute.eligible(media(), 35, listOf("x86_64", "arm64-v8a")))
         assertTrue(OlcallRoute.eligible(media(), 35, listOf("armeabi-v7a", "armeabi")))
+    }
+
+    @Test fun deviceSupportIsApi27PlusOnArm() {
+        assertTrue(OlcallRoute.deviceSupported(27, listOf("arm64-v8a")))
+        assertTrue(OlcallRoute.deviceSupported(35, listOf("armeabi-v7a")))
+        assertFalse(OlcallRoute.deviceSupported(26, listOf("arm64-v8a")))
+        assertFalse(OlcallRoute.deviceSupported(35, listOf("x86_64")))
     }
 
     @Test fun appIceServersComeFromCallMedia() {

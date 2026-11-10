@@ -66,6 +66,8 @@ class OlCallSession(
         val endReason: String? = null,
         /** Verbatim native audio-open status when the microphone could not be opened. */
         val audioError: String? = null,
+        /** Where call audio plays: speaker / earpiece / wired / usb / bluetooth (OlAudioRouting). */
+        val audioRoute: String = if (isVideoCall) "speaker" else "earpiece",
     )
 
     private val app = context.applicationContext
@@ -128,7 +130,10 @@ class OlCallSession(
 
     fun setMuted(muted: Boolean) { engine.setMuted(muted); update { it.copy(muted = muted) } }
 
-    fun setCameraEnabled(on: Boolean) { engine.setVideoEnabled(on); update { it.copy(cameraOn = on, isVideoCall = it.isVideoCall || on) } }
+    fun setCameraEnabled(on: Boolean) {
+        engine.setVideoEnabled(on); update { it.copy(cameraOn = on, isVideoCall = it.isVideoCall || on) }
+        if (on && !routeVideo) { routeVideo = true; main.post { applyRoute() } }
+    }
 
     fun switchCamera() {
         val front = !state.frontCamera
@@ -137,10 +142,10 @@ class OlCallSession(
         update { it.copy(frontCamera = front) }
     }
 
+    /** Speaker / Phone toggle (explicit pick). A connected headset still takes "Phone". */
     fun setSpeaker(on: Boolean) {
-        @Suppress("DEPRECATION")
-        audio.isSpeakerphoneOn = on
-        update { it.copy(speakerOn = on) }
+        speakerPick = on
+        applyRoute()
     }
 
     fun hangup() = engine.hangup()
@@ -174,11 +179,59 @@ class OlCallSession(
         remote = null; local = null
     }
 
+    // ---------------------------------------------------------------- audio route (headset first, OL defaults)
+    private var speakerPick: Boolean? = null
+    private var routeVideo = video
+    private var scoOn = false
+    private val deviceCallback = object : android.media.AudioDeviceCallback() {
+        override fun onAudioDevicesAdded(added: Array<out android.media.AudioDeviceInfo>?) { main.post { applyRoute() } }
+        override fun onAudioDevicesRemoved(removed: Array<out android.media.AudioDeviceInfo>?) { main.post { applyRoute() } }
+    }
+
+    private fun kindOf(type: Int): OlAudioRouting.Kind? = when (type) {
+        android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> OlAudioRouting.Kind.SPEAKER
+        android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> OlAudioRouting.Kind.EARPIECE
+        android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET, android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> OlAudioRouting.Kind.WIRED
+        android.media.AudioDeviceInfo.TYPE_USB_HEADSET, android.media.AudioDeviceInfo.TYPE_USB_DEVICE -> OlAudioRouting.Kind.USB
+        android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> OlAudioRouting.Kind.BLUETOOTH
+        else -> if (Build.VERSION.SDK_INT >= 31 && type == android.media.AudioDeviceInfo.TYPE_BLE_HEADSET) OlAudioRouting.Kind.BLUETOOTH else null
+    }
+
+    private fun applyRoute() {
+        if (state.phase == Phase.Ended) return
+        runCatching {
+            val chosen: OlAudioRouting.Kind
+            if (Build.VERSION.SDK_INT >= 31) {
+                val devs = audio.availableCommunicationDevices
+                val byKind = devs.mapNotNull { d -> kindOf(d.type)?.let { it to d } }.toMap()
+                chosen = OlAudioRouting.choose(byKind.keys, routeVideo, speakerPick)
+                byKind[chosen]?.let { audio.setCommunicationDevice(it) }
+            } else {
+                val kinds = audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS).mapNotNull { kindOf(it.type) }.toMutableSet()
+                kinds += OlAudioRouting.Kind.SPEAKER
+                if (app.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_TELEPHONY)) kinds += OlAudioRouting.Kind.EARPIECE
+                chosen = OlAudioRouting.choose(kinds, routeVideo, speakerPick)
+                @Suppress("DEPRECATION")
+                if (chosen == OlAudioRouting.Kind.BLUETOOTH) {
+                    audio.isSpeakerphoneOn = false
+                    if (!scoOn) { audio.startBluetoothSco(); audio.isBluetoothScoOn = true; scoOn = true }
+                } else {
+                    if (scoOn) { audio.isBluetoothScoOn = false; audio.stopBluetoothSco(); scoOn = false }
+                    audio.isSpeakerphoneOn = chosen == OlAudioRouting.Kind.SPEAKER
+                }
+            }
+            val label = OlAudioRouting.label(chosen)
+            if (label != state.audioRoute || (chosen == OlAudioRouting.Kind.SPEAKER) != state.speakerOn)
+                update { it.copy(audioRoute = label, speakerOn = chosen == OlAudioRouting.Kind.SPEAKER) }
+        }
+    }
+
     private fun startAudio() {
         savedMode = audio.mode
         audio.mode = AudioManager.MODE_IN_COMMUNICATION
-        @Suppress("DEPRECATION")
-        audio.isSpeakerphoneOn = video // video calls default to speaker, audio calls to earpiece (OL behaviour)
+        // headset first, else video calls on the speaker and audio calls on the earpiece (OL behaviour)
+        applyRoute()
+        runCatching { audio.registerAudioDeviceCallback(deviceCallback, main) }
         if (Build.VERSION.SDK_INT >= 26) {
             val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
                 .setAudioAttributes(AudioAttributes.Builder()
@@ -193,6 +246,12 @@ class OlCallSession(
     private fun stopAudio() {
         if (Build.VERSION.SDK_INT >= 26) focus?.let { audio.abandonAudioFocusRequest(it) }
         focus = null
+        runCatching { audio.unregisterAudioDeviceCallback(deviceCallback) }
+        runCatching {
+            if (Build.VERSION.SDK_INT >= 31) audio.clearCommunicationDevice()
+            @Suppress("DEPRECATION")
+            if (scoOn) { audio.isBluetoothScoOn = false; audio.stopBluetoothSco(); scoOn = false }
+        }
         @Suppress("DEPRECATION")
         audio.isSpeakerphoneOn = false
         audio.mode = savedMode

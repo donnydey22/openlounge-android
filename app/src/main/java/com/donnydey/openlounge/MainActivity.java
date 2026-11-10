@@ -1080,7 +1080,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
     }
 
     // ---- in-app call video: remote full-screen + local PiP WebRTC renderers under a transparent WebView ----
-    private android.view.SurfaceView remoteVideo, localVideo; // org.webrtc.SurfaceViewRenderer (built in NativeCallVideo)
+    private android.view.SurfaceView remoteVideo, localVideo; // layout slots for the olcall org.olwrtc renderers (NativeCallVideo)
     private Integer savedWebBg;
     private void installCallVideoViews() {
         FrameLayout root = findViewById(R.id.root);
@@ -1101,7 +1101,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             @Override public void speaker(boolean on) {
                 callSpeaker = on;
                 callUserPick = on ? CallAudioRoute.Device.SPEAKER : CallAudioRoute.Device.EARPIECE;
-                com.donnydey.openlounge.audio.CallAudioManager.get(MainActivity.this).select(on ? com.donnydey.openlounge.audio.CallAudioDevices.Kind.SPEAKER : com.donnydey.openlounge.audio.CallAudioDevices.Kind.EARPIECE);
+                CallMediaCoordinator.setSpeaker(on); // olcall call: OlCallSession routes (a connected headset still wins)
                 if (callAudioOn) applyCallRoute(); // rooms only now; reportCallRoute tells the page (openlounge:native-audio-route)
             }
             @Override public void camera(boolean on, String facing, kotlin.jvm.functions.Function1<? super Boolean, kotlin.Unit> done) {
@@ -1119,7 +1119,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         handler.post(() -> {
             if (remoteVideo == null || webView == null) return;
             // Camera is requested only on a video-call tap or a mid-call video toggle, never when tiles appear.
-            NativeCallVideo.show(on); // org.webrtc pair, or the org.olwrtc pair during an olcall call
+            NativeCallVideo.show(on); // the olcall call's org.olwrtc renderer pair
             if (on && savedWebBg == null) savedWebBg = webView.getSolidColor();
             webView.setBackgroundColor(on ? android.graphics.Color.TRANSPARENT : (savedWebBg != null ? savedWebBg : android.graphics.Color.BLACK));
             if (!on) savedWebBg = null;
@@ -1131,7 +1131,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
 
     @Override
     public void nativeCallAudio(boolean on) {
-        // Duplicate call focus owner removed: CallAudioManager owns call focus/mode/route. Rooms keep callAudio().
+        // olcall's OlCallSession owns call focus/mode/route. Rooms keep callAudio().
     }
 
     @Override
@@ -1172,7 +1172,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 // Do NOT enter MODE_IN_COMMUNICATION yet: the page's ringback is a normal media <audio> element and
                 // communication mode re-routes/attenuates it (earpiece, voice stream) so the caller hears silence.
                 // Call mode + route are applied on call:connected (CallAudioPolicy).
-                // call focus/mode/route owned solely by audio.CallAudioManager (signal-identical-calling)
+                // call focus/mode/route owned solely by the olcall engine (OlCallSession)
                 CallService.start(this, callId, callName, false);
                 if (CallAudioPolicy.startRingbackOn(type)) ringback(true);
                 break;
@@ -1183,7 +1183,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                     CallNotifications.cancel(this, id); // answered on the page's own ring screen
                     callId = id;
                 }
-                // call focus/mode/route owned solely by audio.CallAudioManager (signal-identical-calling)
+                // call focus/mode/route owned solely by the olcall engine (OlCallSession)
                 CallService.start(this, callId, callName, true);
                 break;
             case "call:ended":

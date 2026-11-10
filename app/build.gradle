@@ -2,7 +2,7 @@ plugins {
     id 'com.android.application'
     // FCM: reads app/google-services.json (Firebase project open-lounge-2aabd)
     id 'com.google.gms.google-services'
-    // native call media: callengine (WebRTC PeerConnection, RingRTC session model)
+    // native call media: the :olcall module (tgcalls -> Go/Pion olcall), Kotlin
     id 'org.jetbrains.kotlin.android'
 }
 
@@ -31,10 +31,10 @@ android {
     defaultConfig {
         applicationId "com.donnydey.openlounge"
         minSdk 24
-        ndk { abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64' } // ABIs in the libwebrtc AAR
+        ndk { abiFilters 'arm64-v8a', 'armeabi-v7a' } // ABIs libolcall_tgcalls.so is built for (the only call engine)
         targetSdk 36
-        versionCode 52
-        versionName "0.3.35"
+        versionCode 53
+        versionName "0.3.36"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField "boolean", "STAGING", "false"
         buildConfigField "String", "STAGING_HOST", "\"\""
@@ -133,12 +133,13 @@ dependencies {
     // opt-in biometric app lock (BiometricLock)
     implementation 'androidx.biometric:biometric:1.1.0'
 
-    // call engine: BSD libwebrtc m152 PeerConnection (audio + video), sealed rc:* session. No PJSIP.
-    implementation project(':callengine')
+    // call engine: :olcall only (below). OkHttp = native call-signal socket (signal/CallSignalClient, ring/accept).
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'
 
     testImplementation 'junit:junit:4.13.2'
     testImplementation 'org.robolectric:robolectric:4.14.1' // NativeCallScreenRenderTest: renders the call screen states on the JVM; test-only
+    testImplementation 'org.bouncycastle:bcprov-jdk18on:1.79' // robolectric's transitive bcprov, pinned to the cached version; test-only
     testImplementation 'org.json:json:20240303' // JVM org.json for MsJsonTest (android.jar's org.json is a stub in unit tests); test-only, not in the APK
     androidTestImplementation 'androidx.test:runner:1.6.2'
     androidTestImplementation 'androidx.test.ext:junit:1.2.1'

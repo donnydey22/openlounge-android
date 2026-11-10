@@ -9,9 +9,8 @@ import com.donnydey.openlounge.olcall.OlCallUi
 import org.json.JSONObject
 
 /**
- * One olcall (tgcalls) call driven by [CallMediaCoordinator] when [OlcallRoute.eligible]. Kept in its own class so
- * nothing in the :olcall module is touched on the default RtcCallSession path (or on API < 27).
- * Maps OlCallSession.UiState onto the coordinator's existing host events (connected / failed / remote-video).
+ * One olcall (tgcalls) call driven by [CallMediaCoordinator] when [OlcallRoute.eligible] (the only call engine).
+ * Maps OlCallSession.UiState onto the coordinator's host events (connected / failed / remote-video / audio route).
  */
 internal class OlcallCall(
     ctx: Context,
@@ -21,6 +20,8 @@ internal class OlcallCall(
     peerId: String,
     private val onConnected: () -> Unit,
     private val onRemoteVideo: () -> Unit,
+    /** route label (speaker/earpiece/wired/usb/bluetooth), speaker on */
+    private val onRoute: (route: String, speaker: Boolean) -> Unit,
     /** reason; connectedBefore = the call had reached InCall */
     private val onEnded: (reason: String, connectedBefore: Boolean) -> Unit,
 ) {
@@ -28,6 +29,7 @@ internal class OlcallCall(
     private var connected = false
     private var ended = false
     private var remoteVideo = false
+    private var route: String? = null
     private val session: OlCallSession
 
     init {
@@ -36,6 +38,7 @@ internal class OlcallCall(
             if (ended) return@OlCallUi
             if (s.phase == OlCallSession.Phase.InCall && !connected) { connected = true; onConnected() }
             if (s.remoteVideoOn && !remoteVideo) { remoteVideo = true; onRemoteVideo() }
+            if (s.audioRoute != route) { route = s.audioRoute; onRoute(s.audioRoute, s.speakerOn) }
             if (s.phase == OlCallSession.Phase.Ended) { ended = true; onEnded(s.endReason ?: "ended", connected) }
         }
         session = OlCallSession(ctx.applicationContext, media.optString("url"), media.optString("token"),
@@ -47,6 +50,7 @@ internal class OlcallCall(
 
     fun start() = session.start()
     fun setMuted(m: Boolean) = session.setMuted(m)
+    fun setSpeaker(on: Boolean) = session.setSpeaker(on)
     private var front = true
     fun camera(on: Boolean, facing: String) {
         session.setCameraEnabled(on)

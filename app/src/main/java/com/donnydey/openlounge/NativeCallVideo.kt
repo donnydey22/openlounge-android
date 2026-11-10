@@ -4,27 +4,20 @@ import android.content.Context
 import android.view.SurfaceView
 import android.view.View
 import android.view.ViewGroup
-import com.donnydey.openlounge.rtc.OlVideo
-import org.webrtc.SurfaceViewRenderer
 
 /**
- * In-app call video views (matches iOS OLRtcVideo): camera + remote video ride the call's one WebRTC PeerConnection
- * (callengine rtc/OlVideo). This object only builds/binds MainActivity's renderers (typed as SurfaceView so the Java
- * side never touches org.webrtc classes). PJSIP video (ol_sfu_video, OLCameraFanout, MediaCodec simulcast) is gone.
+ * In-app call video views. MainActivity lays out two slots (remote full-screen, local PiP) under the transparent
+ * WebView; every call is an olcall (tgcalls) call, which renders through Telegram's relocated WebRTC (org.olwrtc), so
+ * each call gets a fresh org.olwrtc renderer pair placed exactly in those slots (same parent, index, layout params).
+ * The slots themselves are plain placeholders that stay hidden.
  */
 object NativeCallVideo {
     @JvmStatic fun renderer(ctx: Context, overlay: Boolean): SurfaceView =
-        SurfaceViewRenderer(ctx).also { if (overlay) it.setZOrderMediaOverlay(true) }
+        SurfaceView(ctx).also { if (overlay) it.setZOrderMediaOverlay(true) }
     private var remoteSlot: SurfaceView? = null
     private var localSlot: SurfaceView? = null
-    @JvmStatic fun bind(remote: SurfaceView, local: SurfaceView) {
-        remoteSlot = remote; localSlot = local
-        OlVideo.remoteView = remote as? SurfaceViewRenderer
-        OlVideo.localView = local as? SurfaceViewRenderer
-    }
+    @JvmStatic fun bind(remote: SurfaceView, local: SurfaceView) { remoteSlot = remote; localSlot = local }
 
-    // ---- olcall (tgcalls) calls render through Telegram's relocated WebRTC (org.olwrtc), so they get their own
-    // renderer pair placed exactly where MainActivity put the org.webrtc pair (same parent, index, layout params).
     private var olRemote: org.olwrtc.SurfaceViewRenderer? = null
     private var olLocal: org.olwrtc.SurfaceViewRenderer? = null
     /** Fresh org.olwrtc renderers for one olcall call (OlCallSession inits/releases them); null pair if no slots. */
@@ -41,27 +34,15 @@ object NativeCallVideo {
         olRemote = rem; olLocal = loc
         return rem to loc
     }
-    /** Remove the olcall renderers; the org.webrtc pair becomes the active one again. */
+    /** Remove the call's renderers. */
     fun endOlcall() {
         listOfNotNull(olRemote, olLocal).forEach { v -> (v.parent as? ViewGroup)?.removeView(v) }
         olRemote = null; olLocal = null
     }
-    /** MainActivity.nativeCallVideo: show/hide whichever renderer pair the current call uses. */
+    /** MainActivity.nativeCallVideo: show/hide the current call's renderer pair (slots stay hidden). */
     @JvmStatic fun show(on: Boolean) {
         val v = if (on) View.VISIBLE else View.GONE
-        val ol = olRemote
-        if (ol != null) {
-            remoteSlot?.visibility = View.GONE; localSlot?.visibility = View.GONE
-            ol.visibility = v; olLocal?.visibility = v
-        } else {
-            remoteSlot?.visibility = v; localSlot?.visibility = v
-        }
+        remoteSlot?.visibility = View.GONE; localSlot?.visibility = View.GONE
+        olRemote?.visibility = v; olLocal?.visibility = v
     }
-    var onFirstRemoteFrame: (() -> Unit)?
-        get() = OlVideo.onFirstRemoteFrame
-        set(v) { OlVideo.onFirstRemoteFrame = v }
-    val facing: String get() = OlVideo.facing
-
-    fun camera(on: Boolean, face: String = OlVideo.facing, done: (Boolean, String?) -> Unit) = OlVideo.camera(on, face, done)
-    fun stop() = OlVideo.end()
 }
