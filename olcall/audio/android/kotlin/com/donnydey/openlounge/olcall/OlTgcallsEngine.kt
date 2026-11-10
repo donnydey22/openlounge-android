@@ -97,37 +97,21 @@ class OlTgcallsEngine(
             override fun onMessage(webSocket: WebSocket, text: String) = worker.execute { onFrame(JSONObject(text)) }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = worker.execute {
                 crumbs.event("ws", "failure:${t.javaClass.simpleName}", "error")
-                wsGone("ws-failure")
+                end("ws-failure")
             }
-            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = worker.execute { wsGone("ws-closed:$code") }
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = worker.execute { end("ws-closed:$code") }
         })
     }
 
-    /**
-     * t5450: the /v1/call signaling socket closed. Before media connected that ends the call (as before). After it,
-     * media (ICE/DTLS) does not depend on this socket and the server keeps the leg 20 s after the socket closes
-     * (server.go "Media may survive a WS blip"), so the call is NOT ended here: it ends through the page
-     * (call:ended), tgcalls Failed, or the user. Logged with its own reason.
-     */
-    private fun wsGone(reason: String) {
-        if (ended) return
-        if (states.state != OlCallStates.State.connected) return end(reason)
-        if (wsLost) return
-        wsLost = true
-        crumbs.event("ws", "lost-after-connect:$reason:media-kept", "warning")
-        runCatching { callLog?.event("ws_lost", "media_kept", reason) }
-    }
-    @Volatile private var wsLost = false
     /** t5450: why hangup() ran (page close, page call:ended, replaced, ...); logged on the "ended" event. */
     @Volatile private var hangupCause: String? = null
 
     /** t5450: the far side's video has rendered nothing for a while: the server PLIs the other leg's sender. */
     fun requestKeyframe(reason: String) = worker.execute {
-        if (!ended && !wsLost) send(JSONObject().put("t", "keyframe").put("reason", reason))
+        if (!ended) send(JSONObject().put("t", "keyframe").put("reason", reason))
     }
 
     private fun send(o: JSONObject) {
-        if (wsLost) return
         o.put("seq", wsSeq.incrementAndGet())
         ws?.send(o.toString())
     }
@@ -197,7 +181,7 @@ class OlTgcallsEngine(
         crumbs.event("call", "ended:$reason")
         runCatching { callLog?.event("ended", if (normal) "normal" else if (states.state == OlCallStates.State.connected) OlCallLogTags.tag("after-connect:$reason") else null,
             reason, mapOf("connected" to (states.state == OlCallStates.State.connected), "blobsSent" to states.blobsSent, "blobsReceived" to states.blobsReceived,
-                "cause" to (hangupCause ?: reason), "wsLost" to wsLost)) }
+                "cause" to (hangupCause ?: reason))) }
         crumbs.flush()
         listener.onEnded(reason)
     }

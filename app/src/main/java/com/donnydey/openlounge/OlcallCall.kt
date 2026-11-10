@@ -20,6 +20,8 @@ internal class OlcallCall(
     peerId: String,
     private val onConnected: () -> Unit,
     private val onRemoteVideo: () -> Unit,
+    /** t5456: first inbound media after connect (OlCallSession.UiState.mediaFlowing) */
+    private val onMediaFlowing: () -> Unit,
     /** route label (speaker/earpiece/wired/usb/bluetooth), speaker on */
     private val onRoute: (route: String, speaker: Boolean) -> Unit,
     /** reason; connectedBefore = the call had reached InCall */
@@ -29,6 +31,7 @@ internal class OlcallCall(
     private var connected = false
     private var ended = false
     private var remoteVideo = false
+    private var flowing = false
     private var route: String? = null
     private val session: OlCallSession
 
@@ -37,6 +40,7 @@ internal class OlcallCall(
         val ui = OlCallUi { s ->
             if (ended) return@OlCallUi
             if (s.phase == OlCallSession.Phase.InCall && !connected) { connected = true; onConnected() }
+            if (s.mediaFlowing && !flowing) { flowing = true; onMediaFlowing() }
             if (s.remoteVideoOn && !remoteVideo) { remoteVideo = true; onRemoteVideo() }
             if (s.audioRoute != route) { route = s.audioRoute; onRoute(s.audioRoute, s.speakerOn) }
             if (s.phase == OlCallSession.Phase.Ended) { ended = true; onEnded(s.endReason ?: "ended", connected) }

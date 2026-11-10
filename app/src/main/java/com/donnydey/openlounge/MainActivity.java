@@ -223,12 +223,6 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             @Override
             public void handleOnBackPressed() {
                 if (locked) { moveTaskToBack(true); return; }
-                if (callId != null || CallMediaCoordinator.isActive()) {
-                    // t5450: Back during a call backgrounds the app; finishing would stop CallService and destroy the page
-                    CallDiskLog.mark("back-during-call", "moveTaskToBack");
-                    moveTaskToBack(true);
-                    return;
-                }
                 if (webView != null && webView.getVisibility() == View.VISIBLE && webView.canGoBack()) {
                     webView.goBack();
                 } else {
@@ -1122,6 +1116,19 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         });
     }
     private NativeCallScreen callScreen;
+    /** t5456: the page's call:connected, waiting for the first inbound media (main thread). */
+    private JSONObject heldConnected;
+
+    @Override
+    public void callMediaFlowing(String id) {
+        handler.post(() -> {
+            JSONObject m = heldConnected;
+            if (m == null || !id.equals(m.optString("callId", ""))) return;
+            heldConnected = null;
+            CallDiskLog.mark("connected-released", "media flowing");
+            if (callScreen != null) callScreen.onPageCall("call:connected", m);
+        });
+    }
 
     @Override
     public void nativeCallVideo(boolean on) {
@@ -1133,9 +1140,6 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             webView.setBackgroundColor(on ? android.graphics.Color.TRANSPARENT : (savedWebBg != null ? savedWebBg : android.graphics.Color.BLACK));
             if (!on) savedWebBg = null;
             if (callScreen != null) callScreen.onNativeVideo(on);
-            // t5450: keep the screen on while call video shows; a screen timeout stops this phone's camera mid-call
-            if (on) getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-            else getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             if (on) webView.evaluateJavascript("document.documentElement.classList.add('ol-native-video')", null);
             else webView.evaluateJavascript("document.documentElement.classList.remove('ol-native-video')", null);
         });
@@ -1162,7 +1166,17 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         String type = m.optString("type", "");
         String id = m.optString("callId", "");
         if (!id.isEmpty() && !id.matches(CallApi.CALL_ID_RE)) return;
-        if (callScreen != null) callScreen.onPageCall(type, m);
+        if (callScreen != null) {
+            // t5456: the timer starts on first inbound media after the answer. The page's call:connected (server
+            // answer) is held back from the call screen until this call's media flows; it stays Calling/Ringing.
+            if ("call:connected".equals(type) && !id.isEmpty() && !id.equals(CallMediaCoordinator.getMediaFlowingId())) {
+                heldConnected = m;
+                CallDiskLog.mark("connected-held", "until media flows");
+            } else {
+                if ("call:ended".equals(type)) heldConnected = null;
+                callScreen.onPageCall(type, m);
+            }
+        }
         switch (type) {
             case "call:incoming": {
                 // Page got call:incoming over WS while App Lock / backgrounded — surface IncomingCallActivity
