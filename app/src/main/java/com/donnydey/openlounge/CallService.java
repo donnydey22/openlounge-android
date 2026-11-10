@@ -109,6 +109,7 @@ public class CallService extends Service {
     @Override
     public void onTaskRemoved(Intent rootIntent) {
         // app swiped away: the WebView (and the call) are gone
+        CallDiskLog.mark("task-removed", "stopSelf");
         stopSelf();
     }
 

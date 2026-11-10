@@ -39,7 +39,7 @@ object CallMediaCoordinator {
         val op = c.optString("op")
         CallDiskLog.mark("op", op)
         when (op) {
-            "close" -> { closeAll(); done(true, "true", null) }
+            "close" -> { closeAll("page-close"); done(true, "true", null) }
             // legacy p2p page ops (rc:* sealed session, rtc:* ICE/SDP): the p2p engine is gone and the server refuses
             // these events (p2p_removed); acknowledged and ignored so an old page build never errors.
             "signalConnected", "rcMsg", "rtcSignal" -> done(true, "true", null)
@@ -76,7 +76,7 @@ object CallMediaCoordinator {
             "mute" -> { val m = c.optBoolean("muted"); muted = m; olcall?.setMuted(m); done(true, "true", null) }
             "speaker" -> { setSpeaker(c.optBoolean("on")); done(true, "true", null) }
             "restartIce" -> done(true, "true", null) // tgcalls handles network changes itself
-            "end" -> { closeAll(); done(true, "true", null) }
+            "end" -> { closeAll("page-end"); done(true, "true", null) }
             else -> done(false, null, "unknown op: $op")
         }
     }
@@ -109,7 +109,7 @@ object CallMediaCoordinator {
         main.post {
             val ctx = appCtx ?: return@post done(false, null, "no context")
             if (callId != id) return@post done(false, null, "cancelled")
-            olcall?.let { it.hangup(); olcall = null; NativeCallVideo.endOlcall() }
+            olcall?.let { it.hangup("replaced"); olcall = null; NativeCallVideo.endOlcall() }
             var answered = false
             val oc = OlcallCall(ctx, id, media, wantVideo, peerId,
                 onConnected = {
@@ -179,7 +179,7 @@ object CallMediaCoordinator {
         }
         return true
     }
-    private fun onSignal(m: JSONObject) { if (m.optString("t") == "call:ended") closeAll() }
+    private fun onSignal(m: JSONObject) { if (m.optString("t") == "call:ended") closeAll("signal-call-ended") }
 
     private fun ensurePerms(action: OlCallPermissions.Action, then: (Boolean) -> Unit) {
         main.post {
@@ -191,9 +191,10 @@ object CallMediaCoordinator {
     /** Wi-Fi <-> cellular: tgcalls re-gathers and re-checks candidates on its own (no app-level ICE restart). */
     @JvmStatic fun onNetworkChange() { CallDiskLog.mark("network-change") }
 
-    @JvmStatic fun closeAll() = main.post {
-        olcall?.let { it.hangup(); olcall = null; NativeCallVideo.endOlcall() }
-        callId = null; muted = false; speakerPick = null; CallDiskLog.mark("close-all")
+    /** [cause] names the path that ended the call (t5450), so an automatic end never reads like a tap. */
+    @JvmStatic @JvmOverloads fun closeAll(cause: String = "app") = main.post {
+        olcall?.let { it.hangup(cause); olcall = null; NativeCallVideo.endOlcall() }
+        callId = null; muted = false; speakerPick = null; CallDiskLog.mark("close-all", "cause=$cause")
         if (videoOn) { videoOn = false; host?.nativeCallVideo(false) }
         if (active) { active = false; host?.nativeCallAudio(false) }
     }

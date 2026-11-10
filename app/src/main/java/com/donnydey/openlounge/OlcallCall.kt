@@ -58,5 +58,5 @@ internal class OlcallCall(
         val wantFront = facing != "environment"
         if (on && wantFront != front) { front = wantFront; session.switchCamera() }
     }
-    fun hangup() { if (!ended) runCatching { session.hangup() } }
+    fun hangup(cause: String = "app") { if (!ended) runCatching { session.hangup(cause) } }
 }

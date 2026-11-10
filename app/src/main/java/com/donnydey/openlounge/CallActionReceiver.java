@@ -26,6 +26,7 @@ public class CallActionReceiver extends BroadcastReceiver {
             CallNotifications.cancel(app, callId);
             declineAsync(app, callId, goAsync());
         } else if (ACTION_HANGUP.equals(intent.getAction())) {
+            CallDiskLog.mark("hangup-tap", "source=notification");
             // the page hangs up and then posts call:ended, which stops CallService; no page → stop it here
             if (!MainActivity.dispatchNativeCall("{\"type\":\"call:hangup\"}")) CallService.stop(app);
         }

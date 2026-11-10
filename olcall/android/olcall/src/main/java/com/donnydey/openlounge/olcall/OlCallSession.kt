@@ -13,6 +13,8 @@ import org.olwrtc.ContextUtils
 import org.olwrtc.EglBase
 import org.olwrtc.RendererCommon
 import org.olwrtc.SurfaceViewRenderer
+import org.olwrtc.VideoFrame
+import org.olwrtc.VideoSink
 import org.telegram.messenger.ApplicationLoader
 import org.telegram.messenger.voip.VideoCapturerDevice
 
@@ -110,6 +112,27 @@ class OlCallSession(
 
     private lateinit var engine: OlTgcallsEngine
     private val engineArgs = Triple(serverUrl, joinToken, crumbs)
+    private val crumbs = crumbs
+
+    // ---- t5450 video health: counting sinks in front of the renderers, 5 s stats, frozen-frame watchdog
+    private class CountingSink(private val target: VideoSink) : VideoSink {
+        @Volatile var frames = 0
+        @Volatile var rotation = 0
+        @Volatile var size = ""
+        override fun onFrame(frame: VideoFrame) {
+            frames++
+            rotation = frame.rotation
+            size = "${frame.rotatedWidth}x${frame.rotatedHeight}"
+            target.onFrame(frame)
+        }
+        fun take(): Int { val n = frames; frames = 0; return n }
+    }
+    private var remoteCount: CountingSink? = null
+    private var localCount: CountingSink? = null
+    private val remoteWatch = OlStallWatch()
+    private val localWatch = OlStallWatch()
+    private var window = IntArray(3) // remote frames, local frames, ticks
+    private var cameraRestarts = 0
 
     /** Remote = far side's video (full screen); local = camera preview. Either may be null for audio calls. */
     fun attachRenderers(remoteView: SurfaceViewRenderer?, localView: SurfaceViewRenderer?) {
@@ -123,10 +146,13 @@ class OlCallSession(
     fun start() {
         startAudio()
         val (url, token, crumbs) = engineArgs
+        remoteCount = remote?.let { CountingSink(it) }
+        localCount = local?.let { CountingSink(it) }
         engine = OlTgcallsEngine(url, token, crumbs, engineListener, startWithVideo = video,
-            remoteVideoSink = remote, localVideoSink = local, appIceServers = appIceServers, callLog = callLog)
+            remoteVideoSink = remoteCount, localVideoSink = localCount, appIceServers = appIceServers, callLog = callLog)
         engine.start(device = Build.MODEL, os = "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
         tick()
+        main.postDelayed({ videoTick() }, 1000)
         push()
     }
 
@@ -150,7 +176,43 @@ class OlCallSession(
         applyRoute()
     }
 
-    fun hangup() = engine.hangup()
+    fun hangup(cause: String = "app") = engine.hangup(cause)
+
+    private fun videoTick() {
+        val st = state
+        if (st.phase == Phase.Ended) return
+        val r = remoteCount?.take() ?: 0
+        val l = localCount?.take() ?: 0
+        window[0] += r; window[1] += l; window[2]++
+        if (window[2] >= 5 && (st.cameraOn || st.remoteVideoOn || window[0] + window[1] > 0)) {
+            val t = window[2]
+            crumbs.event("video", "stats:remoteFps=${window[0] / t}:localFps=${window[1] / t}:remoteOn=${st.remoteVideoOn}:cameraOn=${st.cameraOn}" +
+                ":remote=${remoteCount?.size ?: "-"}@${remoteCount?.rotation ?: 0}:local=${localCount?.size ?: "-"}@${localCount?.rotation ?: 0}" +
+                ":stalls=${remoteWatch.stalls}/${localWatch.stalls}:cameraRestarts=$cameraRestarts")
+            window = IntArray(3)
+        } else if (window[2] >= 5) window = IntArray(3)
+        val now = SystemClock.elapsedRealtime()
+        val inCall = st.phase == Phase.InCall
+        when (val a = remoteWatch.tick(now, r, inCall && st.remoteVideoOn && remoteCount != null)) {
+            is OlStallWatch.Action.First -> { crumbs.event("video", "stall:remote:${a.stalledMs}ms:keyframe-request", "warning"); engine.requestKeyframe("stall-${a.stalledMs}ms") }
+            is OlStallWatch.Action.Second -> { crumbs.event("video", "stall:remote:${a.stalledMs}ms:keyframe-request", "warning"); engine.requestKeyframe("stall-${a.stalledMs}ms") }
+            is OlStallWatch.Action.Recovered -> crumbs.event("video", "recovered:remote:after=${a.stalledMs}ms")
+            OlStallWatch.Action.None -> {}
+        }
+        when (val a = localWatch.tick(now, l, inCall && st.cameraOn && localCount != null)) {
+            is OlStallWatch.Action.First -> crumbs.event("video", "stall:capture:${a.stalledMs}ms", "warning")
+            is OlStallWatch.Action.Second -> {
+                // the camera stopped delivering frames (capturer stall, camera taken away): restart only the camera
+                cameraRestarts++
+                crumbs.event("video", "stall:capture:${a.stalledMs}ms:camera-restart", "warning")
+                engine.setVideoEnabled(false)
+                main.postDelayed({ if (state.phase != Phase.Ended && state.cameraOn) engine.setVideoEnabled(true) }, 300)
+            }
+            is OlStallWatch.Action.Recovered -> crumbs.event("video", "recovered:capture:after=${a.stalledMs}ms")
+            OlStallWatch.Action.None -> {}
+        }
+        main.postDelayed({ videoTick() }, 1000)
+    }
 
     // ---------------------------------------------------------------- internals
 

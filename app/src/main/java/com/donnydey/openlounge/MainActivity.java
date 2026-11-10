@@ -223,6 +223,12 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             @Override
             public void handleOnBackPressed() {
                 if (locked) { moveTaskToBack(true); return; }
+                if (callId != null || CallMediaCoordinator.isActive()) {
+                    // t5450: Back during a call backgrounds the app; finishing would stop CallService and destroy the page
+                    CallDiskLog.mark("back-during-call", "moveTaskToBack");
+                    moveTaskToBack(true);
+                    return;
+                }
                 if (webView != null && webView.getVisibility() == View.VISIBLE && webView.canGoBack()) {
                     webView.goBack();
                 } else {
@@ -1097,7 +1103,10 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         localVideo.setVisibility(View.GONE);
         NativeCallVideo.INSTANCE.bind(remoteVideo, localVideo);
         callScreen = new NativeCallScreen(this, root, new NativeCallScreen.Actions() {
-            @Override public boolean pageCall(String detailJson) { return dispatchNativeCall(detailJson); }
+            @Override public boolean pageCall(String detailJson) {
+                if (detailJson.contains("call:hangup")) CallDiskLog.mark("hangup-tap", "source=call-screen");
+                return dispatchNativeCall(detailJson);
+            }
             @Override public void speaker(boolean on) {
                 callSpeaker = on;
                 callUserPick = on ? CallAudioRoute.Device.SPEAKER : CallAudioRoute.Device.EARPIECE;
@@ -1124,6 +1133,9 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             webView.setBackgroundColor(on ? android.graphics.Color.TRANSPARENT : (savedWebBg != null ? savedWebBg : android.graphics.Color.BLACK));
             if (!on) savedWebBg = null;
             if (callScreen != null) callScreen.onNativeVideo(on);
+            // t5450: keep the screen on while call video shows; a screen timeout stops this phone's camera mid-call
+            if (on) getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            else getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             if (on) webView.evaluateJavascript("document.documentElement.classList.add('ol-native-video')", null);
             else webView.evaluateJavascript("document.documentElement.classList.remove('ol-native-video')", null);
         });
@@ -1188,7 +1200,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 break;
             case "call:ended":
                 if (CallAudioPolicy.stopRingbackOn(type)) ringback(false);
-                CallMediaCoordinator.closeAll(); // the only native-media teardown besides the page's op 'close'
+                CallMediaCoordinator.closeAll("page-call-ended"); // the only native-media teardown besides the page's op 'close'
                 if (!id.isEmpty()) CallNotifications.cancel(this, id);
                 CallService.stop(this);
                 callAudio(false);
@@ -1475,6 +1487,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         if (CallMediaCoordinator.getHost() == this) CallMediaCoordinator.setHost(null);
         if (live.get() == this) live = new WeakReference<>(null);
         if (isFinishing()) {
+            if (callId != null || CallMediaCoordinator.isActive()) CallDiskLog.mark("activity-finish-during-call", "callId=" + callId);
             CallService.stop(this);
             callAudio(false);
         }
