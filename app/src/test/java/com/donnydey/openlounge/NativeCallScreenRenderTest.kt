@@ -293,6 +293,22 @@ class NativeCallScreenRenderTest {
         assertTrue("X dismisses the failure screen", texts(root).none { it.contains("Can't connect the call") })
     }
 
+    /** 4:34 PM recording: the outgoing screen flashed "KD" before the photo arrived. Initials are the no-photo
+     *  fallback only, so they are not painted while a profile photo URL is still downloading. */
+    @Test fun noInitialsWhilePhotoLoads() {
+        val act = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val root = FrameLayout(act); act.setContentView(root)
+        val s = NativeCallScreen(act, root, object : NativeCallScreen.Actions {
+            override fun pageCall(detailJson: String): Boolean = true
+            override fun speaker(on: Boolean) {}
+            override fun camera(on: Boolean, facing: String, done: (Boolean) -> Unit) { done(true) }
+        })
+        s.onPageCall("call:outgoing", JSONObject().put("callId", "t9").put("name", "Keiko Dey").put("video", false).put("photo", "https://127.0.0.1:9/p.jpg"))
+        assertTrue("no initials while the photo loads", "KD" !in texts(root))
+        s.onPageCall("call:outgoing", JSONObject().put("callId", "t10").put("name", "Keiko Dey").put("video", false).put("photo", ""))
+        assertTrue("no photo: initials are the fallback", "KD" in texts(root))
+    }
+
     @Test fun incomingMatchesCallScreen() {
         val ctx = org.robolectric.RuntimeEnvironment.getApplication()
         val f = File(ctx.cacheDir, "avatar-placeholder.jpg"); f.outputStream().use { o -> javaClass.classLoader!!.getResourceAsStream("avatar-placeholder.jpg")!!.copyTo(o) }

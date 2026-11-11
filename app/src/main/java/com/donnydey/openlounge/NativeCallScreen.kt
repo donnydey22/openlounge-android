@@ -154,6 +154,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     private fun begin(id: String, peer: String, v: Boolean, photo: String = "", presence: String? = null) {
         dismiss(); callId = id; video = v; camOn = v; muted = false; speakerOn = v; facing = "user"; failed = false; failedText = null; answered = false; media = id in mediaUp; ringingAck = false
         if (!Prefs.nativeCallUi(act)) { callId = null; return }
+        photoLoading = null
         build(); name.text = peer.ifEmpty { act.getString(R.string.app_name) }; loadPhoto(id, photo)
         applyPresence(presence ?: incomingPresence?.takeIf { it.first == id }?.second)
         startPresencePeek()
@@ -226,6 +227,8 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     private lateinit var avatar: TextView
     private lateinit var avatarBox: FrameLayout
     private lateinit var photoView: android.widget.ImageView
+    /** URL being fetched. Initials are the no-photo fallback only: they are not painted while the photo is on its way. */
+    private var photoLoading: String? = null
     private lateinit var presenceDot: View
 
     /** web AvatarPhoto.tsx: initials stay underneath, the photo fades in once decoded, a broken URL keeps the initials.
@@ -241,13 +244,21 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
             } catch (_: Throwable) {}
             return
         }
+        if (photoLoading == url) return
+        photoLoading = url
+        if (view != null) avatar.text = ""
         Thread {
             val bmp = try {
                 val c = java.net.URL(url).openConnection() as java.net.HttpURLConnection
                 c.connectTimeout = 8000; c.readTimeout = 8000
                 c.inputStream.use { android.graphics.BitmapFactory.decodeStream(it) }.also { c.disconnect() }
-            } catch (_: Throwable) { null } ?: return@Thread
-            ui.post { applyDecodedPhoto(id, bmp) }
+            } catch (_: Throwable) { null }
+            ui.post {
+                if (photoLoading != url) return@post
+                photoLoading = null
+                if (bmp != null) applyDecodedPhoto(id, bmp)
+                else if (callId == id && view != null && photoView.alpha < 1f) avatar.text = initials(name.text?.toString().orEmpty())
+            }
         }.start()
     }
 
@@ -550,7 +561,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         name.textSize = if (videoStage) 20f else 28f
         (top.layoutParams as FrameLayout.LayoutParams).apply { gravity = if (videoStage) Gravity.TOP else Gravity.CENTER; topMargin = if (videoStage) dp(64) else 0; bottomMargin = if (videoStage) 0 else dp(CallChrome.CENTER_LIFT) }
         top.requestLayout()
-        if (photoView.alpha < 1f) avatar.text = initials(name.text?.toString().orEmpty())
+        if (photoView.alpha < 1f && photoLoading == null) avatar.text = initials(name.text?.toString().orEmpty())
         if (failed) {
             status.text = failedText ?: CallPresence.FAIL_MSG
             failBanner.text = failedText ?: CallPresence.FAIL_MSG
