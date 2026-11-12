@@ -118,6 +118,12 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         if (a == null || a.webView == null) { done.onReceiveValue(null); return; }
         a.webView.evaluateJavascript(CallPresence.PEEK_PHOTO_JS, done);
     }
+    /** Read-only: existing page call-screen display name (the person's current profile name), if the WebView is up. */
+    static void peekLiveName(android.webkit.ValueCallback<String> done) {
+        MainActivity a = live.get();
+        if (a == null || a.webView == null) { done.onReceiveValue(null); return; }
+        a.webView.evaluateJavascript(CallPresence.PEEK_NAME_JS, done);
+    }
     private volatile boolean pageLoaded = false;
     /** Main activity is resumed; only then may an FCM payload be exposed to the already-visible WebView. */
     private volatile boolean activityForeground = false;
@@ -1152,6 +1158,9 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             }
             @Override public void peekCallPhoto(kotlin.jvm.functions.Function1<? super String, kotlin.Unit> done) {
                 peekLivePhoto(v -> done.invoke(v));
+            }
+            @Override public void peekCallName(kotlin.jvm.functions.Function1<? super String, kotlin.Unit> done) {
+                peekLiveName(v -> done.invoke(v));
             }
             @Override public void revealAppWhenMinimized() { /* already the real app */ }
         });

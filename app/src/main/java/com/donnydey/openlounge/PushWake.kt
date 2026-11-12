@@ -27,6 +27,8 @@ object PushWake {
 
     private val seen = PushWakePolicy.SeenCalls()
     private val sessions = ConcurrentHashMap<String, Session>()
+    /** calls whose ring this phone already ended (accept / decline / cancel), so a late token-ack DROP never cancels them */
+    private val released = ConcurrentHashMap<String, Long>()
     private val main = Handler(Looper.getMainLooper())
     private val client by lazy {
         OkHttpClient.Builder().connectTimeout(5, TimeUnit.SECONDS).readTimeout(0, TimeUnit.MILLISECONDS).build()
@@ -50,7 +52,8 @@ object PushWake {
         val s = Session(app, callId, d, receivedAt)
         sessions[callId] = s
         if (token == null) {
-            s.decide(PushWakePolicy.Verdict.NO_SOCKET, "no_session")
+            s.decide(PushWakePolicy.Verdict.NO_SOCKET, "no_session") // unchanged: ring now, no socket
+            tokenAck(app, callId, d["declineToken"], receivedAt)
             return
         }
         val ws = CallApi.origin(app).replace(Regex("^http"), "ws") + "/ws"
@@ -62,9 +65,29 @@ object PushWake {
         main.postDelayed({ s.close("hold") }, HOLD_MS)
     }
 
+    /**
+     * No fresh access token (the app was closed past the 1-hour access lifetime; no native refresh, refresh tokens
+     * rotate): the /ws session:resume is impossible, so before this the server never heard "ringing" until the WebView
+     * cold-booted and acked (72a8f1e3, Nov 12: caller on "Calling…" for 10.8 s). Ack over HTTP with the ring push's
+     * per-call token instead (POST /api/calls/<id>/ack, X-Call-Decline-Token; the server only inspects it, so Decline
+     * keeps working). The ring already started above; a server answer that the call is over / answered elsewhere
+     * cancels it (same as a DROP on the socket path). Signaling only: never answers, declines or touches media.
+     */
+    private fun tokenAck(ctx: Context, callId: String, ringToken: String?, receivedAt: Long) {
+        if (ringToken == null || !ringToken.matches(Regex(CallApi.DECLINE_TOKEN_RE))) { mark("wake-token-ack", "callId=$callId skipped=no_token"); return }
+        val r = CallApi.ackWithRingToken(ctx, callId, ringToken, FALLBACK_MS.toInt())
+        val v = PushWakePolicy.tokenAckVerdict(r.status, r.body, callId)
+        mark("wake-token-ack", "callId=$callId status=${r.status} verdict=${v ?: "-"} ms=${System.currentTimeMillis() - receivedAt}")
+        // never cancel a ring this phone already acted on (accepted / declined meanwhile: release() ran)
+        if (v == PushWakePolicy.Verdict.DROP && !released.containsKey(callId)) CallNotifications.cancel(ctx, callId)
+    }
+
     /** Ring ended here (accept / decline / call_cancel): stop any wake for this call; never ring it later. */
     @JvmStatic fun release(callId: String?) {
         if (callId == null) return
+        val now = System.currentTimeMillis()
+        released.entries.removeIf { now - it.value > 5 * 60_000L }
+        released[callId] = now
         sessions[callId]?.let { it.dropped = true; it.close("released") }
     }
 

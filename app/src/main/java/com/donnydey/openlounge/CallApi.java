@@ -102,6 +102,54 @@ final class CallApi {
         }
     }
 
+    /** HTTP status (0 = not sent / network error) + response body (null when none). */
+    static final class Result {
+        final int status;
+        final String body;
+        Result(int status, String body) { this.status = status; this.body = body; }
+    }
+
+    /**
+     * Blocking (FCM worker thread): "this phone is ringing" for a push-woken call with NO session, using the ring
+     * push's per-call token (X-Call-Decline-Token). The server only inspects the token for an ack (never consumes it),
+     * so Decline keeps working. Short timeouts: this runs inside the FCM onMessageReceived budget.
+     */
+    static Result ackWithRingToken(Context ctx, String callId, String ringToken, int timeoutMs) {
+        if (callId == null || !callId.matches(CALL_ID_RE) || ringToken == null || !ringToken.matches(DECLINE_TOKEN_RE)) return new Result(0, null);
+        HttpURLConnection c = null;
+        try {
+            c = (HttpURLConnection) new URL(origin(ctx) + "/api/calls/" + callId + "/ack").openConnection();
+            c.setRequestMethod("POST");
+            c.setConnectTimeout(timeoutMs);
+            c.setReadTimeout(timeoutMs);
+            c.setDoOutput(true);
+            c.setRequestProperty("X-Call-Decline-Token", ringToken);
+            c.setRequestProperty("Content-Type", "application/json");
+            try (OutputStream os = c.getOutputStream()) {
+                os.write("{}".getBytes(StandardCharsets.UTF_8));
+            }
+            int st = c.getResponseCode();
+            java.io.InputStream in = st < 400 ? c.getInputStream() : c.getErrorStream();
+            String body = null;
+            if (in != null) {
+                try (java.io.InputStream is = in) {
+                    byte[] buf = new byte[4096];
+                    int n, total = 0;
+                    java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+                    while ((n = is.read(buf)) > 0 && total < 16_384) { bo.write(buf, 0, n); total += n; }
+                    body = bo.toString("UTF-8");
+                }
+            }
+            Log.i(TAG, "ring ack (token) → " + st);
+            return new Result(st, body);
+        } catch (Exception e) {
+            Log.w(TAG, "ring ack (token) failed: " + e.getClass().getSimpleName());
+            return new Result(0, null);
+        } finally {
+            if (c != null) c.disconnect();
+        }
+    }
+
     /**
      * Blocking: call from a background thread. Returns the HTTP status (0 = not sent / network error).
      * Sends the per-call decline token (works with no session) and, when there is one, the fresh access token too

@@ -68,7 +68,8 @@ class OlTgcallsEngine(
     private val worker = Executors.newSingleThreadExecutor { r -> Thread(r, "ol-tgcalls").apply { isDaemon = true } }
     private var ws: WebSocket? = null
     private var handle = 0L
-    private var ended = false
+    /** Read on JNI/OkHttp threads too (after-end gating below), written only on [worker]. */
+    @Volatile private var ended = false
     private val wsSeq = AtomicLong()
     val traceId: String = UUID.randomUUID().toString().replace("-", "").substring(0, 16)
 
@@ -96,6 +97,9 @@ class OlTgcallsEngine(
             }
             override fun onMessage(webSocket: WebSocket, text: String) = worker.execute { onFrame(JSONObject(text)) }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = worker.execute {
+                // After our own end (local hangup / bye) the server drops the socket without a close frame, which
+                // OkHttp reports as EOFException: that is the teardown, not a call failure (1372bded, Nov 12).
+                if (ended) { crumbs.event("ws", "closed-after-end:${t.javaClass.simpleName}"); return@execute }
                 crumbs.event("ws", "failure:${t.javaClass.simpleName}", "error")
                 end("ws-failure")
             }
@@ -198,6 +202,10 @@ class OlTgcallsEngine(
     @Suppress("unused")
     private fun onNativeState(state: Int) {
         val s = State.values().getOrElse(state) { State.Failed }
+        // nativeStop() in end() tears the transport down and tgcalls reports Reconnecting on the way out
+        // (72a8f1e3, Nov 12: "Reconnecting" at the same ms as ended:bye:leg-closed). The call is already over:
+        // keep it as a teardown note, never as a live state for the call log or the call screen.
+        if (ended) { crumbs.event("tg.state", "after-end:${s.name}"); return }
         if (s == State.Established) states.setState(OlCallStates.State.connected, "tg-established")
         if (s == State.Failed) states.fail("tg-failed")
         crumbs.event("tg.state", s.name, if (s == State.Failed) "error" else "info")

@@ -53,4 +53,19 @@ class CallPresenceTest {
         assertFalse(CallPresence.allowedPhotoUrl("", cache, files))
         cache.deleteRecursively(); files.deleteRecursively()
     }
+
+    /** The outgoing card follows the page call screen's name (the person's current profile name). */
+    @Test fun nameFromPagePeek() {
+        val raw = CallPresence.rawFromJs("\"  Keiko \\n 🦋 \"")
+        assertEquals("Keiko 🦋", CallPresence.nameFromPeek(raw, "K D"))
+        assertNull(CallPresence.nameFromPeek(raw, "Keiko 🦋"))     // unchanged
+        assertNull(CallPresence.nameFromPeek("", "K D"))             // nothing on the page: keep
+        assertNull(CallPresence.nameFromPeek(CallPresence.rawFromJs("null"), "K D"))
+        assertEquals(CallPresence.MAX_NAME, CallPresence.nameFromPeek("x".repeat(200), "")!!.length)
+        for (js in listOf(CallPresence.PEEK_NAME_JS, CallPresence.PEEK_PHOTO_JS, CallPresence.PEEK_JS)) {
+            assertTrue(js.contains("[data-testid=\"call-screen\"]"))
+            assertFalse(js.contains("[data-testid='")) // a quote break makes the whole script a SyntaxError (iOS b132)
+            for (w in listOf("postMessage", "dispatchEvent", "innerHTML", "fetch(", "cookie")) assertFalse(w, js.contains(w))
+        }
+    }
 }

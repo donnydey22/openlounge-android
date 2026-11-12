@@ -76,6 +76,21 @@ object CallPresence {
     const val PEEK_PHOTO_JS =
         "(function(){try{var img=document.querySelector('[data-testid=\"call-screen\"] img')||document.querySelector('[data-testid=\"incoming-call\"] img');var s=img&&img.src||'';if(s.indexOf('http')===0)return s;return '';}catch(e){return '';}})()"
 
+    /** Read-only peek of the page call-screen display name ([data-testid="call-name"]). The page fills it from the
+     *  server's call info, i.e. the person's CURRENT profile name, not the chat header snapshot in call:outgoing. */
+    const val PEEK_NAME_JS =
+        "(function(){try{var r=document.querySelector('[data-testid=\"call-screen\"]')||document.querySelector('[data-testid=\"incoming-call\"]');var n=r&&r.querySelector('[data-testid=\"call-name\"]');return n?(n.textContent||''):'';}catch(e){return '';}})()"
+
+    /** Same bound as the call:* name. */
+    const val MAX_NAME = 80
+
+    /** A peeked page name (already JSON-decoded) -> the name to show now, or null to keep [current]. */
+    @JvmStatic
+    fun nameFromPeek(raw: String?, current: String): String? {
+        val n = raw.orEmpty().trim().split(Regex("\\s+")).filter { it.isNotEmpty() }.joinToString(" ").take(MAX_NAME)
+        return if (n.isEmpty() || n == current) null else n
+    }
+
     @JvmStatic
     fun isFailure(reason: String?, text: String?): Boolean {
         if (reason == "failed") return true

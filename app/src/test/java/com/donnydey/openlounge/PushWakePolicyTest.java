@@ -73,4 +73,27 @@ public class PushWakePolicyTest {
         assertEquals(2_000L, PushWake.FALLBACK_MS);
         assertTrue(PushWake.HOLD_MS <= 15_000L);
     }
+
+    // 72a8f1e3 (Nov 12): a phone woken past its 1-hour access token acks over HTTP with the ring push's token
+    @Test public void tokenAckAnswerDecidesLikeTheSocketAck() throws Exception {
+        String ringing = new JSONObject().put("ok", true).put("call", new JSONObject().put("id", ID).put("phase", "ringing")).toString();
+        String active = new JSONObject().put("ok", true).put("call", new JSONObject().put("id", ID).put("phase", "active")).toString();
+        String ended = new JSONObject().put("ok", true).put("call", new JSONObject().put("id", ID).put("phase", "ended")).toString();
+        String other = new JSONObject().put("ok", true).put("call", new JSONObject().put("id", "someone-else").put("phase", "ended")).toString();
+        assertEquals(PushWakePolicy.Verdict.RING, PushWakePolicy.tokenAckVerdict(200, ringing, ID));
+        assertEquals(PushWakePolicy.Verdict.DROP, PushWakePolicy.tokenAckVerdict(200, active, ID));
+        assertEquals(PushWakePolicy.Verdict.DROP, PushWakePolicy.tokenAckVerdict(200, ended, ID));
+        assertNull("another call's answer decides nothing", PushWakePolicy.tokenAckVerdict(200, other, ID));
+        assertEquals(PushWakePolicy.Verdict.DROP, PushWakePolicy.tokenAckVerdict(404, "{\"ok\":false,\"reason\":\"unknown\"}", ID));
+        assertEquals(PushWakePolicy.Verdict.DROP, PushWakePolicy.tokenAckVerdict(409, "{\"ok\":false,\"reason\":\"replayed\"}", ID));
+        // a server without the ack endpoint (today's production) or a proxy page: the ring stays as it is
+        assertNull(PushWakePolicy.tokenAckVerdict(404, "{\"ok\":false,\"error\":\"Not found\"}", ID));
+        assertNull(PushWakePolicy.tokenAckVerdict(404, "<html>Not Found</html>", ID));
+        assertNull(PushWakePolicy.tokenAckVerdict(404, null, ID));
+        assertNull(PushWakePolicy.tokenAckVerdict(409, "{}", ID));
+        // no decision (keep the ring that already started): auth refused, rate limit, server/network trouble, junk
+        for (int st : new int[] {0, 401, 403, 429, 500, 503}) assertNull(PushWakePolicy.tokenAckVerdict(st, null, ID));
+        assertNull(PushWakePolicy.tokenAckVerdict(200, "not json", ID));
+        assertNull(PushWakePolicy.tokenAckVerdict(200, null, ID));
+    }
 }

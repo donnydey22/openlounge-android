@@ -64,6 +64,8 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         fun peekCallPresence(done: (String?) -> Unit) { done(null) }
         /** Read-only peek of the page call-screen profile photo src, when the message had none. */
         fun peekCallPhoto(done: (String?) -> Unit) { done(null) }
+        /** Read-only peek of the page call-screen display name (the person's current profile name). */
+        fun peekCallName(done: (String?) -> Unit) { done(null) }
         /** When minimized from a host with no WebView, bring the real app forward. No hang-up. */
         fun revealAppWhenMinimized() {}
     }
@@ -190,7 +192,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         ui.postDelayed(endLinger, 1800) // web engine.ts:93 ENDED_LINGER_MS
     }
 
-    private fun dismiss() { ui.removeCallbacks(endLinger); endedCard = false; ui.removeCallbacks(tick); ui.removeCallbacks(hideCtl); ui.removeCallbacks(presenceTick); view?.let { root.removeView(it) }; view = null; state = null; callId = null; hidden = false; establishedAt = 0L; nativeVideo = false; minimized = false; failed = false; failedText = null }
+    private fun dismiss() { ui.removeCallbacks(endLinger); endedCard = false; ui.removeCallbacks(tick); ui.removeCallbacks(hideCtl); ui.removeCallbacks(presenceTick); ui.removeCallbacks(quickPeek); view?.let { root.removeView(it) }; view = null; state = null; callId = null; hidden = false; establishedAt = 0L; nativeVideo = false; minimized = false; failed = false; failedText = null }
 
     private fun dp(v: Int) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), act.resources.displayMetrics).toInt()
 
@@ -591,26 +593,43 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         applyChrome(v)
     }
 
-    private val presenceTick = object : Runnable {
-        override fun run() {
-            if (view == null) return
-            actions.peekCallPresence { raw ->
+    /** One read-only look at the page call screen: presence, the current profile name, and the photo if none yet. */
+    private fun peekOnce() {
+        if (view == null) return
+        actions.peekCallPresence { raw ->
+            val t = CallPresence.rawFromJs(raw).ifBlank { raw?.trim().orEmpty() }
+            if (t.isNotEmpty()) applyPresence(CallPresence.of(t))
+        }
+        actions.peekCallName { raw ->
+            if (view == null || endedCard) return@peekCallName
+            val n = CallPresence.nameFromPeek(CallPresence.rawFromJs(raw), name.text?.toString().orEmpty()) ?: return@peekCallName
+            name.text = n
+            if (photoView.alpha < 1f && photoLoading == null) avatar.text = initials(n)
+        }
+        if (view != null && photoView.alpha < 1f) {
+            actions.peekCallPhoto { raw ->
                 val t = CallPresence.rawFromJs(raw).ifBlank { raw?.trim().orEmpty() }
-                if (t.isNotEmpty()) applyPresence(CallPresence.of(t))
+                if (t.startsWith("http://") || t.startsWith("https://")) callId?.let { loadPhoto(it, t) }
             }
-            if (view != null && photoView.alpha < 1f) {
-                actions.peekCallPhoto { raw ->
-                    val t = CallPresence.rawFromJs(raw).ifBlank { raw?.trim().orEmpty() }
-                    if (t.startsWith("http://") || t.startsWith("https://")) callId?.let { loadPhoto(it, t) }
-                }
-            }
-            if (view != null) ui.postDelayed(this, 2000)
         }
     }
 
+    private val presenceTick = object : Runnable {
+        override fun run() {
+            if (view == null) return
+            peekOnce()
+            if (view != null) ui.postDelayed(this, 2000)
+        }
+    }
+    /** The page paints its call screen a moment after call:outgoing: look again soon instead of waiting 2 s. */
+    private val quickPeek = Runnable { peekOnce() }
+
     private fun startPresencePeek() {
         ui.removeCallbacks(presenceTick)
+        ui.removeCallbacks(quickPeek)
         ui.post(presenceTick)
+        ui.postDelayed(quickPeek, 300)
+        ui.postDelayed(quickPeek, 1000)
     }
 
     private fun applyPresence(status: String?) {

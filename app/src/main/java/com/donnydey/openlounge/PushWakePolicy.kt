@@ -49,6 +49,25 @@ object PushWakePolicy {
         return null
     }
 
+    /**
+     * The HTTP token ack's answer (POST /api/calls/<id>/ack, server/calls/api.ts handleTokenAck) for this call's ring:
+     * 200 {ok, call:{id, phase}} -> the phase decides; 404 unknown call / 409 token already spent on a decline -> the
+     * call is over -> DROP; anything else (401/403/429/5xx/no network = 0) -> null: no decision, keep ringing.
+     */
+    @JvmStatic fun tokenAckVerdict(status: Int, body: String?, callId: String): Verdict? = when (status) {
+        200 -> {
+            val m = try { JSONObject(body ?: "") } catch (_: Exception) { null }
+            if (m?.optBoolean("ok") == true) phaseVerdict(m.optJSONObject("call"), callId) else null
+        }
+        // Only the ack endpoint's own answers end the ring: a server without the endpoint (or any proxy page) can
+        // also say 404, and that must leave the ring exactly as it is today.
+        404, 409 -> {
+            val reason = try { JSONObject(body ?: "").optString("reason") } catch (_: Exception) { "" }
+            if ((status == 404 && reason == "unknown") || (status == 409 && reason == "replayed")) Verdict.DROP else null
+        }
+        else -> null
+    }
+
     private fun phaseVerdict(call: JSONObject?, callId: String): Verdict? {
         if (call == null || call.optString("id") != callId) return null
         return when (call.optString("phase")) {

@@ -95,6 +95,7 @@ class OlCallSession(
 
     private val engineListener = object : OlTgcallsEngine.Listener {
         override fun onState(s: OlTgcallsEngine.State) = update {
+            if (it.phase == Phase.Ended) return@update it // an ended call never goes back to Reconnecting/InCall
             when (s) {
                 OlTgcallsEngine.State.Established -> {
                     if (connectedAt == 0L) connectedAt = SystemClock.elapsedRealtime()
