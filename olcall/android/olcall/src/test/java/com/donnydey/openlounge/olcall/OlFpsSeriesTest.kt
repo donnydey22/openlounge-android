@@ -30,7 +30,10 @@ class OlFpsSeriesTest {
         repeat(12) { f.add(12, 24) }
         val m = f.summary()
         assertEquals(12, m["inBelow20MaxRunSec"]); assertEquals(0, m["outBelow20MaxRunSec"])
-        @Suppress("UNCHECKED_CAST") assertEquals(12, (m["in"] as Map<String, Any>)["p50"])
+        assertEquals(12, m["inP50"]); assertEquals(24, m["outMin"])
+        // live call log keeps only string/number/bool extras
+        m.values.forEach { assert(it is String || it is Number || it is Boolean) }
+        assertEquals("1,2,3", OlFpsSeries.csv(listOf(1, 2, 3)))
     }
 
     @Test fun capsRetainedSamples() {

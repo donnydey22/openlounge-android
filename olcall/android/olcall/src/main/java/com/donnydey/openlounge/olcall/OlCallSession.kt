@@ -170,10 +170,9 @@ class OlCallSession(
 
     private fun logFpsTail() {
         if (!::engine.isInitialized) return
-        fps.flush()?.let { (i, o) -> engine.logEvent("video_fps", extra = mapOf("in" to org.json.JSONArray(i), "out" to org.json.JSONArray(o))) }
+        fps.flush()?.let { (i, o) -> engine.logEvent("video_fps", extra = mapOf("in" to OlFpsSeries.csv(i), "out" to OlFpsSeries.csv(o))) }
         if (fps.inSamples.isEmpty()) return
-        val m = fps.summary().mapValues { (_, v) -> if (v is Map<*, *>) JSONObject(v) else v }
-        engine.logEvent("video_fps_summary", extra = m + mapOf("video" to video))
+        engine.logEvent("video_fps_summary", extra = fps.summary() + mapOf("video" to video))
         callLog?.kickUpload()
     }
 
@@ -258,7 +257,7 @@ class OlCallSession(
         val l = localCount?.take() ?: 0
         window[0] += r; window[1] += l; window[2]++
         if (st.phase == Phase.InCall || st.phase == Phase.Reconnecting) fps.add(r, l)?.let { (i, o) ->
-            engine.logEvent("video_fps", extra = mapOf("in" to org.json.JSONArray(i), "out" to org.json.JSONArray(o), "remoteOn" to st.remoteVideoOn))
+            engine.logEvent("video_fps", extra = mapOf("in" to OlFpsSeries.csv(i), "out" to OlFpsSeries.csv(o), "remoteOn" to st.remoteVideoOn))
         }
         if (window[2] >= 5 && (st.cameraOn || st.remoteVideoOn || window[0] + window[1] > 0)) {
             val t = window[2]

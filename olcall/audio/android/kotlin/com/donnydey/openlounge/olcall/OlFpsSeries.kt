@@ -26,6 +26,8 @@ class OlFpsSeries(private val batch: Int = 5, private val maxSamples: Int = 7200
     data class Stats(val n: Int, val min: Int, val max: Int, val avg: Double, val p50: Int)
 
     companion object {
+        fun csv(a: List<Int>): String = a.joinToString(",")
+
         fun stats(s: List<Int>): Stats? {
             if (s.isEmpty()) return null
             val sorted = s.sorted()
@@ -39,10 +41,12 @@ class OlFpsSeries(private val batch: Int = 5, private val maxSamples: Int = 7200
         }
     }
 
+    /** Flat: the live call log keeps only string/number/bool extras (server/calls/callLog.ts cleanExtra, <= 24 keys). */
     fun summary(): Map<String, Any> {
         val m = LinkedHashMap<String, Any>()
-        stats(inSamples)?.let { m["in"] = mapOf("n" to it.n, "min" to it.min, "max" to it.max, "avg" to it.avg, "p50" to it.p50) }
-        stats(outSamples)?.let { m["out"] = mapOf("n" to it.n, "min" to it.min, "max" to it.max, "avg" to it.avg, "p50" to it.p50) }
+        for ((p, st) in listOf("in" to stats(inSamples), "out" to stats(outSamples))) st?.let {
+            m[p + "N"] = it.n; m[p + "Min"] = it.min; m[p + "Max"] = it.max; m[p + "Avg"] = it.avg; m[p + "P50"] = it.p50
+        }
         m["inBelow20MaxRunSec"] = longestBelow(inSamples, 20)
         m["outBelow20MaxRunSec"] = longestBelow(outSamples, 20)
         return m
