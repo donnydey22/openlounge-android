@@ -137,6 +137,46 @@ class OlCallSession(
         }
         fun take(): Int { val n = frames; frames = 0; return n }
     }
+    // ---- logs as armor (t5614u): 1 s fps samples + network type; logging only
+    private val fps = OlFpsSeries()
+    private val startedAt = SystemClock.elapsedRealtime()
+    private var netType: String? = null
+    private val cm = context.applicationContext.getSystemService(android.net.ConnectivityManager::class.java)
+    private val netCallback = object : android.net.ConnectivityManager.NetworkCallback() {
+        override fun onCapabilitiesChanged(n: android.net.Network, caps: android.net.NetworkCapabilities) {
+            val t = when {
+                caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+                caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+                caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) -> "wired"
+                else -> "other"
+            }
+            main.post { onNetType(t) }
+        }
+        override fun onLost(n: android.net.Network) { main.post { onNetType("none") } }
+    }
+
+    private fun onNetType(t: String) {
+        if (state.phase == Phase.Ended || t == netType) return
+        val from = netType
+        netType = t
+        engine.netType = t
+        val ms = SystemClock.elapsedRealtime() - startedAt
+        if (from == null) engine.logEvent("network", t, mapOf("type" to t, "msSinceStart" to ms))
+        else {
+            crumbs.event("net", "change:$from->$t", "warning")
+            engine.logEvent("network_change", "$from->$t", mapOf("from" to from, "to" to t, "msSinceStart" to ms, "phase" to state.phase.name))
+        }
+    }
+
+    private fun logFpsTail() {
+        if (!::engine.isInitialized) return
+        fps.flush()?.let { (i, o) -> engine.logEvent("video_fps", extra = mapOf("in" to org.json.JSONArray(i), "out" to org.json.JSONArray(o))) }
+        if (fps.inSamples.isEmpty()) return
+        val m = fps.summary().mapValues { (_, v) -> if (v is Map<*, *>) JSONObject(v) else v }
+        engine.logEvent("video_fps_summary", extra = m + mapOf("video" to video))
+        callLog?.kickUpload()
+    }
+
     private var remoteCount: CountingSink? = null
     private var localCount: CountingSink? = null
     private val remoteWatch = OlStallWatch()
@@ -164,6 +204,8 @@ class OlCallSession(
         engine = OlTgcallsEngine(url, token, crumbs, engineListener, startWithVideo = video,
             remoteVideoSink = remoteCount, localVideoSink = localCount, appIceServers = appIceServers, callLog = callLog)
         engine.start(device = Build.MODEL, os = "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
+        runCatching { cm?.registerDefaultNetworkCallback(netCallback) }
+            .onFailure { crumbs.event("net", "callback-failed:${it.javaClass.simpleName}", "warning") }
         tick()
         main.postDelayed({ videoTick() }, 1000)
         push()
@@ -215,6 +257,9 @@ class OlCallSession(
         if (r > 0) markFlowing("video")
         val l = localCount?.take() ?: 0
         window[0] += r; window[1] += l; window[2]++
+        if (st.phase == Phase.InCall || st.phase == Phase.Reconnecting) fps.add(r, l)?.let { (i, o) ->
+            engine.logEvent("video_fps", extra = mapOf("in" to org.json.JSONArray(i), "out" to org.json.JSONArray(o), "remoteOn" to st.remoteVideoOn))
+        }
         if (window[2] >= 5 && (st.cameraOn || st.remoteVideoOn || window[0] + window[1] > 0)) {
             val t = window[2]
             crumbs.event("video", "stats:remoteFps=${window[0] / t}:localFps=${window[1] / t}:remoteOn=${st.remoteVideoOn}:cameraOn=${st.cameraOn}" +
@@ -270,6 +315,8 @@ class OlCallSession(
     private fun finish(reason: String) {
         if (state.phase == Phase.Ended) return
         update { it.copy(phase = Phase.Ended, endReason = reason) }
+        runCatching { cm?.unregisterNetworkCallback(netCallback) }
+        logFpsTail()
         org.olwrtc.OrientationHelper.cameraRotationDisabled = false
         stopAudio()
         remote?.release(); local?.release()

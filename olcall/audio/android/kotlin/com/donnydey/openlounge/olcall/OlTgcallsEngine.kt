@@ -72,6 +72,9 @@ class OlTgcallsEngine(
     @Volatile private var ended = false
     private val wsSeq = AtomicLong()
     val traceId: String = UUID.randomUUID().toString().replace("-", "").substring(0, 16)
+    /** Logging only (t5614u): current network type, set by OlCallSession's ConnectivityManager callback. */
+    @Volatile var netType: String = "unknown"
+    @Volatile private var connectedAtMs = 0L
 
     /** idle/joining/offering/answering/connected/failed; one log line per transition (OlCallStates). */
     val states = OlCallStates { line ->
@@ -101,9 +104,13 @@ class OlTgcallsEngine(
                 // OkHttp reports as EOFException: that is the teardown, not a call failure (1372bded, Nov 12).
                 if (ended) { crumbs.event("ws", "closed-after-end:${t.javaClass.simpleName}"); return@execute }
                 crumbs.event("ws", "failure:${t.javaClass.simpleName}", "error")
+                logWsLost("failure", t.javaClass.simpleName, null)
                 end("ws-failure")
             }
-            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = worker.execute { end("ws-closed:$code") }
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = worker.execute {
+                if (!ended) logWsLost("closed", reason.take(60), code)
+                end("ws-closed:$code")
+            }
         })
     }
 
@@ -113,6 +120,22 @@ class OlTgcallsEngine(
     /** t5450: the far side's video has rendered nothing for a while: the server PLIs the other leg's sender. */
     fun requestKeyframe(reason: String) = worker.execute {
         if (!ended) send(JSONObject().put("t", "keyframe").put("reason", reason))
+    }
+
+    /**
+     * Logging only: the signaling socket went away while the call was live. Android has no WS resume (no log
+     * evidence for one), so this ends the call; the event records the network type and how long we had been up.
+     */
+    private fun logWsLost(how: String, why: String, code: Int?) {
+        val up = if (connectedAtMs > 0) android.os.SystemClock.elapsedRealtime() - connectedAtMs else -1L
+        runCatching { callLog?.event("ws_closed", how, why, buildMap {
+            put("netType", netType); put("connected", states.state == OlCallStates.State.connected)
+            put("msSinceConnected", up); put("resume", "unsupported"); code?.let { put("code", it) } }) }
+    }
+
+    /** App-layer facts (network type changes, fps) into this call's log. */
+    fun logEvent(name: String, reason: String? = null, extra: Map<String, Any> = emptyMap()) {
+        runCatching { callLog?.event(name, reason, null, extra + mapOf("netType" to netType)) }
     }
 
     private fun send(o: JSONObject) {
@@ -206,7 +229,8 @@ class OlTgcallsEngine(
         // (72a8f1e3, Nov 12: "Reconnecting" at the same ms as ended:bye:leg-closed). The call is already over:
         // keep it as a teardown note, never as a live state for the call log or the call screen.
         if (ended) { crumbs.event("tg.state", "after-end:${s.name}"); return }
-        if (s == State.Established) states.setState(OlCallStates.State.connected, "tg-established")
+        if (s == State.Established) { states.setState(OlCallStates.State.connected, "tg-established")
+            if (connectedAtMs == 0L) connectedAtMs = android.os.SystemClock.elapsedRealtime() }
         if (s == State.Failed) states.fail("tg-failed")
         crumbs.event("tg.state", s.name, if (s == State.Failed) "error" else "info")
         worker.execute { listener.onState(s) }

@@ -204,6 +204,9 @@ class OlCallLog(
 
     private fun extra() = JSONObject().apply { turnServers?.let { put("turnServers", it) }; path?.let { put("path", it) } }
 
+    /** Upload now (events logged after "ended": fps summary). Logging only (t5614u). */
+    fun kickUpload() { uploader?.kick() }
+
     fun attach(states: OlCallStates) { states.onTransition = { f, t, r, ms -> state(f, t, r, ms) } }
 
     companion object {
