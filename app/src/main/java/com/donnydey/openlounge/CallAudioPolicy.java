@@ -12,6 +12,10 @@ final class CallAudioPolicy {
         return "call:connected".equals(bridgeEvent);
     }
 
+    /** Outgoing ringback ToneGenerator level, percent of the media stream (ToneGenerator.MAX_VOLUME = 100).
+     *  0.3.40 (57): 80 -> 100 (Donny Nov 12: louder ringer). Still the media stream, never call mode. */
+    static final int RINGBACK_TONE_VOLUME = 100;
+
     /** Native outgoing ringback (the page skips its own when window.__olNativeRingback is set). */
     static boolean startRingbackOn(String bridgeEvent) {
         return "call:outgoing".equals(bridgeEvent);

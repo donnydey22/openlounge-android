@@ -26,7 +26,7 @@ import org.json.JSONObject
  *   call:answering -> STATE_WAIT_INIT      ("Connecting…")
  *   call:connected -> STATE_ESTABLISHED    (showTimer; = engine reported connected, VoIPService.onConnectionStateChanged)
  *   call:ended     -> STATE_ENDED          (no rating -> windowView.finish(): screen removed)
- * Placement: audio in-call [Speaker] [Mute] [End call]; video stage adds Flip / Camera; pre-answer is one Cancel
+ * Placement: audio in-call [Speaker] [Mute] [End call]; video stage adds Flip / Camera; pre-answer is Speaker / Mute / End call
  * so a video call can still switch lenses (the first commit listed flip as an in-call control).
  * Look = the first Open Lounge call screen (web CallOverlay.tsx / calls.module.css at 101e00a, 2026-10-07 MST).
  * Refs: DrKLO/Telegram@3de37c8 TMessagesProj/.../ui/VoIPFragment.java, .../messenger/voip/VoIPService.java.
@@ -105,7 +105,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
             // which stays until media flows.
             in RINGING_ACK -> if (view != null && (id.isEmpty() || id == callId) && !live) { ringingAck = true; render() }
             // Server-confirmed answer (call:answered; call:connected on engines that do not post it yet). Not live
-            // on its own: the pre-answer card (avatar, name, Calling…/Ringing…, one Cancel) stays until media flows.
+            // on its own: the pre-answer card (avatar, name, Calling…/Ringing…, Speaker / Mute / End call) stays until media flows.
             "call:answered", "call:connected" -> if (view != null && (id.isEmpty() || id == callId)) {
                 answered = true
                 video = video || m.optBoolean("video")
@@ -576,20 +576,23 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
             // answered: the timer shows at once (0:00), not only from the first tick
             status.text = NativeCallFlow.timer((SystemClock.elapsedRealtime() - establishedAt) / 1000)
         }
-        // Pre-answer (calling / ringing / connecting): one red Cancel.
+        // Pre-answer (calling / ringing / connecting): the in-call row's look, same as iOS 133 CallScreen.controlRow:
+        // Speaker / Mute / End call. Speaker and Mute run the very same in-call actions, enabled only once this
+        // phone's olcall leg is up (media = olcall onConnected, iOS engineUp), so they never act on a leg that does
+        // not exist yet; End call is the same end action Cancel ran.
         // Audio in-call (Donny's design): Speaker (white when on), Mute, End call. Video row only on the video stage.
         val pre = !live && !failed && !endedCard
         val videoRow = !pre && !failed && !endedCard && (camOn || nativeVideo || video)
-        endBtn.label.text = if (pre) "Cancel" else "End call"
-        bFirst.box.visibility = if (pre) View.GONE else View.VISIBLE
-        bMic.box.visibility = if (pre) View.GONE else View.VISIBLE
+        endBtn.label.text = "End call"
+        bFirst.box.visibility = View.VISIBLE
+        bMic.box.visibility = View.VISIBLE
         bFlip.box.visibility = if (camOn && !failed && !pre) View.VISIBLE else View.GONE
         // Same lucide glyphs as iOS (Assets.xcassets ol_call_*): speaker without/with second wave, plain hung-up handset.
         bFlip.set("Flip", R.drawable.ol_call_flip)
-        bFirst.set("Speaker", if (speakerOn) R.drawable.ol_call_speaker else R.drawable.ol_call_speaker_off, active = speakerOn)
+        bFirst.set("Speaker", if (speakerOn) R.drawable.ol_call_speaker else R.drawable.ol_call_speaker_off, active = speakerOn, enabled = !pre || media)
         bVid.box.visibility = if (videoRow) View.VISIBLE else View.GONE
         bVid.set(if (camOn) "Camera" else "Video", if (camOn) R.drawable.ol_call_video else R.drawable.ol_call_video_off, active = camOn)
-        bMic.set(if (muted) "Unmute" else "Mute", if (muted) R.drawable.ol_call_mic_off else R.drawable.ol_call_mic, active = muted)
+        bMic.set(if (muted) "Unmute" else "Mute", if (muted) R.drawable.ol_call_mic_off else R.drawable.ol_call_mic, active = muted, enabled = !pre || media)
         applyChrome(v)
     }
 

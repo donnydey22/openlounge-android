@@ -1346,7 +1346,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         if (on) {
             if (ringbackTone != null) return;
             try {
-                ringbackTone = new android.media.ToneGenerator(AudioManager.STREAM_MUSIC, 80);
+                ringbackTone = new android.media.ToneGenerator(AudioManager.STREAM_MUSIC, CallAudioPolicy.RINGBACK_TONE_VOLUME);
                 ringbackTone.startTone(android.media.ToneGenerator.TONE_SUP_RINGTONE); // loops until stopped
             } catch (RuntimeException e) {
                 ringbackTone = null;

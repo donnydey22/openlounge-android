@@ -101,6 +101,7 @@ class NativeCallScreenRenderTest {
         if (v is ViewGroup) for (i in 0 until v.childCount) findDesc(v.getChildAt(i), d)?.let { return it }
         return null
     }
+    private fun enabled(root: View, label: String): Boolean = findClickable(root, label)?.isEnabled == true
     private fun discWidth(root: View, label: String): Int {
         val box = findClickable(root, label) ?: return -1
         if (box is ViewGroup && box.childCount > 0) return box.getChildAt(0).width
@@ -173,28 +174,31 @@ class NativeCallScreenRenderTest {
         assertBlurred(shot1, "calling")
         val avTop = avatarTop(root)
         assertEquals("avatar centered between the 56dp bar and the row (SwiftUI frame)", expectedAvatarTop(act, root), avTop)
-        assertTrue(t.toString(), t.containsAll(listOf("Ada Lovelace", "Calling…", "Cancel")))
-        assertTrue("pre-answer card: only Cancel, no Video / Speaker / Mute / End call: $t", t.none { it in listOf("Phone", "Speaker", "Video", "Mute", "End call", "Flip", "Camera") })
+        assertTrue(t.toString(), t.containsAll(listOf("Ada Lovelace", "Calling…", "Speaker", "Mute", "End call")))
+        assertTrue("pre-answer card (57, iOS 133 parity): Speaker / Mute / End call, no Cancel / Video / Flip / Camera: $t", t.none { it in listOf("Cancel", "Phone", "Video", "Flip", "Camera") })
+        assertTrue("pre-answer Speaker/Mute disabled until this phone's olcall leg is up", !enabled(root, "Speaker") && !enabled(root, "Mute") && enabled(root, "End call"))
         assertTrue("no minimize before answer", findDesc(root, "Minimize call")?.let { isShown(it) } != true)
         assertTrue("profile photo is painted (initials only as a fallback)", hasPhoto(root))
         assertTrue("avatar is a 112dp circle (transparent corners, not a squircle)", circlePhoto(root))
         assertTrue("online presence dot on the calling avatar", findDesc(root, "online") != null)
         val expect = Math.round(56f * act.resources.displayMetrics.density)
-        assertEquals("56dp Cancel disc", expect, discWidth(root, "Cancel"))
+        assertEquals("56dp End call disc", expect, discWidth(root, "End call"))
+        assertEquals("56dp Speaker disc", expect, discWidth(root, "Speaker"))
         s.onPageCall("call:ringing", JSONObject().put("callId", "t1"))
         t = texts(root); assertBlurred(snap(root, "1b-ringing"), "ringing")
-        assertTrue("ringing acknowledged -> Ringing…, still only Cancel: $t", t.contains("Ringing…") && t.contains("Cancel") && !t.contains("Mute"))
+        assertTrue("ringing acknowledged -> Ringing…, same row: $t", t.contains("Ringing…") && t.containsAll(listOf("Speaker", "Mute", "End call")) && !t.contains("Cancel"))
         assertEquals("ringing avatar does not move", avTop, avatarTop(root))
-        // t5456: the server answer alone keeps the pre-answer card ("Ringing…" + Cancel, no timer)
+        // t5456: the server answer alone keeps the pre-answer card ("Ringing…", no timer)
         s.onPageCall("call:answered", JSONObject().put("callId", "t1"))
         t = texts(root); assertBlurred(snap(root, "2a-answered-no-media"), "answered, media not yet flowing")
-        assertTrue("answered but no media -> still Ringing… + Cancel only: $t", t.contains("Ringing…") && t.contains("Cancel") && t.none { it in listOf("Phone", "Video", "Mute", "End call") } && !t.contains("0:00"))
+        assertTrue("answered but no media -> still Ringing…, no timer, no Video: $t", t.contains("Ringing…") && t.contains("End call") && t.none { it in listOf("Phone", "Video", "Cancel") } && !t.contains("0:00"))
         assertEquals("answered avatar does not move", avTop, avatarTop(root))
         // media flowing (olcall onConnected -> MainActivity.emit relay) -> full row and the timer
         NativeCallScreen.onNativeMediaFlowing("t1")
         t = texts(root)
         assertTrue("media flowing -> Speaker / Mute / End call: $t", t.containsAll(listOf("Speaker", "Mute", "End call")) && !t.contains("Cancel") && !t.contains("Phone") && !t.contains("Video"))
         assertTrue("timer starts when media flows: $t", t.contains("0:00"))
+        assertTrue("live: Speaker/Mute enabled", enabled(root, "Speaker") && enabled(root, "Mute"))
         assertTrue("audio in-call has no Video button (design is Speaker / Mute / End call)", !t.contains("Video") && !t.contains("Flip"))
         assertBlurred(snap(root, "2b-media-flowing"), "media flowing")
         assertEquals("live avatar does not move", avTop, avatarTop(root))
@@ -268,12 +272,12 @@ class NativeCallScreenRenderTest {
         org.robolectric.shadows.ShadowLooper.idleMainLooper(1900, java.util.concurrent.TimeUnit.MILLISECONDS)
         assertTrue("end card leaves after 1.8 s", texts(root).none { it.startsWith("Call ended") })
 
-        // callee path: accepted, waiting for media -> "Connecting…" + Cancel
+        // callee path: accepted, waiting for media -> "Connecting…" + the same row
         s.onPageCall("call:answering", JSONObject().put("callId", "t3").put("name", "Ada Lovelace").put("photo", photo).put("presence", "online"))
         idlePhoto()
         s.onPageCall("call:connected", JSONObject().put("callId", "t3"))
         t = texts(root); assertBlurred(snap(root, "2-connecting"), "connecting")
-        assertTrue("connecting: Connecting… + Cancel only: $t", t.contains("Connecting…") && t.contains("Cancel") && !t.contains("Mute"))
+        assertTrue("connecting: Connecting… + Speaker / Mute / End call: $t", t.contains("Connecting…") && t.containsAll(listOf("Speaker", "Mute", "End call")) && !t.contains("Cancel"))
         assertEquals("connecting avatar matches calling", avTop, avatarTop(root))
         NativeCallScreen.onNativeMediaFlowing("t3")
         assertTrue("callee goes live on media", texts(root).contains("End call"))
