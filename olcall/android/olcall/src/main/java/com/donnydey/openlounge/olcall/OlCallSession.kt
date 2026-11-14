@@ -165,6 +165,7 @@ class OlCallSession(
         else {
             crumbs.event("net", "change:$from->$t", "warning")
             engine.logEvent("network_change", "$from->$t", mapOf("from" to from, "to" to t, "msSinceStart" to ms, "phase" to state.phase.name))
+            engine.onNetworkPathChange(from, t)
         }
     }
 
@@ -238,6 +239,7 @@ class OlCallSession(
         if (st.mediaFlowing || st.phase != Phase.InCall) return
         crumbs.event("call", "media-flowing:$source")
         runCatching { callLog?.event("media_flowing", source) }
+        engine.markMediaFlowing()
         update { it.copy(mediaFlowing = true) }
     }
 

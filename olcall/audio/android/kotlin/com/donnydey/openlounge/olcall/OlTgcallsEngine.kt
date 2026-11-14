@@ -12,6 +12,7 @@ import org.json.JSONObject
 import org.olwrtc.VideoSink
 import java.util.UUID
 import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
@@ -75,6 +76,29 @@ class OlTgcallsEngine(
     /** Logging only (t5614u): current network type, set by OlCallSession's ConnectivityManager callback. */
     @Volatile var netType: String = "unknown"
     @Volatile private var connectedAtMs = 0L
+    private var resumeKey: String? = null
+    private var resumeCallId = ""
+    private var resumeLeg = ""
+    private var resuming = false
+    private var resumeAttempts = 0
+    private var resumeStartedAtMs = 0L
+    private var resumeSocket: WebSocket? = null
+    private val queuedWhileResuming = mutableListOf<JSONObject>()
+    private var needsMediaReset = false
+    private var resetInFlight = false
+    private var resetCount = 0
+    private var lastResetAtMs = 0L
+    private var resumedAtMs = 0L
+    private var flowing = false
+    private var localMuted = false
+    private var localVideoOn = startWithVideo
+    private var joinDevice = ""
+    private var joinOs = ""
+    private val scheduler = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "ol-tgcalls-sched").apply { isDaemon = true } }
+    private var resumeRetry: ScheduledFuture<*>? = null
+    private var resumeWatch: ScheduledFuture<*>? = null
+    private var silenceWatch: ScheduledFuture<*>? = null
+    private var resetAckWatch: ScheduledFuture<*>? = null
 
     /** idle/joining/offering/answering/connected/failed; one log line per transition (OlCallStates). */
     val states = OlCallStates { line ->
@@ -89,6 +113,8 @@ class OlTgcallsEngine(
 
     fun start(device: String, os: String) {
         crumbs.traceId = traceId
+        joinDevice = device
+        joinOs = os
         val req = Request.Builder().url(serverUrl).build()
         ws = http.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -104,12 +130,11 @@ class OlTgcallsEngine(
                 // OkHttp reports as EOFException: that is the teardown, not a call failure (1372bded, Nov 12).
                 if (ended) { crumbs.event("ws", "closed-after-end:${t.javaClass.simpleName}"); return@execute }
                 crumbs.event("ws", "failure:${t.javaClass.simpleName}", "error")
-                logWsLost("failure", t.javaClass.simpleName, null)
-                end("ws-failure")
+                onSocketLost(webSocket, "failure", t.javaClass.simpleName, null)
             }
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = worker.execute {
-                if (!ended) logWsLost("closed", reason.take(60), code)
-                end("ws-closed:$code")
+                if (ended) return@execute
+                onSocketLost(webSocket, "closed", reason.take(60), code)
             }
         })
     }
@@ -122,15 +147,202 @@ class OlTgcallsEngine(
         if (!ended) send(JSONObject().put("t", "keyframe").put("reason", reason))
     }
 
+
+    private fun createNative(f: JSONObject, initial: Boolean) {
+        val key = Base64.decode(f.getString("key"), Base64.NO_WRAP)
+        val outgoing = f.getBoolean("isOutgoing")
+        val (rtc, source) = OlRtcServers.select(f.optJSONArray("iceServers"), appIceServers)
+        crumbs.event("tg", "rtc-servers:source=$source:" + OlRtcServers.summary(rtc))
+        callLog?.let { l -> l.turnServers = rtc.count { it.isTurn }
+            runCatching { l.event("rtc_servers", detail = "source=$source", extra = mapOf("turnServers" to rtc.count { it.isTurn }, "stunServers" to rtc.count { !it.isTurn })) } }
+        val video = if (initial) startWithVideo else localVideoOn
+        if (handle != 0L && !initial) { nativeStop(handle); handle = 0L }
+        handle = nativeCreate(version, key, outgoing, "{}", video, remoteVideoSink, localVideoSink,
+            rtc.map { it.host }.toTypedArray(), rtc.map { it.port }.toIntArray(),
+            rtc.map { it.login }.toTypedArray(), rtc.map { it.password }.toTypedArray(),
+            rtc.map { (if (it.isTurn) 1 else 0) or (if (it.isTcp) 2 else 0) }.toIntArray())
+        key.fill(0)
+        if (handle == 0L) {
+            resetInFlight = false
+            end("native-create-failed")
+            return
+        }
+        if (localMuted) nativeSetMuted(handle, true)
+        if (!initial) {
+            if (localVideoOn) nativeSetVideoEnabled(handle, true, localVideoSink)
+            resetAckWatch?.cancel(false)
+            crumbs.event("tg", "media-reset:engine-started")
+        }
+    }
+
+    private fun onSocketLost(socket: WebSocket, how: String, why: String, code: Int?) {
+        if (ended) return
+        // A stale socket from a handover or from starting a resume attempt.
+        if (resuming && socket !== resumeSocket && socket !== ws) return
+        if (socket === resumeSocket) resumeSocket = null
+        if (socket === ws) ws = null
+        logWsLost(how, why, code)
+        val connected = states.state == OlCallStates.State.connected
+        if (OlSignalingResume.shouldResume(connected, resumeKey != null, ended)) {
+            if (!resuming) beginResume()
+            else scheduleResumeAttempt()
+        } else if (!resuming) {
+            end(if (how == "closed") "ws-closed:${code ?: 0}" else "ws-failure")
+        }
+    }
+
+    private fun beginResume() {
+        if (ended || resumeKey == null) return
+        if (!resuming) {
+            resuming = true
+            resumeAttempts = 0
+            resumeStartedAtMs = android.os.SystemClock.elapsedRealtime()
+            crumbs.event("ws", "resume:start", "warning")
+            runCatching { callLog?.event("ws_resume", "start", extra = mapOf("netType" to netType)) }
+        }
+        scheduleResumeAttempt()
+    }
+
+    private fun scheduleResumeAttempt() {
+        if (ended || !resuming) return
+        val elapsed = android.os.SystemClock.elapsedRealtime() - resumeStartedAtMs
+        val delay = OlSignalingResume.delayMs(resumeAttempts)
+        if (elapsed + delay >= OlSignalingResume.WINDOW_MS) {
+            crumbs.event("ws", "resume:gave-up:attempts=$resumeAttempts", "error")
+            runCatching { callLog?.event("ws_resume", "gave_up", "attempts=$resumeAttempts",
+                mapOf("outcome" to "failed", "gapMs" to elapsed, "netType" to netType)) }
+            resuming = false
+            end("ws-failure")
+            return
+        }
+        resumeRetry?.cancel(false)
+        resumeRetry = scheduler.schedule({ worker.execute { resumeAttempt() } }, delay, TimeUnit.MILLISECONDS)
+    }
+
+    private fun resumeAttempt() {
+        if (ended || !resuming || resumeKey == null) return
+        resumeAttempts++
+        val key = resumeKey ?: return
+        val frame = JSONObject().put("t", "resume").put("callId", resumeCallId).put("leg", resumeLeg)
+            .put("resume", key).put("traceId", traceId)
+        val req = Request.Builder().url(serverUrl).build()
+        val sock = http.newWebSocket(req, object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                worker.execute {
+                    frame.put("seq", wsSeq.incrementAndGet())
+                    webSocket.send(frame.toString())
+                }
+            }
+            override fun onMessage(webSocket: WebSocket, text: String) = worker.execute {
+                if (webSocket === resumeSocket || ws == null) {
+                    // First successful resumed frame takes over the socket.
+                    if (JSONObject(text).optString("t") == "resumed") {
+                        ws = webSocket
+                        resumeSocket = null
+                    }
+                    onFrame(JSONObject(text))
+                } else onFrame(JSONObject(text))
+            }
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = worker.execute {
+                onSocketLost(webSocket, "failure", t.javaClass.simpleName, null)
+            }
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = worker.execute {
+                if (!ended) onSocketLost(webSocket, "closed", reason.take(60), code)
+            }
+        })
+        resumeSocket = sock
+        resumeWatch?.cancel(false)
+        resumeWatch = scheduler.schedule({
+            worker.execute {
+                if (!ended && resuming && ws == null) {
+                    sock.cancel()
+                    resumeSocket = null
+                    scheduleResumeAttempt()
+                }
+            }
+        }, OlSignalingResume.ATTEMPT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+    }
+
+    private fun onSignalingResumed() {
+        flowing = false
+        resumedAtMs = android.os.SystemClock.elapsedRealtime()
+        if (needsMediaReset && states.state == OlCallStates.State.connected && ws != null) {
+            beginMediaReset("after-resume")
+        } else {
+            armSilenceAfterResume()
+        }
+    }
+
+    private fun armSilenceAfterResume() {
+        silenceWatch?.cancel(false)
+        silenceWatch = scheduler.schedule({
+            worker.execute {
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (OlMediaReset.shouldResetOnSilence(resumedAtMs, flowing, states.state == OlCallStates.State.connected,
+                        resetInFlight, ended, resetCount, lastResetAtMs, now)) {
+                    beginMediaReset("silence-after-resume")
+                }
+            }
+        }, OlMediaReset.SILENCE_AFTER_RESUME_MS, TimeUnit.MILLISECONDS)
+    }
+
+    /** Session: wifi <-> cellular (or equivalent) mid-call. */
+    fun onNetworkPathChange(from: String, to: String) = worker.execute {
+        if (ended) return@execute
+        val now = android.os.SystemClock.elapsedRealtime()
+        val connected = states.state == OlCallStates.State.connected
+        if (OlMediaReset.shouldResetOnPathChange(from, to, connected, resetInFlight, ended, resetCount, lastResetAtMs, now)) {
+            if (ws != null && !resuming) beginMediaReset("path:$from->$to")
+            else needsMediaReset = true
+        } else if (OlMediaReset.pathChange(from, to) && connected) {
+            needsMediaReset = true
+        }
+    }
+
+    fun markMediaFlowing() = worker.execute {
+        if (ended || flowing) return@execute
+        flowing = true
+        silenceWatch?.cancel(false)
+        resumedAtMs = 0L
+    }
+
+    private fun beginMediaReset(reason: String) {
+        if (ended || resetInFlight || ws == null || resuming) {
+            needsMediaReset = true
+            return
+        }
+        resetInFlight = true
+        needsMediaReset = false
+        resetCount++
+        lastResetAtMs = android.os.SystemClock.elapsedRealtime()
+        flowing = false
+        resumedAtMs = 0L
+        silenceWatch?.cancel(false)
+        crumbs.event("tg", "media-reset:$reason", "warning")
+        runCatching { callLog?.event("media_reset", reason, extra = mapOf("count" to resetCount, "netType" to netType)) }
+        if (handle != 0L) { nativeStop(handle); handle = 0L }
+        send(JSONObject().put("t", "reset-leg"))
+        resetAckWatch?.cancel(false)
+        resetAckWatch = scheduler.schedule({
+            worker.execute {
+                if (resetInFlight && !ended) {
+                    resetInFlight = false
+                    crumbs.event("tg", "media-reset:timeout", "error")
+                }
+            }
+        }, 5_000, TimeUnit.MILLISECONDS)
+    }
+
     /**
-     * Logging only: the signaling socket went away while the call was live. Android has no WS resume (no log
-     * evidence for one), so this ends the call; the event records the network type and how long we had been up.
+     * Logging only historically; now also used when we do resume. Records the network type and
+     * how long we had been up when the signaling socket went away.
      */
     private fun logWsLost(how: String, why: String, code: Int?) {
         val up = if (connectedAtMs > 0) android.os.SystemClock.elapsedRealtime() - connectedAtMs else -1L
+        val willResume = OlSignalingResume.shouldResume(states.state == OlCallStates.State.connected, resumeKey != null, ended)
         runCatching { callLog?.event("ws_closed", how, why, buildMap {
             put("netType", netType); put("connected", states.state == OlCallStates.State.connected)
-            put("msSinceConnected", up); put("resume", "unsupported"); code?.let { put("code", it) } }) }
+            put("msSinceConnected", up); put("resume", if (willResume) "starting" else "unsupported"); code?.let { put("code", it) } }) }
     }
 
     /** App-layer facts (network type changes, fps) into this call's log. */
@@ -140,6 +352,11 @@ class OlTgcallsEngine(
 
     private fun send(o: JSONObject) {
         o.put("seq", wsSeq.incrementAndGet())
+        if (ws == null && resuming) {
+            val t = o.optString("t")
+            if (t == "blob" || t == "keyframe") queuedWhileResuming.add(o)
+            return
+        }
         ws?.send(o.toString())
     }
 
@@ -149,24 +366,26 @@ class OlTgcallsEngine(
             "joined" -> {
                 crumbs.callId = f.optString("callId"); crumbs.leg = f.optString("leg")
                 states.callId = crumbs.callId
-                val key = Base64.decode(f.getString("key"), Base64.NO_WRAP)
+                resumeKey = f.optString("resume").ifEmpty { null }
+                resumeCallId = f.optString("callId")
+                resumeLeg = f.optString("leg")
                 val outgoing = f.getBoolean("isOutgoing")
                 states.setState(if (outgoing) OlCallStates.State.offering else OlCallStates.State.answering, "joined")
                 crumbs.event("tg", "joined:outgoing=$outgoing:version=$version")
-                // Relay list: coturn STUN + TURN UDP/TCP with the short-lived REST login.
-                // enableP2P stays on in the JNI, so direct host/srflx pairs are tried first
-                // and the TURN relay is only the fallback. Credentials are never logged.
-                val (rtc, source) = OlRtcServers.select(f.optJSONArray("iceServers"), appIceServers)
-                crumbs.event("tg", "rtc-servers:source=$source:" + OlRtcServers.summary(rtc))
-                callLog?.let { l -> l.turnServers = rtc.count { it.isTurn }
-                    runCatching { l.event("rtc_servers", detail = "source=$source", extra = mapOf("turnServers" to rtc.count { it.isTurn }, "stunServers" to rtc.count { !it.isTurn })) } }
-                handle = nativeCreate(version, key, outgoing, "{}", startWithVideo, remoteVideoSink, localVideoSink,
-                    rtc.map { it.host }.toTypedArray(), rtc.map { it.port }.toIntArray(),
-                    rtc.map { it.login }.toTypedArray(), rtc.map { it.password }.toTypedArray(),
-                    rtc.map { (if (it.isTurn) 1 else 0) or (if (it.isTcp) 2 else 0) }.toIntArray())
-                key.fill(0) // the JNI copied it; tgcalls owns the only copy from here on
-                if (handle == 0L) end("native-create-failed")
+                createNative(f, initial = true)
             }
+            "resumed" -> {
+                resumeWatch?.cancel(false)
+                resuming = false
+                val gap = android.os.SystemClock.elapsedRealtime() - resumeStartedAtMs
+                crumbs.event("ws", "resumed:attempts=$resumeAttempts:gapMs=$gap")
+                runCatching { callLog?.event("ws_resume", "resumed", "attempts=$resumeAttempts",
+                    mapOf("outcome" to "resumed", "gapMs" to gap, "netType" to netType)) }
+                val q = queuedWhileResuming.toList(); queuedWhileResuming.clear()
+                q.forEach { send(it) }
+                onSignalingResumed()
+            }
+            "leg-reset" -> createNative(f, initial = false)
             "blob" -> {
                 states.blobReceived()
                 val b = Base64.decode(f.getString("b64"), Base64.NO_WRAP)
@@ -175,16 +394,29 @@ class OlTgcallsEngine(
             }
             "stats" -> f.optJSONObject("stats")?.let { listener.onStats(it) }
             "bye" -> end("bye:" + f.optString("reason"))
-            "error" -> { crumbs.event("ws", "server-error:" + f.optString("error"), "error")
-                runCatching { callLog?.event("server_error", OlCallLogTags.tag("server-error:" + f.optString("error")), f.optString("error").take(60)) }
-                end("server-error") }
+            "error" -> {
+                val e = f.optString("error")
+                if (e == "reset-limited" || e == "reset-unsupported" || e == "translator") {
+                    crumbs.event("tg", "media-reset:$e", "warning")
+                    resetAckWatch?.cancel(false)
+                    resetInFlight = false
+                } else if (e == "unauthorized" && resuming) {
+                    crumbs.event("ws", "resume:refused", "error")
+                    resuming = false
+                    end("ws-failure")
+                } else {
+                    crumbs.event("ws", "server-error:$e", "error")
+                    runCatching { callLog?.event("server_error", OlCallLogTags.tag("server-error:$e"), e.take(60)) }
+                    end("server-error")
+                }
+            }
         }
     }
 
-    fun setMuted(muted: Boolean) = worker.execute { if (handle != 0L) nativeSetMuted(handle, muted) }
+    fun setMuted(muted: Boolean) = worker.execute { localMuted = muted; if (handle != 0L) nativeSetMuted(handle, muted) }
 
     /** Camera on/off. The first "on" in an audio call adds a video channel (tgcalls renegotiates). */
-    fun setVideoEnabled(enabled: Boolean) = worker.execute { if (handle != 0L) nativeSetVideoEnabled(handle, enabled, localVideoSink) }
+    fun setVideoEnabled(enabled: Boolean) = worker.execute { localVideoOn = enabled; if (handle != 0L) nativeSetVideoEnabled(handle, enabled, localVideoSink) }
 
     fun switchCamera(front: Boolean) = worker.execute { if (handle != 0L) nativeSwitchCamera(handle, front) }
 
@@ -200,6 +432,13 @@ class OlTgcallsEngine(
     private fun end(reason: String) {
         if (ended) return
         ended = true
+        resuming = false
+        resetInFlight = false
+        resumeRetry?.cancel(false)
+        resumeWatch?.cancel(false)
+        silenceWatch?.cancel(false)
+        resetAckWatch?.cancel(false)
+        queuedWhileResuming.clear()
         // Normal ends (local hangup, far side's bye) are not failures; everything else before Established is.
         val normal = reason == "local-hangup" || reason.startsWith("bye:")
         if (states.state != OlCallStates.State.connected && !normal) states.fail(reason)
@@ -229,8 +468,10 @@ class OlTgcallsEngine(
         // (72a8f1e3, Nov 12: "Reconnecting" at the same ms as ended:bye:leg-closed). The call is already over:
         // keep it as a teardown note, never as a live state for the call log or the call screen.
         if (ended) { crumbs.event("tg.state", "after-end:${s.name}"); return }
+        if (resetInFlight && s == State.Failed) { crumbs.event("tg.state", "during-reset:${s.name}"); return }
         if (s == State.Established) { states.setState(OlCallStates.State.connected, "tg-established")
-            if (connectedAtMs == 0L) connectedAtMs = android.os.SystemClock.elapsedRealtime() }
+            if (connectedAtMs == 0L) connectedAtMs = android.os.SystemClock.elapsedRealtime()
+            resetInFlight = false }
         if (s == State.Failed) states.fail("tg-failed")
         crumbs.event("tg.state", s.name, if (s == State.Failed) "error" else "info")
         worker.execute { listener.onState(s) }
