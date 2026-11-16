@@ -99,6 +99,11 @@ class OlTgcallsEngine(
     private var resumeWatch: ScheduledFuture<*>? = null
     private var silenceWatch: ScheduledFuture<*>? = null
     private var resetAckWatch: ScheduledFuture<*>? = null
+    private var pathSettle: ScheduledFuture<*>? = null
+    private var reconnectWatch: ScheduledFuture<*>? = null
+    private var resetRetry: ScheduledFuture<*>? = null
+    @Volatile private var lastNativeState: State? = null
+    private var pathFrom: String? = null
 
     /** idle/joining/offering/answering/connected/failed; one log line per transition (OlCallStates). */
     val states = OlCallStates { line ->
@@ -286,16 +291,36 @@ class OlTgcallsEngine(
         }, OlMediaReset.SILENCE_AFTER_RESUME_MS, TimeUnit.MILLISECONDS)
     }
 
-    /** Session: wifi <-> cellular (or equivalent) mid-call. */
+    /**
+     * Session: the default network changed mid-call (wifi <-> cellular). Nov 15 night (68fd0a81, 8ecc19a2): the
+     * Pixel's default moved to cellular while Wi-Fi stayed up; Android lingered Wi-Fi 30 s and then killed every
+     * socket on it (SocketException exactly 30 s after net change, both calls). So we do not wait for that: after
+     * the flip settles we move signaling to the new default network (resume on a fresh socket) and restart the
+     * engine there, while the old path still carries media.
+     */
     fun onNetworkPathChange(from: String, to: String) = worker.execute {
         if (ended) return@execute
-        val now = android.os.SystemClock.elapsedRealtime()
+        if (pathFrom == null) pathFrom = from
+        pathSettle?.cancel(false)
+        pathSettle = scheduler.schedule({ worker.execute { settlePathChange(to) } },
+            OlMediaReset.PATH_SETTLE_MS, TimeUnit.MILLISECONDS)
+    }
+
+    private fun settlePathChange(to: String) {
+        val from = pathFrom ?: return
+        pathFrom = null
+        if (ended || !OlMediaReset.pathChange(from, to)) return
         val connected = states.state == OlCallStates.State.connected
-        if (OlMediaReset.shouldResetOnPathChange(from, to, connected, resetInFlight, ended, resetCount, lastResetAtMs, now)) {
-            if (ws != null && !resuming) beginMediaReset("path:$from->$to")
-            else needsMediaReset = true
-        } else if (OlMediaReset.pathChange(from, to) && connected) {
-            needsMediaReset = true
+        if (!connected) return
+        crumbs.event("net", "handover:$from->$to", "warning")
+        needsMediaReset = true
+        if (resumeKey != null && !resuming) {
+            val old = ws
+            ws = null
+            beginResume() // resume socket opens on the new default network; onSignalingResumed restarts media
+            old?.cancel()
+        } else if (ws != null && !resuming) {
+            beginMediaReset("path:$from->$to")
         }
     }
 
@@ -328,9 +353,32 @@ class OlTgcallsEngine(
                 if (resetInFlight && !ended) {
                     resetInFlight = false
                     crumbs.event("tg", "media-reset:timeout", "error")
+                    if (handle == 0L) scheduleResetRetry("retry-timeout")
                 }
             }
         }, 5_000, TimeUnit.MILLISECONDS)
+    }
+
+    private var resetRetries = 0
+    private fun scheduleResetRetry(reason: String) {
+        if (ended || resetRetries >= 20) return
+        resetRetries++
+        resetRetry?.cancel(false)
+        resetRetry = scheduler.schedule({ worker.execute {
+            if (!ended && !resetInFlight && handle == 0L) beginMediaReset(reason)
+        } }, 2_500, TimeUnit.MILLISECONDS)
+    }
+
+    /** tgcalls reported Reconnecting mid-call: if it is still there after RECONNECTING_RESET_MS, restart the engine. */
+    private fun armReconnectWatch() {
+        reconnectWatch?.cancel(false)
+        reconnectWatch = scheduler.schedule({ worker.execute {
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (ended || lastNativeState != State.Reconnecting) return@execute
+            if (OlMediaReset.allowed(states.state == OlCallStates.State.connected, resetInFlight, ended, resetCount, lastResetAtMs, now)) {
+                beginMediaReset("tg-reconnecting")
+            } else if (!ended && states.state == OlCallStates.State.connected) armReconnectWatch()
+        } }, OlMediaReset.RECONNECTING_RESET_MS, TimeUnit.MILLISECONDS)
     }
 
     /**
@@ -385,7 +433,12 @@ class OlTgcallsEngine(
                 q.forEach { send(it) }
                 onSignalingResumed()
             }
-            "leg-reset" -> createNative(f, initial = false)
+            "leg-reset" -> { resetRetry?.cancel(false); createNative(f, initial = false) }
+            // Server: this leg's ICE failed (no packets); it keeps the call open for a reset-leg (60, Nov 15).
+            "media-lost" -> {
+                crumbs.event("tg", "server-media-lost:" + f.optString("reason"), "warning")
+                if (!resetInFlight) beginMediaReset("server-media-lost") else needsMediaReset = true
+            }
             "blob" -> {
                 states.blobReceived()
                 val b = Base64.decode(f.getString("b64"), Base64.NO_WRAP)
@@ -400,6 +453,8 @@ class OlTgcallsEngine(
                     crumbs.event("tg", "media-reset:$e", "warning")
                     resetAckWatch?.cancel(false)
                     resetInFlight = false
+                    // The engine was already stopped for the reset: never sit with no engine. Retry shortly.
+                    if (e != "reset-unsupported" && handle == 0L) scheduleResetRetry("retry-$e")
                 } else if (e == "unauthorized" && resuming) {
                     crumbs.event("ws", "resume:refused", "error")
                     resuming = false
@@ -438,6 +493,7 @@ class OlTgcallsEngine(
         resumeWatch?.cancel(false)
         silenceWatch?.cancel(false)
         resetAckWatch?.cancel(false)
+        pathSettle?.cancel(false); reconnectWatch?.cancel(false); resetRetry?.cancel(false)
         queuedWhileResuming.clear()
         // Normal ends (local hangup, far side's bye) are not failures; everything else before Established is.
         val normal = reason == "local-hangup" || reason.startsWith("bye:")
@@ -472,6 +528,16 @@ class OlTgcallsEngine(
         if (s == State.Established) { states.setState(OlCallStates.State.connected, "tg-established")
             if (connectedAtMs == 0L) connectedAtMs = android.os.SystemClock.elapsedRealtime()
             resetInFlight = false }
+        lastNativeState = s
+        val midCall = states.state == OlCallStates.State.connected
+        if (s == State.Established) worker.execute { reconnectWatch?.cancel(false); resetRetries = 0 }
+        if (midCall && s == State.Reconnecting) worker.execute { if (!resetInFlight) armReconnectWatch() }
+        if (midCall && s == State.Failed) {
+            // Mid-call engine failure: restart it (new translator) instead of failing the call (60).
+            crumbs.event("tg.state", "Failed:restarting", "error")
+            worker.execute { if (!ended) { if (handle != 0L && !resetInFlight) beginMediaReset("tg-failed") else needsMediaReset = true } }
+            return
+        }
         if (s == State.Failed) states.fail("tg-failed")
         crumbs.event("tg.state", s.name, if (s == State.Failed) "error" else "info")
         worker.execute { listener.onState(s) }
