@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import com.donnydey.openlounge.olcall.OlCallKit
+import com.donnydey.openlounge.olcall.OlCallLifecycle
 import com.donnydey.openlounge.olcall.OlCallSession
 import com.donnydey.openlounge.olcall.OlCallUi
 import org.json.JSONObject
@@ -26,6 +27,8 @@ internal class OlcallCall(
     private val onRoute: (route: String, speaker: Boolean) -> Unit,
     /** reason; connectedBefore = the call had reached InCall */
     private val onEnded: (reason: String, connectedBefore: Boolean) -> Unit,
+    /** Server-owned lifecycle (olcall states.go via call:state). Observer only: this class never writes it. */
+    private val onLifecycle: (OlCallLifecycle) -> Unit = {},
 ) {
     private val main = Handler(Looper.getMainLooper())
     private var connected = false
@@ -33,6 +36,8 @@ internal class OlcallCall(
     private var remoteVideo = false
     private var flowing = false
     private var route: String? = null
+    /** Last lifecycle snapshot forwarded (dedupe only; the server owns the state). */
+    private var lifecycle: OlCallLifecycle? = null
     private val session: OlCallSession
 
     init {
@@ -42,6 +47,7 @@ internal class OlcallCall(
             if (s.phase == OlCallSession.Phase.InCall && !connected) { connected = true; onConnected() }
             if (s.mediaFlowing && !flowing) { flowing = true; onMediaFlowing() }
             if (s.remoteVideoOn && !remoteVideo) { remoteVideo = true; onRemoteVideo() }
+            s.lifecycle?.let { l -> if (OlCallLifecycle.newer(lifecycle, l)) { lifecycle = l; onLifecycle(l) } }
             if (s.audioRoute != route) { route = s.audioRoute; onRoute(s.audioRoute, s.speakerOn) }
             if (s.phase == OlCallSession.Phase.Ended) { ended = true; onEnded(s.endReason ?: "ended", connected) }
         }

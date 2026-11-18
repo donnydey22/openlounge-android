@@ -58,6 +58,8 @@ class OlTgcallsEngine(
         fun onRemoteMedia(audioActive: Boolean, video: RemoteVideo)
         fun onStats(json: JSONObject)
         fun onEnded(reason: String)
+        /** Server-owned lifecycle (call:state). Observe only: never derive or write call state from it. */
+        fun onLifecycle(lifecycle: OlCallLifecycle) {}
     }
 
     /** tgcalls::State ordinal order (Instance.h). */
@@ -446,6 +448,8 @@ class OlTgcallsEngine(
                 if (handle != 0L) nativeReceiveSignaling(handle, b)
             }
             "stats" -> f.optJSONObject("stats")?.let { listener.onStats(it) }
+            // Server is the single writer of the call lifecycle (olcall states.go); pass it through untouched.
+            "call:state" -> OlCallLifecycle.parse(f.optJSONObject("lifecycle"))?.let { listener.onLifecycle(it) }
             "bye" -> end("bye:" + f.optString("reason"))
             "error" -> {
                 val e = f.optString("error")

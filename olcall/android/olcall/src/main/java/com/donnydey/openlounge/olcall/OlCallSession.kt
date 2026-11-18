@@ -77,6 +77,8 @@ class OlCallSession(
          * phone, or a remote video frame was rendered. The call timer starts on this (not on the answer/join).
          */
         val mediaFlowing: Boolean = false,
+        /** Latest server-owned lifecycle snapshot (call:state); null until the server sends one. Read-only mirror. */
+        val lifecycle: OlCallLifecycle? = null,
     )
 
     private val app = context.applicationContext
@@ -118,6 +120,9 @@ class OlCallSession(
             if (audioToUs > 0) main.post { markFlowing("audio-packets") }
         }
         override fun onEnded(reason: String) { main.post { finish(reason) } }
+        override fun onLifecycle(lifecycle: OlCallLifecycle) = update {
+            if (OlCallLifecycle.newer(it.lifecycle, lifecycle)) it.copy(lifecycle = lifecycle) else it
+        }
     }
 
     private lateinit var engine: OlTgcallsEngine
