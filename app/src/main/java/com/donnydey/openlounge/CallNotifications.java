@@ -4,11 +4,11 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
+import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.media.AudioAttributes;
 import android.media.AudioManager;
-import android.media.RingtoneManager;
 import android.net.Uri;
 import android.os.Build;
 import android.util.Log;
@@ -22,15 +22,19 @@ import java.util.Map;
 
 /**
  * Incoming call ring (NATIVE_SPEC.md §4): FCM data {type:"call_incoming", callId, callerId, callerName, callerPhoto,
- * video "0"|"1", expiresAt (epoch ms), url} → a ringing CATEGORY_CALL notification on the "calls" channel
- * (ringtone, insistent, vibration, public on the lock screen, times out at expiresAt) with a full-screen intent
- * (IncomingCallActivity) and Accept / Decline; CallStyle.forIncomingCall on Android 12+. {type:"call_cancel"}
+ * video "0"|"1", expiresAt (epoch ms), url} → a ringing CATEGORY_CALL notification on the "calls_v2" channel
+ * (Open Lounge ring res/raw/ol_ring_facetime_style.ogg, insistent, vibration, public on the lock screen, times out at
+ * expiresAt) with a full-screen intent (IncomingCallActivity) and Accept / Decline; CallStyle.forIncomingCall on
+ * Android 12+. {type:"call_cancel"}
  * removes it. Android 14+: if the full-screen intent permission was revoked it still rings as a heads-up (and
  * FullScreenIntentPrompt offers the setting once). 0.3.2: data.declineToken → CallApi (Decline without a session).
  */
 final class CallNotifications {
     private static final String TAG = "OLCalls";
-    static final String CHANNEL_CALLS = "calls";
+    /** Ring channel. A channel's sound is fixed once created, so the id changes whenever the ring does. */
+    static final String CHANNEL_CALLS = "calls_v2";
+    /** The ring channel of builds up to 0.3.43 (60), which rang with the phone's default ringtone: deleted at startup. */
+    static final String CHANNEL_CALLS_V1 = "calls";
     static final String CHANNEL_ONGOING = "call_ongoing";
     static final int NOTIF_ID = 7001;
     static final String EXTRA_CALL_ID = "call_id";
@@ -46,8 +50,9 @@ final class CallNotifications {
         if (Build.VERSION.SDK_INT < 26) return;
         NotificationManager nm = ctx.getSystemService(NotificationManager.class);
         if (nm == null) return;
+        nm.deleteNotificationChannel(CHANNEL_CALLS_V1); // no-op once it is gone
         NotificationChannel c = new NotificationChannel(CHANNEL_CALLS, ctx.getString(R.string.channel_calls), NotificationManager.IMPORTANCE_HIGH);
-        c.setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE), new AudioAttributes.Builder()
+        c.setSound(ringtone(ctx), new AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                 .build());
@@ -116,7 +121,7 @@ final class CallNotifications {
                 .setContentIntent(fullPi)
                 .setFullScreenIntent(fullPi, true)
                 // < Android 8: no channels, so sound/vibration go on the notification itself
-                .setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE), AudioManager.STREAM_RING)
+                .setSound(ringtone(ctx), AudioManager.STREAM_RING)
                 .setVibrate(VIBRATION)
                 .addPerson(caller);
         Notification n;
@@ -153,8 +158,19 @@ final class CallNotifications {
         IncomingCallActivity.dismiss(callId);
     }
 
-    static Uri ringtone() {
-        return RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE);
+    /**
+     * The incoming ring: android.resource://&lt;applicationId&gt;/raw/ol_ring_facetime_style (20 s, loops through
+     * FLAG_INSISTENT). Addressed by name, since the channel stores this Uri across app updates and a numeric
+     * resource id may differ from one build to the next.
+     */
+    static Uri ringtone(Context ctx) {
+        android.content.res.Resources r = ctx.getResources();
+        int id = R.raw.ol_ring_facetime_style;
+        return new Uri.Builder().scheme(ContentResolver.SCHEME_ANDROID_RESOURCE)
+                .authority(ctx.getPackageName())
+                .appendPath(r.getResourceTypeName(id))
+                .appendPath(r.getResourceEntryName(id))
+                .build();
     }
 
     static long parseLong(String s, long dflt) {
