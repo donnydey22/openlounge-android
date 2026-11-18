@@ -469,7 +469,21 @@ class OlTgcallsEngine(
                     end("server-error")
                 }
             }
+            // Other party's leg state (server.go peer frame). Observed only: the server owns the lifecycle.
+            "peer" -> crumbs.event("ws", "peer:" + f.optString("peer"))
+            // Web-surface frames (SDP answer, ICE, media state) and keepalive replies never go to a tgcalls
+            // leg; client->server frame types never come back. Receiving one is a protocol error, not a drop.
+            "answer", "ice", "media", "pong", "join", "resume", "hangup", "keyframe", "reset-leg", "ping" ->
+                unknownFrame(f.optString("t"))
+            // No silent drop (t5937u): an unhandled frame type is a hard error that ends the call.
+            else -> unknownFrame(f.optString("t"))
         }
+    }
+
+    private fun unknownFrame(t: String) {
+        crumbs.event("ws", "unknown-frame:$t", "error")
+        runCatching { callLog?.event("server_error", OlCallLogTags.tag("unknown-frame:$t"), t.take(60)) }
+        end("unknown-frame")
     }
 
     fun setMuted(muted: Boolean) = worker.execute { localMuted = muted; if (handle != 0L) nativeSetMuted(handle, muted) }
