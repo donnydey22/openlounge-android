@@ -1266,7 +1266,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                 if (name.length() > 80) name = name.substring(0, 80);
                 String photo = m.optString("photo", null);
                 boolean video = m.optBoolean("video", false);
-                long expiresAt = m.optLong("expiresAt", System.currentTimeMillis() + 45_000L);
+                long expiresAt = m.optLong("expiresAt", System.currentTimeMillis() + 30_000L);
                 if (expiresAt <= System.currentTimeMillis()) break;
                 CallNotifications.show(this, id, name, photo, video, expiresAt);
                 break;

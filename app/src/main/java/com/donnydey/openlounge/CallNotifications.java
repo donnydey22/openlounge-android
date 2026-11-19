@@ -81,7 +81,7 @@ final class CallNotifications {
         // expiresAt − sentAt, counted from arrival. FCM's 30 s TTL bounds how late a ring push can arrive, and the
         // push-woken socket asks the server before ringing (PushWake).
         long expiresAt = PushWakePolicy.localDeadline(receivedAt, parseLong(d.get("expiresAt"), 0), parseLong(d.get("sentAt"), 0));
-        if (expiresAt <= 0) expiresAt = receivedAt + 45_000;
+        if (expiresAt <= 0) expiresAt = receivedAt + 30_000;
         if (expiresAt <= System.currentTimeMillis()) return false; // stale push: never ring for an old call
         String name = d.get("callerName");
         if (name == null || name.trim().isEmpty()) name = ctx.getString(R.string.app_name);

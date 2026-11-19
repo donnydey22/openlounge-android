@@ -24,7 +24,7 @@ public class DebugRingReceiver extends BroadcastReceiver {
         }
         if (intent.hasExtra("apiOrigin")) CallApi.setDebugOrigin(context, intent.getStringExtra("apiOrigin"));
         if (d.get("type") == null) return;
-        if (!d.containsKey("expiresAt")) d.put("expiresAt", String.valueOf(System.currentTimeMillis() + 45_000));
+        if (!d.containsKey("expiresAt")) d.put("expiresAt", String.valueOf(System.currentTimeMillis() + 30_000));
         if ("call_cancel".equals(d.get("type"))) CallNotifications.cancel(context, d.get("callId"));
         else CallNotifications.onIncoming(context, d);
     }
