@@ -65,6 +65,10 @@ object CallMediaCoordinator {
                         OlCallLogs.failedBeforeStart(id, media?.optString("token"), wantVideo, "olcall-unavailable")
                         return@ensurePerms done(false, null, "olcall-unavailable")
                     }
+                    // Link join (Open Lounge Audio link): nothing rang, so no call:outgoing / Accept started the call
+                    // foreground service. Start it now, at the user's tap and before Connecting, so Android 14+
+                    // grants the microphone type; the server drives Idle -> JoiningUrl -> Connecting on join.
+                    if (LinkJoinPolicy.micFgsBeforeConnect(c)) appCtx?.let { CallService.start(it, id, c.optString("name"), false, true) }
                     startOlcall(id, media!!, wantVideo, c.optString("peerId"), done)
                 }
             }
