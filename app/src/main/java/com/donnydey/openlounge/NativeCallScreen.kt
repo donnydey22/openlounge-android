@@ -62,6 +62,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
             if (latest.size > 16) latest.keys.firstOrNull { it != l.callId }?.let { latest.remove(it) }
             CallDiskLog.mark("lifecycle", "${l.state.wire} seq=${l.seq}${l.reason?.let { " reason=" + it.wire } ?: ""}")
             screens.toList().forEach { it.applyLifecycle(l) }
+            NativeCallFlow.pageStateJson(l)?.let { MainActivity.dispatchNativeCall(it) } // seven states back to the page
         }
         @JvmStatic fun latestFor(id: String): OlCallLifecycle? = latest[id]
     }

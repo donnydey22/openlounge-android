@@ -38,6 +38,31 @@ object NativeCallFlow {
         State.Terminal -> if (l.reason == Reason.Failed) Screen.FAILED else Screen.ENDED
     }
 
+    /**
+     * Native -> page (Donny t6053u): the seven server-frame states pushed back to the web page through the WebView
+     * bridge as openlounge:native-call {type:"call:native-state", callId, state, reason?, seq}. Idle is never sent.
+     * Terminal with reason failed is Failed; every other terminal reason is Terminal (reason carried).
+     */
+    enum class PageState { Ringing, Answering, JoiningUrl, Connecting, Active, Failed, Terminal }
+
+    @JvmStatic fun pageState(l: OlCallLifecycle): PageState? = when (l.state) {
+        State.Idle -> null
+        State.Ringing -> PageState.Ringing
+        State.Answering -> PageState.Answering
+        State.JoiningUrl -> PageState.JoiningUrl
+        State.Connecting -> PageState.Connecting
+        State.InRoom -> PageState.Active
+        State.Terminal -> if (l.reason == Reason.Failed) PageState.Failed else PageState.Terminal
+    }
+
+    /** JSON detail for the page, or null for Idle / an unsafe call id. Built by hand: every field is a fixed token. */
+    @JvmStatic fun pageStateJson(l: OlCallLifecycle): String? {
+        val ps = pageState(l) ?: return null
+        if (!l.callId.matches(Regex("^[A-Za-z0-9_-]{1,128}$"))) return null
+        val reason = l.reason?.let { ",\"reason\":\"${it.wire}\"" } ?: ""
+        return "{\"type\":\"call:native-state\",\"callId\":\"${l.callId}\",\"state\":\"${ps.name}\"$reason,\"seq\":${l.seq}}"
+    }
+
     @JvmStatic fun statusText(s: Screen?, reason: Reason? = null): String = when (s) {
         Screen.RINGING -> "Ringing…"
         Screen.ANSWERING, Screen.CONNECTING -> "Connecting…"

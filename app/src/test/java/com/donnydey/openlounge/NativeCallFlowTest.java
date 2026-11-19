@@ -49,4 +49,21 @@ public class NativeCallFlowTest {
         assertEquals(1100L, NativeCallFlow.pulseMs(NativeCallFlow.Screen.CONNECTING));
         assertEquals(0L, NativeCallFlow.pulseMs(NativeCallFlow.Screen.ACTIVE));
     }
+
+    @Test public void pushesSevenStatesToPage() {
+        assertNull(NativeCallFlow.pageStateJson(l(State.Idle, null)));
+        assertEquals(NativeCallFlow.PageState.Ringing, NativeCallFlow.pageState(l(State.Ringing, null)));
+        assertEquals(NativeCallFlow.PageState.Answering, NativeCallFlow.pageState(l(State.Answering, null)));
+        assertEquals(NativeCallFlow.PageState.JoiningUrl, NativeCallFlow.pageState(l(State.JoiningUrl, null)));
+        assertEquals(NativeCallFlow.PageState.Connecting, NativeCallFlow.pageState(l(State.Connecting, null)));
+        assertEquals(NativeCallFlow.PageState.Active, NativeCallFlow.pageState(l(State.InRoom, null)));
+        assertEquals(NativeCallFlow.PageState.Failed, NativeCallFlow.pageState(l(State.Terminal, Reason.Failed)));
+        for (Reason r : Reason.values()) if (r != Reason.Failed)
+            assertEquals(NativeCallFlow.PageState.Terminal, NativeCallFlow.pageState(l(State.Terminal, r)));
+        assertEquals("{\"type\":\"call:native-state\",\"callId\":\"c1\",\"state\":\"Active\",\"seq\":1}",
+            NativeCallFlow.pageStateJson(l(State.InRoom, null)));
+        assertEquals("{\"type\":\"call:native-state\",\"callId\":\"c1\",\"state\":\"Terminal\",\"reason\":\"declined\",\"seq\":1}",
+            NativeCallFlow.pageStateJson(l(State.Terminal, Reason.Declined)));
+        assertNull(NativeCallFlow.pageStateJson(new OlCallLifecycle("x\"});alert(1)//", "caller", State.Ringing, null, 1, "e")));
+    }
 }
