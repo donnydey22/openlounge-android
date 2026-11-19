@@ -4,12 +4,12 @@
 // Callbacks arrive on tgcalls StaticThreads; we attach the thread to the JVM
 // and post to Kotlin, which hops off to its own executor (never block here).
 //
-// Media path (proven on Linux with the same library, 14/14 matrix cells,
-// out/tgpeer-20261109T193633Z.json): ICE host/srflx to the olcall server's
-// Pion leg, DTLS-SRTP, Opus + VP8, SCTP data channel. That requires
-// Config.enableP2P = true: with no reflectors configured, enableP2P=false
-// leaves tgcalls without any candidate that reaches the server (the earlier
-// version of this file had false; fixed 2026-11-09).
+// Media path: TURN relay only. Config.enableP2P = false (the same switch as
+// iOS allowP2P: false), so tgcalls gathers no host or STUN candidates and
+// reaches the olcall server's Pion leg only through the coturn TURN servers
+// from the joined frame; then DTLS-SRTP, Opus + VP8, SCTP data channel.
+// (The Linux 14/14 matrix of 2026-11-09, out/tgpeer-20261109T193633Z.json,
+// ran with enableP2P = true and does not cover this relay-only path.)
 //
 // Video: camera capture goes through tgcalls' own Android platform layer
 // (platform/android/AndroidContext + VideoCameraCapturer), which calls the Java
@@ -160,7 +160,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_com_donnydey_openlounge_olcall_OlTgcalls
   tgcalls::Config config;
   config.initializationTimeout = 30.0;
   config.receiveTimeout = 20.0;
-  config.enableP2P = true;  // the olcall server is reached through its host/srflx candidates
+  config.enableP2P = false;  // TURN relay only: no host or STUN candidates
   config.enableAEC = true;  // Android: WebRTC APM does echo control (no platform VPIO as on iOS)
   config.enableNS = true;
   config.enableAGC = true;
@@ -195,9 +195,8 @@ extern "C" JNIEXPORT jlong JNICALL Java_com_donnydey_openlounge_olcall_OlTgcalls
             });
           },
   };
-  // Relay list (OlRtcServers / olcall tgrtc rules): coturn STUN + TURN UDP/TCP with
-  // the short-lived REST login. enableP2P stays true above, so host/srflx pairs are
-  // preferred and TURN is the fallback. Non-"reflector" logins make tgcalls'
+  // Relay list (OlRtcServers / olcall tgrtc rules): coturn TURN UDP/TCP with the
+  // short-lived REST login, the only transport (enableP2P is false above). Non-"reflector" logins make tgcalls'
   // ReflectorRelayPortFactory create a standard cricket::TurnPort. Never logged.
   d.rtcServers = ReadRtcServers(env, rtcHosts, rtcPorts, rtcLogins, rtcPasswords, rtcFlags);
   // keyBytes is shared with EncryptionKey (shared_ptr): do NOT zero it here.

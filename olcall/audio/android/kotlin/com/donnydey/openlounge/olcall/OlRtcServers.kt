@@ -19,9 +19,8 @@ import org.json.JSONArray
  * skipped; default port 3478; hostnames kept (device DNS resolves them);
  * duplicates dropped, order kept.
  *
- * Direct first / relay fallback: the engine keeps Config.enableP2P = true, so
- * host/srflx candidates are gathered and win on ICE priority; TURN relay
- * candidates are used only when no direct pair works.
+ * TURN relay only: the engine runs with Config.enableP2P = false, so it gathers
+ * no host or STUN candidates and every media path goes through these TURN servers.
  */
 object OlRtcServers {
     data class Server(
