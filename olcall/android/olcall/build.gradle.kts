@@ -27,7 +27,7 @@ android {
         // (audio/android/build-native.sh API=27; AAudio calls above 27 are
         // weak-linked and guarded). The real minimum Android version is whatever
         // the oldest phone in matrix/devices.json actually passes on.
-        minSdk = 27
+        minSdk = 24 // app floor (Donny Nov 19 2026): AAudio is loaded at runtime, OpenSL ES below API 26
         consumerProguardFiles("consumer-rules.pro")
         // Phones only (arm). The prebuilt SDK is built for arm64-v8a + armeabi-v7a;
         // add x86_64 here only after building it (ABIS=... build-tgcalls-android-sdk.sh).

@@ -24,10 +24,10 @@ class OlcallRouteTest {
         JSONObject().put("provider", provider).put("url", url).put("token", token).put("iceServers", ice)
 
     @Test fun olcallOnlyWhenBackendSaysSoOnApi27Plus() {
-        assertTrue(OlcallRoute.eligible(media(), 27))
+        assertTrue(OlcallRoute.eligible(media(), 24))
         assertTrue(OlcallRoute.eligible(media(), 35))
         assertFalse("p2p media is refused (no other engine)", OlcallRoute.eligible(media(provider = "p2p"), 35))
-        assertFalse("module minSdk is 27", OlcallRoute.eligible(media(), 26))
+        assertFalse("app floor is API 24", OlcallRoute.eligible(media(), 23))
         assertFalse(OlcallRoute.eligible(media(url = "https://x/v1/call"), 35))
         assertFalse(OlcallRoute.eligible(media(token = ""), 35))
         assertFalse(OlcallRoute.eligible(null, 35))
@@ -36,9 +36,9 @@ class OlcallRouteTest {
     }
 
     @Test fun deviceSupportIsApi27PlusOnArm() {
-        assertTrue(OlcallRoute.deviceSupported(27, listOf("arm64-v8a")))
+        assertTrue(OlcallRoute.deviceSupported(24, listOf("arm64-v8a")))
         assertTrue(OlcallRoute.deviceSupported(35, listOf("armeabi-v7a")))
-        assertFalse(OlcallRoute.deviceSupported(26, listOf("arm64-v8a")))
+        assertFalse(OlcallRoute.deviceSupported(23, listOf("arm64-v8a")))
         assertFalse(OlcallRoute.deviceSupported(35, listOf("x86_64")))
     }
 

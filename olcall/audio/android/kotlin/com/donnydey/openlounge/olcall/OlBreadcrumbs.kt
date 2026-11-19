@@ -9,7 +9,10 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.MessageDigest
-import java.time.Instant
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
@@ -47,6 +50,10 @@ class OlBreadcrumbs(
     fun event(category: String, message: String, level: String = "info"): Long =
         emit("local", category, message, 0, null, level)
 
+    /** ISO-8601 UTC with milliseconds, e.g. 2026-11-19T12:00:00.123Z. java.time.Instant needs API 26; the floor is 24. */
+    private fun isoUtcNow(): String =
+        SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }.format(Date())
+
     private fun emit(direction: String, category: String, message: String, len: Int, sha: String?, level: String): Long {
         val seq = when (direction) {
             "send" -> sendSeq.incrementAndGet()
@@ -54,7 +61,7 @@ class OlBreadcrumbs(
             else -> localSeq.incrementAndGet()
         }
         val o = JSONObject()
-            .put("ts", Instant.now().toString())
+            .put("ts", isoUtcNow())
             .put("monoNs", SystemClock.elapsedRealtimeNanos())
             .put("source", "android")
             .put("callId", callId).put("traceId", traceId).put("leg", leg)

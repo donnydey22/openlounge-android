@@ -7,13 +7,13 @@ import org.json.JSONObject
  * Whether a "connect" op can run on the olcall engine. Pure (no Android calls) so it is unit-tested on the JVM.
  *
  * olcall (the :olcall module, tgcalls -> Go/Pion wss://.../v1/call, coturn relay) is the ONLY call engine. It runs when
- * the backend hands out CallMedia { provider: "olcall", url: wss://.../v1/call, token } and the phone is API 27+ (the
+ * the backend hands out CallMedia { provider: "olcall", url: wss://.../v1/call, token } and the phone is API 24+ (the
  * module's minSdk) on an arm ABI. Anything else fails the call ("olcall-unavailable"); there is no other engine to fall
  * back to. The relay list: olcall's joined frame carries the server's iceServers (primary); CallMedia.iceServers from
  * Railway is handed over as the secondary list ([appIceServers]); OlRtcServers.select picks between them.
  */
 object OlcallRoute {
-    const val MIN_SDK = 27
+    const val MIN_SDK = 24 // the app floor (Donny Nov 19 2026); the module loads AAudio at runtime and uses OpenSL ES below API 26
 
     /** ABIs libolcall_tgcalls.so is built for (the APK ships only these). */
     val ABIS = setOf("arm64-v8a", "armeabi-v7a")

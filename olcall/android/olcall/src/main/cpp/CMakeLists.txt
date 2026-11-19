@@ -52,7 +52,7 @@ target_link_libraries(olcall_tgcalls
   # Same split as Telegram-Android's own link line: JNI/voip objects whole, the rest on demand.
   -Wl,--whole-archive tgcalls_webrtc_jni -Wl,--no-whole-archive
   tgcalls_webrtc
-  aaudio OpenSLES android log EGL GLESv2 GLESv3 m dl z)
+  OpenSLES android log EGL GLESv2 GLESv3 m dl z)  # AAudio via dlopen (aaudio_backend.c): loads on API 24-25
 # -Bsymbolic: Telegram's prebuilt ffmpeg/vpx objects use non-PIC-safe references to
 # their own default-visibility data (ff_tx_tab_*); Telegram links with the same flag.
 target_link_options(olcall_tgcalls PRIVATE -Wl,--no-undefined -Wl,-z,max-page-size=16384

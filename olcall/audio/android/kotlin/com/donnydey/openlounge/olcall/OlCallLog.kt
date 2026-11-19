@@ -213,7 +213,8 @@ class OlCallLog(
         /** callId + role from an olcall token's payload (no verification needed: only labels this phone's own log). */
         fun claims(token: String?): Pair<String, String>? = runCatching {
             val p1 = token!!.substringBefore('.')
-            val json = String(java.util.Base64.getUrlDecoder().decode(p1.padEnd((p1.length + 3) / 4 * 4, '=')))
+            // okio (with OkHttp) decodes base64url with or without padding on every API level; java.util.Base64 is API 26+.
+            val json = okio.ByteString.Companion.run { p1.decodeBase64() }!!.utf8()
             val o = JSONObject(json)
             o.getString("callId") to o.getString("role")
         }.getOrNull()

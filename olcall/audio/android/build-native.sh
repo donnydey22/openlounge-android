@@ -25,7 +25,7 @@ INCS="-I$WEBRTC_INC -I$WEBRTC_INC/third_party/abseil-cpp"
 "$CC" -std=c11 -O2 -fPIC $WFLAGS -c "$here/cpp/opensl_backend.c" -o "$out/opensl_backend.o"
 "$CXX" -std=c++20 -O2 -fPIC $WFLAGS $DEFS $INCS -c "$here/cpp/OlAudioDeviceModule.cpp" -o "$out/OlAudioDeviceModule.o"
 # 1) core + backends: fully linked, no undefined symbols
-"$CC" -shared -o "$out/libolaudio_core.so" "$out"/ol_audio_open.o "$out"/ol_resampler.o "$out"/ol_session_policy.o "$out"/aaudio_backend.o "$out"/opensl_backend.o -laaudio -lOpenSLES -llog -lm -Wl,--no-undefined -Wl,-z,max-page-size=16384
+"$CC" -shared -o "$out/libolaudio_core.so" "$out"/ol_audio_open.o "$out"/ol_resampler.o "$out"/ol_session_policy.o "$out"/aaudio_backend.o "$out"/opensl_backend.o -lOpenSLES -llog -lm -ldl -Wl,--no-undefined -Wl,-z,max-page-size=16384
 echo "built $out/libolaudio_core.so"
 "$TC/llvm-readelf" -d "$out/libolaudio_core.so" | grep NEEDED
 "$TC/llvm-nm" -D --defined-only "$out/libolaudio_core.so" | grep -E " T (ol_open_with_fallback|ol_aaudio_backend|ol_opensl_backend|ol_resampler_process|ol_session_on_set_active)$"
