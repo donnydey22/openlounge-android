@@ -1167,20 +1167,6 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         if (pendingMiniId != null) applyMinimizedBar(getIntent());
     }
     private NativeCallScreen callScreen;
-    /** t5456: the page's call:connected, waiting for the first inbound media (main thread). */
-    private JSONObject heldConnected;
-
-    @Override
-    public void callMediaFlowing(String id) {
-        handler.post(() -> {
-            JSONObject m = heldConnected;
-            if (m == null || !id.equals(m.optString("callId", ""))) return;
-            heldConnected = null;
-            CallDiskLog.mark("connected-released", "media flowing");
-            if (callScreen != null) callScreen.onPageCall("call:connected", m);
-        });
-    }
-
     /** Green MiniBar over the real app (first UI). Does not hang up. */
     private void applyMinimizedBar(Intent i) {
         if (i == null) return;
@@ -1201,9 +1187,8 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
                     .put("photo", pendingMiniPhoto == null ? "" : pendingMiniPhoto)
                     .put("video", pendingMiniVideo);
             if (!callScreen.getShowing()) {
+                // restoring a running call: opens the surface; the server's latest snapshot for this call drives it
                 callScreen.onPageCall("call:outgoing", m);
-                callScreen.onPageCall("call:connected", m);
-                callScreen.onPageCall("call:mediaFlowing", m); // restoring a running call: media is already up
             }
             callScreen.setMinimized(true);
             pendingMiniId = null;
@@ -1246,17 +1231,8 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
         String type = m.optString("type", "");
         String id = m.optString("callId", "");
         if (!id.isEmpty() && !id.matches(CallApi.CALL_ID_RE)) return;
-        if (callScreen != null) {
-            // t5456: the timer starts on first inbound media after the answer. The page's call:connected (server
-            // answer) is held back from the call screen until this call's media flows; it stays Calling/Ringing.
-            if ("call:connected".equals(type) && !id.isEmpty() && !id.equals(CallMediaCoordinator.getMediaFlowingId())) {
-                heldConnected = m;
-                CallDiskLog.mark("connected-held", "until media flows");
-            } else {
-                if ("call:ended".equals(type)) heldConnected = null;
-                callScreen.onPageCall(type, m);
-            }
-        }
+        // Metadata + the backend's relayed server snapshot (call:lifecycle) only; the screen's state comes from the server.
+        if (callScreen != null) callScreen.onPageCall(type, m);
         switch (type) {
             case "call:incoming": {
                 // Page got call:incoming over WS while App Lock / backgrounded — surface IncomingCallActivity

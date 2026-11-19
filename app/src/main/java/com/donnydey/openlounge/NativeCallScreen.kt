@@ -13,6 +13,7 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.donnydey.openlounge.olcall.OlCallLifecycle
 import org.json.JSONObject
 
 /**
@@ -37,22 +38,32 @@ import org.json.JSONObject
  */
 class NativeCallScreen(private val act: Activity, private val root: FrameLayout, private val actions: Actions) {
     companion object {
-        /** Engine-branch "ringing acknowledged" page types (t5456). */
-        val RINGING_ACK = setOf("call:ringing")
-        /** olcall onConnected, relayed by MainActivity.emit: media up, but not proof of an answer. */
-        const val MEDIA_NATIVE = "call:media-native"
-        /** Engine-branch "media flowing" page types (posted after the answer), plus the native relay. */
-        val MEDIA_FLOWING = setOf("call:mediaFlowing", MEDIA_NATIVE)
         private val mediaUp = mutableSetOf<String>()
         private val screens = java.util.Collections.newSetFromMap(java.util.WeakHashMap<NativeCallScreen, Boolean>())
+        /** Latest server lifecycle snapshot per call (seq-ordered). The server is the only writer; this is a cache of what it sent. */
+        private val latest = HashMap<String, OlCallLifecycle>()
 
-        /** Main thread. Native media for [id] is flowing: tell every call screen (MainActivity and CallActivity). */
+        /** Main thread. Native media for [id] is flowing (olcall onConnected): enables Speaker / Mute. Never moves the screen. */
         @JvmStatic fun onNativeMediaFlowing(id: String) {
             if (id.isEmpty()) return
             mediaUp.add(id)
-            screens.toList().forEach { it.onPageCall(MEDIA_NATIVE, JSONObject().put("callId", id)) }
+            screens.toList().forEach { it.onMediaUp(id) }
         }
         @JvmStatic fun onNativeMediaEnded(id: String) { mediaUp.remove(id) }
+
+        /**
+         * Main thread. A server call:state snapshot, from either route: the olcall leg socket (OlcallCall.onLifecycle)
+         * or the backend relay forwarded verbatim by the page (call:lifecycle). Older or duplicate seqs are dropped.
+         */
+        @JvmStatic fun onServerLifecycle(l: OlCallLifecycle) {
+            if (l.callId.isEmpty() || !l.callId.matches(Regex(CallApi.CALL_ID_RE))) return
+            if (!OlCallLifecycle.newer(latest[l.callId], l)) return
+            latest[l.callId] = l
+            if (latest.size > 16) latest.keys.firstOrNull { it != l.callId }?.let { latest.remove(it) }
+            CallDiskLog.mark("lifecycle", "${l.state.wire} seq=${l.seq}${l.reason?.let { " reason=" + it.wire } ?: ""}")
+            screens.toList().forEach { it.applyLifecycle(l) }
+        }
+        @JvmStatic fun latestFor(id: String): OlCallLifecycle? = latest[id]
     }
     init { screens.add(this) }
 
@@ -71,7 +82,9 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     }
 
 
-    var state: NativeCallFlow.State? = null; private set
+    var state: NativeCallFlow.Screen? = null; private set
+    /** Last server snapshot applied to this screen. */
+    var lifecycle: OlCallLifecycle? = null; private set
     private var callId: String? = null
     private var video = false
     private var nativeVideo = false
@@ -87,83 +100,72 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
 
     private val tick = object : Runnable {
         override fun run() {
-            if (state != NativeCallFlow.State.ESTABLISHED) return
+            if (state != NativeCallFlow.Screen.ACTIVE) return
             val s = (SystemClock.elapsedRealtime() - establishedAt) / 1000
             status.text = NativeCallFlow.timer(s)
             ui.postDelayed(this, 1000)
         }
     }
 
-    /** Page -> app call message (MainActivity.onPageCall). */
+    /**
+     * Page -> app call message (MainActivity.onPageCall). Metadata only: call:outgoing / call:answering open the
+     * surface with name, photo and video; call:lifecycle carries the backend's relayed server snapshot verbatim.
+     * No page message changes the state; only server lifecycle snapshots do (applyLifecycle).
+     */
     fun onPageCall(type: String, m: JSONObject) {
         val id = m.optString("callId", "")
         when (type) {
             "call:incoming" -> if (id.isNotEmpty()) { incoming = id to m.optString("name", ""); incomingPhoto = id to m.optString("photo", ""); if (CallPresence.hasField(m)) incomingPresence = id to CallPresence.fromMessage(m) }
-            "call:outgoing" -> if (id.isNotEmpty()) { begin(id, m.optString("name", ""), m.optBoolean("video"), m.optString("photo", ""), if (CallPresence.hasField(m)) CallPresence.fromMessage(m) else null); set(NativeCallFlow.State.WAITING) }
-            "call:answering" -> if (id.isNotEmpty()) { if (callId != id) begin(id, m.optString("name", "").ifEmpty { incoming?.takeIf { it.first == id }?.second.orEmpty() }, m.optBoolean("video"), m.optString("photo", "").ifEmpty { incomingPhoto?.takeIf { it.first == id }?.second.orEmpty() }, if (CallPresence.hasField(m)) CallPresence.fromMessage(m) else incomingPresence?.takeIf { it.first == id }?.second); set(NativeCallFlow.State.WAIT_INIT) }
-            // t5456 engine branch (ol-call-fixes): the callee's phone acknowledged the ring -> "Ringing…",
-            // which stays until media flows.
-            in RINGING_ACK -> if (view != null && (id.isEmpty() || id == callId) && !live) { ringingAck = true; render() }
-            // Server-confirmed answer (call:answered; call:connected on engines that do not post it yet). Not live
-            // on its own: the pre-answer card (avatar, name, Calling…/Ringing…, Speaker / Mute / End call) stays until media flows.
-            "call:answered", "call:connected" -> if (view != null && (id.isEmpty() || id == callId)) {
-                answered = true
-                video = video || m.optBoolean("video")
-                goLiveIfReady()
-            }
-            // Media flowing (engine mediaFlowing state, or olcall onConnected via MainActivity.emit). After answer it
-            // switches to the full row (Video/Speaker/Mute/End) and starts the timer.
-            in MEDIA_FLOWING -> if (view != null && (id.isEmpty() || id == callId)) {
-                media = true
-                if (type != MEDIA_NATIVE) answered = true // the engine posts mediaFlowing only after the answer
-                goLiveIfReady()
-            }
-            "call:ended" -> if (id.isEmpty() || id == callId) {
-                if (id.isNotEmpty()) mediaUp.remove(id)
-                val text = CallPresence.messageFromEnd(m)
-                if (CallPresence.isFailure(m.optString("reason", ""), text)) showFailed(CallPresence.failureText(text))
-                else if (live && establishedAt > 0L && view != null) showEndCard()
-                else { set(NativeCallFlow.State.ENDED); dismiss() }
-            }
+            "call:outgoing" -> if (id.isNotEmpty() && callId != id) begin(id, m.optString("name", ""), m.optBoolean("video"), m.optString("photo", ""), if (CallPresence.hasField(m)) CallPresence.fromMessage(m) else null)
+            "call:answering" -> if (id.isNotEmpty() && callId != id) begin(id, m.optString("name", "").ifEmpty { incoming?.takeIf { it.first == id }?.second.orEmpty() }, m.optBoolean("video"), m.optString("photo", "").ifEmpty { incomingPhoto?.takeIf { it.first == id }?.second.orEmpty() }, if (CallPresence.hasField(m)) CallPresence.fromMessage(m) else incomingPresence?.takeIf { it.first == id }?.second)
+            "call:lifecycle" -> OlCallLifecycle.parse(m.optJSONObject("lifecycle"))?.let { onServerLifecycle(it) }
             "call:muted" -> { muted = m.optBoolean("muted"); render() }
             "call:audioRoute" -> if (m.has("speaker")) { speakerOn = m.optBoolean("speaker"); render() }
         }
         if (view != null && CallPresence.hasField(m) && (id.isEmpty() || id == callId)) applyPresence(CallPresence.fromMessage(m))
     }
 
+    private fun onMediaUp(id: String) { if (view != null && id == callId) { media = true; render() } }
+
+    /** A server snapshot for this screen's call drives the surface. Snapshots for other calls are kept in [latest]. */
+    private fun applyLifecycle(l: OlCallLifecycle) {
+        if (view == null || l.callId != callId) return
+        if (!OlCallLifecycle.newer(lifecycle, l)) return
+        lifecycle = l
+        when (val sc = NativeCallFlow.screenFor(l)) {
+            null -> Unit
+            NativeCallFlow.Screen.FAILED -> showFailed(CallPresence.FAIL_MSG)
+            NativeCallFlow.Screen.ENDED -> showEndCard(l.reason)
+            NativeCallFlow.Screen.ACTIVE -> { set(sc); if (hidden) { hidden = false; view?.visibility = View.VISIBLE } }
+            else -> set(sc)
+        }
+    }
+
     /** MainActivity.nativeCallVideo: native tiles are up (remote full screen, self-view PiP) -> transparent screen. */
     fun onNativeVideo(on: Boolean) { nativeVideo = on; if (on) { video = true; camOn = true; if (hidden) { hidden = false; view?.visibility = View.VISIBLE } }; render() }
     private var hidden = false
-    /** Server answered (call:answered, or call:connected on engines that do not post it yet). */
-    private var answered = false
-    /** Media flowing (engine mediaFlowing / olcall onConnected). */
+    /** This phone's olcall leg is up (enables Speaker / Mute before InRoom). Not a state. */
     private var media = false
-    /** t5456: full call UI (row, timer, video, minimize) only once media flows after the answer. */
-    private val live get() = answered && media
-
-    private fun goLiveIfReady() {
-        if (!live) { render(); return }
-        set(NativeCallFlow.State.ESTABLISHED)
-        // Native-UI first cut: never hide for WebView. Stay visible; avatar/status cover until native tiles up.
-        if (hidden) { hidden = false; view?.visibility = View.VISIBLE }
-    }
-    private var ringingAck = false
+    /** The full call UI (row, timer, video, minimize) shows only in the server's in_room state. */
+    private val live get() = state == NativeCallFlow.Screen.ACTIVE
     private lateinit var endBtn: Btn
     private var incoming: Pair<String, String>? = null
     private var incomingPhoto: Pair<String, String>? = null
     private var incomingPresence: Pair<String, String?>? = null
 
     private fun begin(id: String, peer: String, v: Boolean, photo: String = "", presence: String? = null) {
-        dismiss(); callId = id; video = v; camOn = v; muted = false; speakerOn = v; facing = "user"; failed = false; failedText = null; answered = false; media = id in mediaUp; ringingAck = false
+        dismiss(); callId = id; video = v; camOn = v; muted = false; speakerOn = v; facing = "user"; failed = false; failedText = null; media = id in mediaUp; lifecycle = null; endedReason = null
         if (!Prefs.nativeCallUi(act)) { callId = null; return }
         photoLoading = null
         build(); name.text = peer.ifEmpty { act.getString(R.string.app_name) }; loadPhoto(id, photo)
         applyPresence(presence ?: incomingPresence?.takeIf { it.first == id }?.second)
         startPresencePeek()
+        // Paint name / avatar now; the status line stays blank (no local state) until the server's first snapshot.
+        latest[id]?.let { applyLifecycle(it) } ?: render()
     }
 
-    private fun set(s: NativeCallFlow.State) { if (view == null) return; state = s
-        if (s == NativeCallFlow.State.ESTABLISHED && establishedAt == 0L) { establishedAt = SystemClock.elapsedRealtime(); ui.post(tick) }
+    private fun set(s: NativeCallFlow.Screen) { if (view == null) return; state = s
+        if (s == NativeCallFlow.Screen.ACTIVE && establishedAt == 0L) { establishedAt = SystemClock.elapsedRealtime(); ui.post(tick) }
         render() }
 
     private var failed = false
@@ -175,24 +177,28 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         minimized = false
         nativeVideo = false
         hidden = false
-        set(NativeCallFlow.State.ENDED)
+        ui.removeCallbacks(tick)
+        set(NativeCallFlow.Screen.FAILED)
         if (view == null) return
         view?.visibility = View.VISIBLE
         render()
     }
 
     private val endLinger = Runnable { dismiss() }
-    private fun showEndCard() {
-        endedSecs = (SystemClock.elapsedRealtime() - establishedAt) / 1000
+    private var endedReason: OlCallLifecycle.Reason? = null
+    private fun showEndCard(reason: OlCallLifecycle.Reason?) {
+        if (view == null) return
+        endedReason = reason
+        endedSecs = if (establishedAt > 0L) (SystemClock.elapsedRealtime() - establishedAt) / 1000 else -1L
         endedCard = true; minimized = false; nativeVideo = false; hidden = false
         ui.removeCallbacks(tick)
-        state = NativeCallFlow.State.ENDED
+        state = NativeCallFlow.Screen.ENDED
         view?.visibility = View.VISIBLE
         render()
         ui.postDelayed(endLinger, 1800) // web engine.ts:93 ENDED_LINGER_MS
     }
 
-    private fun dismiss() { ui.removeCallbacks(endLinger); endedCard = false; ui.removeCallbacks(tick); ui.removeCallbacks(hideCtl); ui.removeCallbacks(presenceTick); ui.removeCallbacks(quickPeek); view?.let { root.removeView(it) }; view = null; state = null; callId = null; hidden = false; establishedAt = 0L; nativeVideo = false; minimized = false; failed = false; failedText = null }
+    private fun dismiss() { ui.removeCallbacks(endLinger); endedCard = false; ui.removeCallbacks(tick); ui.removeCallbacks(hideCtl); ui.removeCallbacks(presenceTick); ui.removeCallbacks(quickPeek); view?.let { root.removeView(it) }; view = null; state = null; lifecycle = null; endedReason = null; callId = null; hidden = false; establishedAt = 0L; nativeVideo = false; minimized = false; failed = false; failedText = null }
 
     private fun dp(v: Int) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), act.resources.displayMetrics).toInt()
 
@@ -302,6 +308,9 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         bgPhoto = android.widget.ImageView(act).apply { scaleType = android.widget.ImageView.ScaleType.FIT_XY; alpha = 0f }
         bg.addView(bgPhoto, FrameLayout.LayoutParams(-1, -1))
         v.addView(bg, FrameLayout.LayoutParams(-1, -1))
+        // BaoTime state colour layer (web calls.module.css tint_*), under the shade, recoloured on every server state.
+        tint = View(act).apply { background = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(0, 0)); contentDescription = null }
+        bg.addView(tint, FrameLayout.LayoutParams(-1, -1))
         v.addView(View(act).apply { background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0x40000000, 0x0D000000, 0x8C000000.toInt())) }, FrameLayout.LayoutParams(-1, -1))
         // Video stage: controls sit over the full-bleed remote video on Telegram's two 160dp shadows
         // (DrKLO 3de37c8 VoIPFragment.java:917-923: top black 40% -> clear, bottom clear -> black 50%).
@@ -383,6 +392,14 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
             visibility = View.GONE
         }
         v.addView(failBanner, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, -2, Gravity.TOP).apply { topMargin = dp(64); leftMargin = dp(16); rightMargin = dp(16) })
+        // Failed screen (server terminal/failed): Cancel + Call again, same pair as web CallOverlay call-close / call-retry.
+        retryRow = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; visibility = View.GONE }
+        val cancel = btn(false) { dismiss() }
+        cancel.set("Cancel", R.drawable.ol_call_close)
+        val again = btn(false) { val id = callId; dismiss(); actions.pageCall(JSONObject().put("type", "call:retry").put("callId", id ?: "").toString()) }
+        again.set("Call again", R.drawable.ol_call_phone)
+        retryRow.addView(cancel.box); retryRow.addView(again.box)
+        v.addView(retryRow, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply { bottomMargin = dp(CallChrome.ROW_BOTTOM) })
         miniBar = LinearLayout(act).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -464,6 +481,10 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     private lateinit var minBtn: FrameLayout
     private lateinit var closeBtn: FrameLayout
     private lateinit var failBanner: TextView
+    private lateinit var retryRow: LinearLayout
+    @get:androidx.annotation.VisibleForTesting internal val tintForTest: String? get() = if (view == null) null else tint.tag as? String
+    @get:androidx.annotation.VisibleForTesting internal val pulseForTest: Long get() = if (failed) 0L else NativeCallFlow.pulseMs(state)
+    private lateinit var tint: View
     private lateinit var miniBar: LinearLayout
     private lateinit var miniDot: View
     private lateinit var miniLabel: TextView
@@ -488,7 +509,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     }
 
     private fun applyChrome(v: ViewGroup) {
-        val incomingOrEnded = state == NativeCallFlow.State.ENDED || failed
+        val incomingOrEnded = state == NativeCallFlow.Screen.ENDED || failed
         val lp = v.layoutParams as? FrameLayout.LayoutParams
         if (minimized && !incomingOrEnded) {
             // First UI MiniBar: only the green bar, over the real app — no blank full-screen stage.
@@ -534,6 +555,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         row.visibility = if (hide || failed || endedCard) View.GONE else View.VISIBLE
         minBtn.visibility = if (hide || incomingOrEnded || !live) View.GONE else View.VISIBLE
         closeBtn.visibility = if (failed || endedCard) View.VISIBLE else View.GONE
+        retryRow.visibility = if (failed && !hide) View.VISIBLE else View.GONE
         failBanner.visibility = if (failed) View.VISIBLE else View.GONE
         top.visibility = if (hide) View.INVISIBLE else View.VISIBLE
         // Pre-answer card is opaque: tiles stay hidden (engine keeps running) until the answered event.
@@ -558,8 +580,9 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         avatarBox.visibility = if (videoStage) View.GONE else View.VISIBLE
         bg.visibility = if (videoStage) View.GONE else View.VISIBLE
         (avatarBox.parent as View).visibility = avatarBox.visibility
-        val ringing = state == NativeCallFlow.State.WAITING && !failed
-        rings.forEachIndexed { i, rv -> if (ringing && rv.tag == null) { rv.tag = 1; pulse(rv, i * 800L) } else if (!ringing) { rv.tag = null; rv.animate().cancel(); rv.alpha = 0f } }
+        val period = if (failed) 0L else NativeCallFlow.pulseMs(state)
+        rings.forEachIndexed { i, rv -> if (period > 0 && rv.tag != period) { rv.tag = period; rv.animate().cancel(); pulse(rv, i * period / 3) } else if (period == 0L) { rv.tag = null; rv.animate().cancel(); rv.alpha = 0f } }
+        NativeCallFlow.tone(if (failed) NativeCallFlow.Screen.FAILED else state).let { t -> tint.tag = t.name; (tint.background as GradientDrawable).colors = intArrayOf((0x8C shl 24) or (t.from and 0xFFFFFF), (0x8C shl 24) or (t.to and 0xFFFFFF)) }
         name.textSize = if (videoStage) 20f else 28f
         (top.layoutParams as FrameLayout.LayoutParams).apply { gravity = if (videoStage) Gravity.TOP else Gravity.CENTER; topMargin = if (videoStage) dp(64) else 0; bottomMargin = if (videoStage) 0 else dp(CallChrome.CENTER_LIFT) }
         top.requestLayout()
@@ -569,9 +592,10 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
             failBanner.text = failedText ?: CallPresence.FAIL_MSG
         } else if (endedCard) {
             // end card: same structure as the calling screen (avatar, name, status), status = duration
-            status.text = "Call ended · " + NativeCallFlow.timer(endedSecs)
-        } else if (state != NativeCallFlow.State.ESTABLISHED) {
-            status.text = if (!live && ringingAck && state == NativeCallFlow.State.WAITING) "Ringing…" else NativeCallFlow.statusText(state)
+            val t = NativeCallFlow.endedText(endedReason)
+            status.text = if (endedSecs >= 0) "$t · " + NativeCallFlow.timer(endedSecs) else t
+        } else if (state != NativeCallFlow.Screen.ACTIVE) {
+            status.text = NativeCallFlow.statusText(state, lifecycle?.reason)
         } else if (establishedAt > 0L) {
             // answered: the timer shows at once (0:00), not only from the first tick
             status.text = NativeCallFlow.timer((SystemClock.elapsedRealtime() - establishedAt) / 1000)
@@ -651,7 +675,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     private fun pulse(rv: View, delay: Long) {
         if (rv.tag == null || view == null) return
         rv.scaleX = 1f; rv.scaleY = 1f; rv.alpha = 0.8f
-        rv.animate().setStartDelay(delay).scaleX(1.9f).scaleY(1.9f).alpha(0f).setDuration(2400)
+        rv.animate().setStartDelay(delay).scaleX(1.9f).scaleY(1.9f).alpha(0f).setDuration((rv.tag as? Long) ?: 2400L)
             .setInterpolator(android.view.animation.PathInterpolator(0.2f, 0.6f, 0.35f, 1f)).withEndAction { pulse(rv, 0) }.start()
     }
 

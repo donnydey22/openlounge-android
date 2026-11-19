@@ -139,11 +139,11 @@ class CallActivity : Activity() {
         peerPhoto = i.getStringExtra(CallNotifications.EXTRA_PHOTO).orEmpty()
         video = i.getBooleanExtra(CallNotifications.EXTRA_VIDEO, false)
         val phase = i.getStringExtra(EXTRA_PHASE) ?: PHASE_INCOMING
+        // Metadata only: opens the surface; the server's lifecycle snapshots move it (NativeCallScreen.onServerLifecycle).
         val type = when (phase) {
             PHASE_INCOMING -> "call:incoming"
-            PHASE_OUTGOING -> "call:outgoing"
-            PHASE_ACTIVE -> "call:connected"
-            PHASE_ENDED -> "call:ended"
+            PHASE_OUTGOING, PHASE_ACTIVE -> "call:outgoing"
+            PHASE_ENDED -> ""
             else -> "call:answering"
         }
         val m = JSONObject()
@@ -170,7 +170,6 @@ class CallActivity : Activity() {
                             CallMediaCoordinator.closeAll()
                             CallService.stop(this)
                             CallNotifications.cancel(this, id)
-                            screen?.onPageCall("call:ended", JSONObject().put("callId", id))
                             finish()
                         }
                     }.start()

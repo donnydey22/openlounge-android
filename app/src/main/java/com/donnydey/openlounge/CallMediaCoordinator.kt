@@ -20,8 +20,6 @@ object CallMediaCoordinator {
         fun nativeCallAudio(on: Boolean)
         /** show/hide the native remote + local video tiles under the (transparent) WebView */
         fun nativeCallVideo(on: Boolean) {}
-        /** t5456: first inbound media for [id]; the call screen's timer may start (MainActivity gates call:connected on it) */
-        fun callMediaFlowing(id: String) {}
     }
     /** t5456: id of the call whose media is flowing (main thread). */
     @JvmStatic @Volatile var mediaFlowingId: String? = null
@@ -120,6 +118,8 @@ object CallMediaCoordinator {
             olcall?.let { it.hangup("replaced"); olcall = null; NativeCallVideo.endOlcall() }
             var answered = false
             val oc = OlcallCall(ctx, id, media, wantVideo, peerId,
+                // server call:state on this leg's socket -> every call screen (single writer: the olcall server)
+                onLifecycle = { l -> main.post { NativeCallScreen.onServerLifecycle(l) } },
                 onConnected = {
                     active = true; host?.nativeCallAudio(true)
                     if (muted) olcall?.setMuted(true)
@@ -131,7 +131,6 @@ object CallMediaCoordinator {
                 onMediaFlowing = {
                     CallDiskLog.mark("media-flowing", "callId=$id")
                     mediaFlowingId = id
-                    host?.callMediaFlowing(id)
                 },
                 onRemoteVideo = {
                     if (!videoOn) { videoOn = true; host?.nativeCallVideo(true) }

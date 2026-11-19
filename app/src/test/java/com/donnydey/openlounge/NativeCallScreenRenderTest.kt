@@ -143,6 +143,16 @@ class NativeCallScreenRenderTest {
         return false
     }
 
+    /** A real server call:state snapshot (the olcall states.go wire shape), delivered the way the page relays it. */
+    private var seqs = HashMap<String, Long>()
+    private fun lc(s: NativeCallScreen, id: String, state: String, reason: String? = null, viaPage: Boolean = true) {
+        val seq = (seqs[id] ?: 0L) + 1; seqs[id] = seq
+        val l = JSONObject().put("callId", id).put("leg", "caller").put("state", state).put("seq", seq).put("event", "test")
+        if (reason != null) l.put("reason", reason)
+        if (viaPage) s.onPageCall("call:lifecycle", JSONObject().put("type", "call:lifecycle").put("callId", id).put("lifecycle", l))
+        else NativeCallScreen.onServerLifecycle(com.donnydey.openlounge.olcall.OlCallLifecycle.parse(l)!!)
+    }
+
     @Test fun audioCallFlow() {
         val act = Robolectric.buildActivity(Activity::class.java).setup().get()
         val root = FrameLayout(act); act.setContentView(root)
@@ -170,11 +180,16 @@ class NativeCallScreenRenderTest {
         val photo = fixturePhoto(act)
         s.onPageCall("call:outgoing", JSONObject().put("callId", "t1").put("name", "Ada Lovelace").put("video", false).put("photo", photo).put("presence", "online"))
         idlePhoto()
-        var t = texts(root); val shot1 = snap(root, "1-calling")
-        assertBlurred(shot1, "calling")
+        var t = texts(root)
+        assertTrue("no server frame yet: no state wording invented locally: $t", t.none { it in listOf("Calling…", "Ringing…", "Connecting…") })
+        // server: callee leg Ringing (strict ring gate) -> BaoTime's one Ringing state
+        lc(s, "t1", "ringing")
+        t = texts(root); val shot1 = snap(root, "1-ringing")
+        assertBlurred(shot1, "ringing")
+        assertEquals("BaoTime ringing tint", "INITIATING", s.tintForTest)
         val avTop = avatarTop(root)
         assertEquals("avatar centered between the 56dp bar and the row (SwiftUI frame)", expectedAvatarTop(act, root), avTop)
-        assertTrue(t.toString(), t.containsAll(listOf("Ada Lovelace", "Calling…", "Speaker", "Mute", "End call")))
+        assertTrue(t.toString(), t.containsAll(listOf("Ada Lovelace", "Ringing…", "Speaker", "Mute", "End call")))
         assertTrue("pre-answer card (57, iOS 133 parity): Speaker / Mute / End call, no Cancel / Video / Flip / Camera: $t", t.none { it in listOf("Cancel", "Phone", "Video", "Flip", "Camera") })
         assertTrue("pre-answer Speaker/Mute disabled until this phone's olcall leg is up", !enabled(root, "Speaker") && !enabled(root, "Mute") && enabled(root, "End call"))
         assertTrue("no minimize before answer", findDesc(root, "Minimize call")?.let { isShown(it) } != true)
@@ -184,27 +199,35 @@ class NativeCallScreenRenderTest {
         val expect = Math.round(56f * act.resources.displayMetrics.density)
         assertEquals("56dp End call disc", expect, discWidth(root, "End call"))
         assertEquals("56dp Speaker disc", expect, discWidth(root, "Speaker"))
-        s.onPageCall("call:ringing", JSONObject().put("callId", "t1"))
-        t = texts(root); assertBlurred(snap(root, "1b-ringing"), "ringing")
-        assertTrue("ringing acknowledged -> Ringing…, same row: $t", t.contains("Ringing…") && t.containsAll(listOf("Speaker", "Mute", "End call")) && !t.contains("Cancel"))
-        assertEquals("ringing avatar does not move", avTop, avatarTop(root))
-        // t5456: the server answer alone keeps the pre-answer card ("Ringing…", no timer)
-        s.onPageCall("call:answered", JSONObject().put("callId", "t1"))
-        t = texts(root); assertBlurred(snap(root, "2a-answered-no-media"), "answered, media not yet flowing")
-        assertTrue("answered but no media -> still Ringing…, no timer, no Video: $t", t.contains("Ringing…") && t.contains("End call") && t.none { it in listOf("Phone", "Video", "Cancel") } && !t.contains("0:00"))
-        assertEquals("answered avatar does not move", avTop, avatarTop(root))
-        // media flowing (olcall onConnected -> MainActivity.emit relay) -> full row and the timer
+        // legacy page messages no longer move the screen (new path supersedes the old one)
+        for (old in listOf("call:ringing", "call:answered", "call:connected", "call:mediaFlowing", "call:ended")) s.onPageCall(old, JSONObject().put("callId", "t1"))
+        assertTrue("legacy page messages are ignored", texts(root).contains("Ringing…"))
+        // server: answered -> Answering ("Connecting…", fast pulse), no timer
+        lc(s, "t1", "answering")
+        t = texts(root); assertBlurred(snap(root, "2a-answering"), "answering")
+        assertTrue("answering -> Connecting…, no timer: $t", t.contains("Connecting…") && t.contains("End call") && !t.contains("0:00"))
+        assertEquals("answering avatar does not move", avTop, avatarTop(root))
+        // server: connecting (via the olcall leg socket, not the page)
+        lc(s, "t1", "connecting", viaPage = false)
+        t = texts(root); snap(root, "2b-connecting")
+        assertTrue("connecting -> Connecting…: $t", t.contains("Connecting…") && !t.contains("0:00"))
+        assertEquals("connecting pulse is the fast 1.1 s ring", 1100L, s.pulseForTest)
+        // this phone's leg up: Speaker / Mute enable, still not active until the server says in_room
         NativeCallScreen.onNativeMediaFlowing("t1")
+        assertTrue("leg up alone does not start the timer", !texts(root).contains("0:00"))
+        // server: in_room -> active
+        lc(s, "t1", "in_room", viaPage = false)
+        assertEquals("BaoTime active tint", "CONNECTED", s.tintForTest)
         t = texts(root)
         assertTrue("media flowing -> Speaker / Mute / End call: $t", t.containsAll(listOf("Speaker", "Mute", "End call")) && !t.contains("Cancel") && !t.contains("Phone") && !t.contains("Video"))
-        assertTrue("timer starts when media flows: $t", t.contains("0:00"))
+        assertTrue("timer starts on in_room: $t", t.contains("0:00"))
         assertTrue("live: Speaker/Mute enabled", enabled(root, "Speaker") && enabled(root, "Mute"))
         assertTrue("audio in-call has no Video button (design is Speaker / Mute / End call)", !t.contains("Video") && !t.contains("Flip"))
-        assertBlurred(snap(root, "2b-media-flowing"), "media flowing")
+        assertBlurred(snap(root, "2c-active"), "active")
         assertEquals("live avatar does not move", avTop, avatarTop(root))
         val sizes = listOf("Speaker", "Mute", "End call").map { discWidth(root, it) }
         assertTrue("even in-call discs: $sizes", sizes.all { it == sizes[0] && it == expect })
-        s.onPageCall("call:connected", JSONObject().put("callId", "t1"))
+        lc(s, "t1", "in_room") // duplicate state from the other route: seq-newer, same surface
         org.robolectric.shadows.ShadowLooper.idleMainLooper(1, java.util.concurrent.TimeUnit.SECONDS)
         t = texts(root); snap(root, "3-active"); assertTrue(t.toString(), t.any { Regex("^\\d+:\\d\\d$").matches(it) })
         findClickable(root, "Speaker")!!.performClick(); t = texts(root); assertTrue(t.contains("Speaker")); assertBlurred(snap(root, "4-speaker"), "in-call audio")
@@ -263,7 +286,8 @@ class NativeCallScreenRenderTest {
         pip.visibility = View.GONE
         findClickable(root, "End call")!!.performClick()
         assertEquals("call:hangup", JSONObject(sent.last()).getString("type"))
-        s.onPageCall("call:ended", JSONObject().put("callId", "t1"))
+        lc(s, "t1", "terminal", "completed", viaPage = false)
+        assertEquals("BaoTime ended tint", "ENDED", s.tintForTest)
         t = texts(root)
         assertTrue("end card: name and Call ended · duration, no row: $t", t.contains("Ada Lovelace") && t.any { Regex("^Call ended · \\d+:\\d\\d$").matches(it) } && t.none { it == "End call" || it == "Cancel" })
         assertTrue("end card has the avatar (not the video stage)", findDesc(root, "Self view")?.visibility != View.VISIBLE)
@@ -272,21 +296,36 @@ class NativeCallScreenRenderTest {
         org.robolectric.shadows.ShadowLooper.idleMainLooper(1900, java.util.concurrent.TimeUnit.MILLISECONDS)
         assertTrue("end card leaves after 1.8 s", texts(root).none { it.startsWith("Call ended") })
 
-        // callee path: accepted, waiting for media -> "Connecting…" + the same row
+        // callee path: accepted -> Answering -> Connecting -> InRoom, then declined/missed/expired reason cards
         s.onPageCall("call:answering", JSONObject().put("callId", "t3").put("name", "Ada Lovelace").put("photo", photo).put("presence", "online"))
         idlePhoto()
-        s.onPageCall("call:connected", JSONObject().put("callId", "t3"))
+        lc(s, "t3", "answering"); lc(s, "t3", "connecting", viaPage = false)
         t = texts(root); assertBlurred(snap(root, "2-connecting"), "connecting")
         assertTrue("connecting: Connecting… + Speaker / Mute / End call: $t", t.contains("Connecting…") && t.containsAll(listOf("Speaker", "Mute", "End call")) && !t.contains("Cancel"))
         assertEquals("connecting avatar matches calling", avTop, avatarTop(root))
-        NativeCallScreen.onNativeMediaFlowing("t3")
-        assertTrue("callee goes live on media", texts(root).contains("End call"))
-        s.onPageCall("call:ended", JSONObject().put("callId", "t3"))
+        lc(s, "t3", "in_room", viaPage = false)
+        assertTrue("callee goes active on in_room", texts(root).any { Regex("^\\d+:\\d\\d$").matches(it) })
+        lc(s, "t3", "connecting") // server leg reset back to connecting (seq-newer) is shown as is
+        assertTrue("server reset back to connecting is shown", texts(root).contains("Connecting…"))
+        lc(s, "t3", "terminal", "disconnected")
+        org.robolectric.shadows.ShadowLooper.idleMainLooper(1900, java.util.concurrent.TimeUnit.MILLISECONDS)
+
+        for ((cid, reason, text) in listOf(Triple("t4", "declined", "Declined"), Triple("t5", "missed", "No answer"), Triple("t6", "expired", "Link expired"))) {
+            s.onPageCall("call:outgoing", JSONObject().put("callId", cid).put("name", "Ada Lovelace").put("video", false).put("photo", photo))
+            idlePhoto(); lc(s, cid, if (cid == "t6") "joining_url" else "ringing")
+            if (cid == "t6") assertTrue("link door: Joining…", texts(root).contains("Joining…"))
+            lc(s, cid, "terminal", reason)
+            assertTrue("$reason end card says $text: ${texts(root)}", texts(root).contains(text))
+            snap(root, "9-$reason")
+            org.robolectric.shadows.ShadowLooper.idleMainLooper(1900, java.util.concurrent.TimeUnit.MILLISECONDS)
+        }
 
         s.onPageCall("call:outgoing", JSONObject().put("callId", "t2").put("name", "Ada Lovelace").put("video", false).put("photo", photo).put("presence", "online"))
         idlePhoto()
-        s.onPageCall("call:ended", JSONObject().put("callId", "t2").put("reason", "failed"))
+        lc(s, "t2", "ringing"); lc(s, "t2", "terminal", "failed", viaPage = false)
+        assertEquals("BaoTime failed tint", "FAILED", s.tintForTest)
         t = texts(root)
+        assertTrue("Failed screen offers Call again: $t", t.contains("Call again"))
         assertTrue(t.toString(), t.any { it.contains("Can't connect the call on this network") })
         assertTrue("failure screen has no bottom row", !t.contains("End call"))
         assertTrue("Close control is in the top-right", findDesc(root, "Close") != null)
