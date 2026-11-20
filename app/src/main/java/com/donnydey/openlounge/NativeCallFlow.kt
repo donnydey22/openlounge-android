@@ -63,7 +63,18 @@ object NativeCallFlow {
         return "{\"type\":\"call:native-state\",\"callId\":\"${l.callId}\",\"state\":\"${ps.name}\"$reason,\"seq\":${l.seq}}"
     }
 
-    @JvmStatic fun statusText(s: Screen?, reason: Reason? = null): String = when (s) {
+    /**
+     * [waitingLink]: a call link whose own leg is up while the server still says connecting (the other person has not
+     * joined yet): "Waiting for <first name>…", the same words as the web page and iOS (t6093u).
+     */
+    @JvmStatic @JvmOverloads fun statusText(s: Screen?, reason: Reason? = null, waitingLink: Boolean = false, peer: String = ""): String = when {
+        waitingLink && (s == Screen.CONNECTING || s == Screen.JOINING || s == Screen.ANSWERING) -> waitingFor(peer)
+        else -> statusFor(s, reason)
+    }
+
+    @JvmStatic fun waitingFor(peer: String): String = "Waiting for ${peer.trim().split(" ").firstOrNull()?.ifEmpty { null } ?: "them"}…"
+
+    private fun statusFor(s: Screen?, reason: Reason?): String = when (s) {
         Screen.RINGING -> "Ringing…"
         Screen.ANSWERING, Screen.CONNECTING -> "Connecting…"
         Screen.JOINING -> "Joining…"

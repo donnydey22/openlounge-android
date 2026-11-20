@@ -49,7 +49,14 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
             mediaUp.add(id)
             screens.toList().forEach { it.onMediaUp(id) }
         }
-        @JvmStatic fun onNativeMediaEnded(id: String) { mediaUp.remove(id) }
+        @JvmStatic fun onNativeMediaEnded(id: String) { mediaUp.remove(id); remoteCam.remove(id) }
+        private val remoteCam = mutableSetOf<String>()
+        /** Main thread. The other person's camera turned on / off (olcall remote video state). Never moves the state. */
+        @JvmStatic fun onRemoteVideo(id: String, on: Boolean) {
+            if (id.isEmpty()) return
+            if (on) remoteCam.add(id) else remoteCam.remove(id)
+            screens.toList().forEach { it.onRemoteCam(id, on) }
+        }
 
         /**
          * Main thread. A server call:state snapshot, from either route: the olcall leg socket (OlcallCall.onLifecycle)
@@ -117,8 +124,8 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         val id = m.optString("callId", "")
         when (type) {
             "call:incoming" -> if (id.isNotEmpty()) { incoming = id to m.optString("name", ""); incomingPhoto = id to m.optString("photo", ""); if (CallPresence.hasField(m)) incomingPresence = id to CallPresence.fromMessage(m) }
-            "call:outgoing" -> if (id.isNotEmpty() && callId != id) begin(id, m.optString("name", ""), m.optBoolean("video"), m.optString("photo", ""), if (CallPresence.hasField(m)) CallPresence.fromMessage(m) else null)
-            "call:answering" -> if (id.isNotEmpty() && callId != id) begin(id, m.optString("name", "").ifEmpty { incoming?.takeIf { it.first == id }?.second.orEmpty() }, m.optBoolean("video"), m.optString("photo", "").ifEmpty { incomingPhoto?.takeIf { it.first == id }?.second.orEmpty() }, if (CallPresence.hasField(m)) CallPresence.fromMessage(m) else incomingPresence?.takeIf { it.first == id }?.second)
+            "call:outgoing" -> if (id.isNotEmpty() && callId != id) { link = false; begin(id, m.optString("name", ""), m.optBoolean("video"), m.optString("photo", ""), if (CallPresence.hasField(m)) CallPresence.fromMessage(m) else null) }
+            "call:answering" -> if (id.isNotEmpty() && callId != id) { link = m.optBoolean("link", false); begin(id, m.optString("name", "").ifEmpty { incoming?.takeIf { it.first == id }?.second.orEmpty() }, m.optBoolean("video"), m.optString("photo", "").ifEmpty { incomingPhoto?.takeIf { it.first == id }?.second.orEmpty() }, if (CallPresence.hasField(m)) CallPresence.fromMessage(m) else incomingPresence?.takeIf { it.first == id }?.second); if (m.optBoolean("link", false)) { link = true; render() } }
             "call:lifecycle" -> OlCallLifecycle.parse(m.optJSONObject("lifecycle"))?.let { onServerLifecycle(it) }
             "call:muted" -> { muted = m.optBoolean("muted"); render() }
             "call:audioRoute" -> if (m.has("speaker")) { speakerOn = m.optBoolean("speaker"); render() }
@@ -127,6 +134,13 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     }
 
     private fun onMediaUp(id: String) { if (view != null && id == callId) { media = true; render() } }
+    private fun onRemoteCam(id: String, on: Boolean) { if (view != null && id == callId) { remoteOn = on; render() } }
+    /** One path (t6093u): a call link (no ring). Alone with this phone's leg up reads "Waiting for <name>…". */
+    private var link = false
+    /** The other person's camera is on (their video is the big tile); off = their avatar tile. */
+    private var remoteOn = false
+    /** Video stage: in the room with a camera on either side (no cameras = the plain avatar screen). */
+    private val stageOn get() = nativeVideo && !failed && live && (remoteOn || camOn)
 
     /** A server snapshot for this screen's call drives the surface. Snapshots for other calls are kept in [latest]. */
     private fun applyLifecycle(l: OlCallLifecycle) {
@@ -143,7 +157,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     }
 
     /** MainActivity.nativeCallVideo: native tiles are up (remote full screen, self-view PiP) -> transparent screen. */
-    fun onNativeVideo(on: Boolean) { nativeVideo = on; if (on) { video = true; camOn = true; if (hidden) { hidden = false; view?.visibility = View.VISIBLE } }; render() }
+    fun onNativeVideo(on: Boolean) { nativeVideo = on; if (on) { video = true; if (hidden) { hidden = false; view?.visibility = View.VISIBLE } }; render() }
     private var hidden = false
     /** This phone's olcall leg is up (enables Speaker / Mute before InRoom). Not a state. */
     private var media = false
@@ -155,7 +169,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     private var incomingPresence: Pair<String, String?>? = null
 
     private fun begin(id: String, peer: String, v: Boolean, photo: String = "", presence: String? = null) {
-        dismiss(); callId = id; video = v; camOn = v; muted = false; speakerOn = v; facing = "user"; failed = false; failedText = null; media = id in mediaUp; lifecycle = null; endedReason = null
+        val keepLink = link; dismiss(); link = keepLink; callId = id; remoteOn = id in remoteCam; video = v; camOn = v; muted = false; speakerOn = v; facing = "user"; failed = false; failedText = null; media = id in mediaUp; lifecycle = null; endedReason = null
         if (!Prefs.nativeCallUi(act)) { callId = null; return }
         photoLoading = null
         build(); name.text = peer.ifEmpty { act.getString(R.string.app_name) }; loadPhoto(id, photo)
@@ -199,7 +213,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         ui.postDelayed(endLinger, 1800) // web engine.ts:93 ENDED_LINGER_MS
     }
 
-    private fun dismiss() { ui.removeCallbacks(endLinger); endedCard = false; ui.removeCallbacks(tick); ui.removeCallbacks(hideCtl); ui.removeCallbacks(presenceTick); ui.removeCallbacks(quickPeek); view?.let { root.removeView(it) }; view = null; state = null; lifecycle = null; endedReason = null; callId = null; hidden = false; establishedAt = 0L; nativeVideo = false; minimized = false; failed = false; failedText = null }
+    private fun dismiss() { ui.removeCallbacks(endLinger); endedCard = false; ui.removeCallbacks(tick); ui.removeCallbacks(hideCtl); ui.removeCallbacks(presenceTick); ui.removeCallbacks(quickPeek); view?.let { root.removeView(it) }; view = null; state = null; lifecycle = null; endedReason = null; callId = null; hidden = false; establishedAt = 0L; nativeVideo = false; minimized = false; failed = false; failedText = null; link = false; remoteOn = false }
 
     private fun dp(v: Int) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), act.resources.displayMetrics).toInt()
 
@@ -541,12 +555,12 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
             v.layoutParams = lp
         }
         v.isClickable = true
-        v.setBackgroundColor(if (nativeVideo && live && !failed) Color.TRANSPARENT else 0xFF0B1220.toInt())
+        v.setBackgroundColor(if (stageOn) Color.TRANSPARENT else 0xFF0B1220.toInt())
         for (i in 0 until v.childCount) {
             val c = v.getChildAt(i)
             c.visibility = if (c === miniBar) View.GONE else View.VISIBLE
         }
-        val stage = nativeVideo && !failed && live
+        val stage = stageOn
         bg.visibility = if (stage) View.GONE else View.VISIBLE
         val hide = stage && !showCtl
         topShadow.visibility = if (stage && !hide) View.VISIBLE else View.GONE
@@ -560,7 +574,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         failBanner.visibility = if (failed) View.VISIBLE else View.GONE
         top.visibility = if (hide) View.INVISIBLE else View.VISIBLE
         // Pre-answer card is opaque: tiles stay hidden (engine keeps running) until the answered event.
-        if (nativeVideo) NativeCallVideo.show(stage)
+        if (nativeVideo) { NativeCallVideo.show(stage); if (stage && !remoteOn) NativeCallVideo.showRemote(false) }
         if (stage && showCtl) {
             ui.removeCallbacks(hideCtl)
             ui.postDelayed(hideCtl, 4000)
@@ -576,9 +590,11 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
 
     private fun render() {
         val v = view ?: return
-        v.setBackgroundColor(if (nativeVideo && live && !failed) Color.TRANSPARENT else 0xFF0B1220.toInt())
-        val videoStage = nativeVideo && !failed && live
-        avatarBox.visibility = if (videoStage) View.GONE else View.VISIBLE
+        v.setBackgroundColor(if (stageOn) Color.TRANSPARENT else 0xFF0B1220.toInt())
+        val videoStage = stageOn
+        // Meet-style (t6093u): their camera off -> their avatar in the middle of the stage, your camera stays the PiP
+        val avatarTile = videoStage && !remoteOn
+        avatarBox.visibility = if (videoStage && !avatarTile) View.GONE else View.VISIBLE
         bg.visibility = if (videoStage) View.GONE else View.VISIBLE
         (avatarBox.parent as View).visibility = avatarBox.visibility
         val period = if (failed) 0L else NativeCallFlow.pulseMs(state)
@@ -596,7 +612,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
             val t = NativeCallFlow.endedText(endedReason)
             status.text = if (endedSecs >= 0) "$t · " + NativeCallFlow.timer(endedSecs) else t
         } else if (state != NativeCallFlow.Screen.ACTIVE) {
-            status.text = NativeCallFlow.statusText(state, lifecycle?.reason)
+            status.text = NativeCallFlow.statusText(state, lifecycle?.reason, link && media, name.text?.toString().orEmpty())
         } else if (establishedAt > 0L) {
             // answered: the timer shows at once (0:00), not only from the first tick
             status.text = NativeCallFlow.timer((SystemClock.elapsedRealtime() - establishedAt) / 1000)
@@ -607,7 +623,8 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         // not exist yet; End call is the same end action Cancel ran.
         // Audio in-call (Donny's design): Speaker (white when on), Mute, End call. Video row only on the video stage.
         val pre = !live && !failed && !endedCard
-        val videoRow = !pre && !failed && !endedCard && (camOn || nativeVideo || video)
+        // One path (t6093u): every live call is the same audio + video room, so the camera toggle is always in the row.
+        val videoRow = !pre && !failed && !endedCard
         endBtn.label.text = "End call"
         bFirst.box.visibility = View.VISIBLE
         bMic.box.visibility = View.VISIBLE

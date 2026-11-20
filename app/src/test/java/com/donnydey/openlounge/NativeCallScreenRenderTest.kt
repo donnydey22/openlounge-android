@@ -219,10 +219,10 @@ class NativeCallScreenRenderTest {
         lc(s, "t1", "in_room", viaPage = false)
         assertEquals("BaoTime active tint", "CONNECTED", s.tintForTest)
         t = texts(root)
-        assertTrue("media flowing -> Speaker / Mute / End call: $t", t.containsAll(listOf("Speaker", "Mute", "End call")) && !t.contains("Cancel") && !t.contains("Phone") && !t.contains("Video"))
+        assertTrue("media flowing -> Speaker / Mute / Video / End call (one A/V room: camera toggle always present): $t", t.containsAll(listOf("Speaker", "Mute", "End call")) && !t.contains("Cancel") && !t.contains("Phone") && (t.contains("Video") || t.contains("Camera")))
         assertTrue("timer starts on in_room: $t", t.contains("0:00"))
         assertTrue("live: Speaker/Mute enabled", enabled(root, "Speaker") && enabled(root, "Mute"))
-        assertTrue("audio in-call has no Video button (design is Speaker / Mute / End call)", !t.contains("Video") && !t.contains("Flip"))
+        assertTrue("camera off: no Flip until the camera is on", !t.contains("Flip"))
         assertBlurred(snap(root, "2c-active"), "active")
         assertEquals("live avatar does not move", avTop, avatarTop(root))
         val sizes = listOf("Speaker", "Mute", "End call").map { discWidth(root, it) }
@@ -244,6 +244,8 @@ class NativeCallScreenRenderTest {
         }
         findBar(root)!!.performClick()
         t = texts(root); assertTrue("restored controls", t.contains("End call")); snap(root, "6-restored")
+        // one A/V room: the in-call camera toggle turns the local camera on (native video track alone no longer flips it)
+        findClickable(root, "Video")!!.performClick()
         s.onNativeVideo(true)
         root.measure(View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(2340, View.MeasureSpec.EXACTLY))
         root.layout(0, 0, 1080, 2340)

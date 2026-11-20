@@ -20,7 +20,7 @@ internal class OlcallCall(
     video: Boolean,
     peerId: String,
     private val onConnected: () -> Unit,
-    private val onRemoteVideo: () -> Unit,
+    private val onRemoteVideo: (Boolean) -> Unit,
     /** t5456: first inbound media after connect (OlCallSession.UiState.mediaFlowing) */
     private val onMediaFlowing: () -> Unit,
     /** route label (speaker/earpiece/wired/usb/bluetooth), speaker on */
@@ -46,7 +46,8 @@ internal class OlcallCall(
             if (ended) return@OlCallUi
             if (s.phase == OlCallSession.Phase.InCall && !connected) { connected = true; onConnected() }
             if (s.mediaFlowing && !flowing) { flowing = true; onMediaFlowing() }
-            if (s.remoteVideoOn && !remoteVideo) { remoteVideo = true; onRemoteVideo() }
+            // both edges (t6093u): the call screens show the avatar tile while the other camera is off
+            if (s.remoteVideoOn != remoteVideo) { remoteVideo = s.remoteVideoOn; onRemoteVideo(s.remoteVideoOn) }
             s.lifecycle?.let { l -> if (OlCallLifecycle.newer(lifecycle, l)) { lifecycle = l; onLifecycle(l) } }
             if (s.audioRoute != route) { route = s.audioRoute; onRoute(s.audioRoute, s.speakerOn) }
             if (s.phase == OlCallSession.Phase.Ended) { ended = true; onEnded(s.endReason ?: "ended", connected) }

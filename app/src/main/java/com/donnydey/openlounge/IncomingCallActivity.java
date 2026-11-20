@@ -110,7 +110,7 @@ public class IncomingCallActivity extends Activity {
         callId = id;
         current = new WeakReference<>(this);
         String name = i.getStringExtra(CallNotifications.EXTRA_CALLER);
-        boolean video = i.getBooleanExtra(CallNotifications.EXTRA_VIDEO, false);
+        boolean video = i.getBooleanExtra(CallNotifications.EXTRA_VIDEO, true);
         if (ACTION_ACCEPT.equals(i.getAction())) {
             OlCallPermissions.Action action = video
                     ? OlCallPermissions.Action.START_OR_ACCEPT_VIDEO
@@ -133,7 +133,7 @@ public class IncomingCallActivity extends Activity {
     }
 
     private void accept() {
-        boolean video = getIntent().getBooleanExtra(CallNotifications.EXTRA_VIDEO, false);
+        boolean video = getIntent().getBooleanExtra(CallNotifications.EXTRA_VIDEO, true);
         OlCallPermissions.Action action = video
                 ? OlCallPermissions.Action.START_OR_ACCEPT_VIDEO
                 : OlCallPermissions.Action.START_OR_ACCEPT_AUDIO;
@@ -148,7 +148,7 @@ public class IncomingCallActivity extends Activity {
     private void acceptAfterPermission() {
         String id = callId;
         CallNotifications.cancel(this, id);
-        boolean video = getIntent().getBooleanExtra(CallNotifications.EXTRA_VIDEO, false);
+        boolean video = getIntent().getBooleanExtra(CallNotifications.EXTRA_VIDEO, true);
         // Android 12+: the call FGS must be up before media; starting it from this user tap (visible
         // activity) is exempt from background-start limits and lets Android 14+ grant the microphone type.
         CallService.start(getApplicationContext(), id, getIntent().getStringExtra(CallNotifications.EXTRA_CALLER), false, true);
@@ -352,7 +352,7 @@ public class IncomingCallActivity extends Activity {
         col.addView(title, tl);
 
         TextView sub = new TextView(this);
-        sub.setText(getString(video ? R.string.call_incoming_video : R.string.call_incoming_audio));
+        sub.setText(getString(R.string.call_incoming_video)); // one ringing door (t6093u)
         sub.setTextColor(0xCCFFFFFF);
         sub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
         sub.setIncludeFontPadding(false);

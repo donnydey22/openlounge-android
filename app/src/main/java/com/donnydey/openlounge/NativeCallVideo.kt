@@ -52,6 +52,8 @@ object NativeCallVideo {
             v.clipToOutline = true
         }
     }
+    /** The other person's camera is off: hide only the full-screen renderer (the call screen shows their avatar). */
+    @JvmStatic fun showRemote(on: Boolean) { olRemote?.visibility = if (on) View.VISIBLE else View.GONE }
     /** MainActivity.nativeCallVideo: show/hide the current call's renderer pair (slots stay hidden). */
     @JvmStatic fun show(on: Boolean) {
         val v = if (on) View.VISIBLE else View.GONE

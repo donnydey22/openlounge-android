@@ -132,9 +132,9 @@ object CallMediaCoordinator {
                     CallDiskLog.mark("media-flowing", "callId=$id")
                     mediaFlowingId = id
                 },
-                onRemoteVideo = {
-                    if (!videoOn) { videoOn = true; host?.nativeCallVideo(true) }
-                    host?.emit(JSONObject().put("state", "remote-video").put("callId", id).put("on", true).toString())
+                onRemoteVideo = { on ->
+                    if (on && !videoOn) { videoOn = true; host?.nativeCallVideo(true) }
+                    host?.emit(JSONObject().put("state", "remote-video").put("callId", id).put("on", on).toString())
                 },
                 onRoute = { route, speaker ->
                     host?.emit(JSONObject().put("type", "call:audioRoute").put("callId", id).put("route", route).put("speaker", speaker).toString())

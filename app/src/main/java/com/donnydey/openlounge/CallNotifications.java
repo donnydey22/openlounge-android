@@ -95,6 +95,9 @@ final class CallNotifications {
     }
 
     static void show(Context ctx, String callId, String name, String photo, boolean video, long expiresAt) {
+        // One ringing door (t6093u): every ring is a video ring into the always-alive A/V room. An old build's audio
+        // ring (video=false) rings the same video surface; the audio-call ring path is gone.
+        video = true;
         ensureChannels(ctx);
         Intent full = IncomingCallActivity.intent(ctx, callId, name, photo, video, expiresAt);
         PendingIntent fullPi = PendingIntent.getActivity(ctx, callId.hashCode(), full,
@@ -105,7 +108,7 @@ final class CallNotifications {
         PendingIntent declinePi = CallActionReceiver.pending(ctx, CallActionReceiver.ACTION_DECLINE, callId);
 
         Person caller = new Person.Builder().setName(name).setImportant(true).build();
-        String text = ctx.getString(video ? R.string.call_incoming_video : R.string.call_incoming_audio);
+        String text = ctx.getString(R.string.call_incoming_video); // one ringing door: always the video ring (t6093u)
         long timeout = Math.max(1_000, expiresAt - System.currentTimeMillis());
         NotificationCompat.Builder b = new NotificationCompat.Builder(ctx, CHANNEL_CALLS)
                 .setSmallIcon(R.drawable.ic_stat_notify)
