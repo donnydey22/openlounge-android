@@ -29,7 +29,10 @@ internal class OlcallCall(
     private val onEnded: (reason: String, connectedBefore: Boolean) -> Unit,
     /** Server-owned lifecycle (olcall states.go via call:state). Observer only: this class never writes it. */
     private val onLifecycle: (OlCallLifecycle) -> Unit = {},
+    /** the other person's mic is off (their tgcalls audio state), web mute badge parity (t6106u) */
+    private val onRemoteMuted: (Boolean) -> Unit = {},
 ) {
+    private var remoteMuted = false
     private val main = Handler(Looper.getMainLooper())
     private var connected = false
     private var ended = false
@@ -48,6 +51,7 @@ internal class OlcallCall(
             if (s.mediaFlowing && !flowing) { flowing = true; onMediaFlowing() }
             // both edges (t6093u): the call screens show the avatar tile while the other camera is off
             if (s.remoteVideoOn != remoteVideo) { remoteVideo = s.remoteVideoOn; onRemoteVideo(s.remoteVideoOn) }
+            if (s.remoteMuted != remoteMuted) { remoteMuted = s.remoteMuted; onRemoteMuted(s.remoteMuted) }
             s.lifecycle?.let { l -> if (OlCallLifecycle.newer(lifecycle, l)) { lifecycle = l; onLifecycle(l) } }
             if (s.audioRoute != route) { route = s.audioRoute; onRoute(s.audioRoute, s.speakerOn) }
             if (s.phase == OlCallSession.Phase.Ended) { ended = true; onEnded(s.endReason ?: "ended", connected) }

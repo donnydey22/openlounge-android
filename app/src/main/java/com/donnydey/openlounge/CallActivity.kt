@@ -20,6 +20,8 @@ import org.json.JSONObject
  */
 class CallActivity : Activity() {
     companion object {
+        /** resumed (in front): CallService may claim / change while-in-use FGS types (microphone, camera) */
+        @Volatile @JvmStatic var resumed = false
         const val EXTRA_PHASE = "ol_call_phase"
         const val PHASE_INCOMING = "incoming"
         const val PHASE_OUTGOING = "outgoing"
@@ -119,10 +121,12 @@ class CallActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        resumed = true
         OlCallPermissionPrompt.attach(this)
     }
 
     override fun onPause() {
+        resumed = false
         OlCallPermissionPrompt.detach(this)
         super.onPause()
     }

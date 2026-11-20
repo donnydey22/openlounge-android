@@ -49,7 +49,14 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
             mediaUp.add(id)
             screens.toList().forEach { it.onMediaUp(id) }
         }
-        @JvmStatic fun onNativeMediaEnded(id: String) { mediaUp.remove(id); remoteCam.remove(id) }
+        @JvmStatic fun onNativeMediaEnded(id: String) { mediaUp.remove(id); remoteCam.remove(id); remoteMic.remove(id) }
+        private val remoteMic = mutableSetOf<String>()
+        /** Main thread. The other person's mic turned off / on (their tgcalls audio state): web's mute badge. */
+        @JvmStatic fun onRemoteMuted(id: String, muted: Boolean) {
+            if (id.isEmpty()) return
+            if (muted) remoteMic.add(id) else remoteMic.remove(id)
+            screens.toList().forEach { it.onRemoteMic(id, muted) }
+        }
         private val remoteCam = mutableSetOf<String>()
         /** Main thread. The other person's camera turned on / off (olcall remote video state). Never moves the state. */
         @JvmStatic fun onRemoteVideo(id: String, on: Boolean) {
@@ -134,6 +141,9 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     }
 
     private fun onMediaUp(id: String) { if (view != null && id == callId) { media = true; render() } }
+    private fun onRemoteMic(id: String, muted: Boolean) { if (view != null && id == callId) { remoteMuted = muted; render() } }
+    private var remoteMuted = false
+    private lateinit var muteBadge: android.widget.ImageView
     private fun onRemoteCam(id: String, on: Boolean) { if (view != null && id == callId) { remoteOn = on; render() } }
     /** One path (t6093u): a call link (no ring). Alone with this phone's leg up reads "Waiting for <name>…". */
     private var link = false
@@ -141,6 +151,12 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     private var remoteOn = false
     /** Video stage: in the room with a camera on either side (no cameras = the plain avatar screen). */
     private val stageOn get() = nativeVideo && !failed && live && (remoteOn || camOn)
+    /**
+     * Web parity (t6106u): their camera off on the video stage = their avatar tile on the opaque stage backdrop.
+     * The window used to go fully transparent here with the remote renderer hidden, so the stage showed whatever
+     * was under it (clear / black). Only the self-view PiP stays a hole onto its renderer (StageBackdrop.hole).
+     */
+    private val avatarTile get() = stageOn && !remoteOn
 
     /** A server snapshot for this screen's call drives the surface. Snapshots for other calls are kept in [latest]. */
     private fun applyLifecycle(l: OlCallLifecycle) {
@@ -169,7 +185,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     private var incomingPresence: Pair<String, String?>? = null
 
     private fun begin(id: String, peer: String, v: Boolean, photo: String = "", presence: String? = null) {
-        val keepLink = link; dismiss(); link = keepLink; callId = id; remoteOn = id in remoteCam; video = v; camOn = v; muted = false; speakerOn = v; facing = "user"; failed = false; failedText = null; media = id in mediaUp; lifecycle = null; endedReason = null
+        val keepLink = link; dismiss(); link = keepLink; callId = id; remoteOn = id in remoteCam; remoteMuted = id in remoteMic; video = v; camOn = v; muted = false; speakerOn = v; facing = "user"; failed = false; failedText = null; media = id in mediaUp; lifecycle = null; endedReason = null
         if (!Prefs.nativeCallUi(act)) { callId = null; return }
         photoLoading = null
         build(); name.text = peer.ifEmpty { act.getString(R.string.app_name) }; loadPhoto(id, photo)
@@ -307,7 +323,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     private lateinit var bMic: Btn
 
     private fun build() {
-        val v = FrameLayout(act).apply { isClickable = true } // the page under it never gets touches while shown
+        val v = StageBackdrop(act).apply { isClickable = true } // the page under it never gets touches while shown; StageBackdrop: self-view hole drawn last
         bg = FrameLayout(act)
         val dm = act.resources.displayMetrics; val vmax = maxOf(dm.widthPixels, dm.heightPixels)
         fun blob(color: Int, gravity: Int, dx: Float, dy: Float): View = View(act).apply {
@@ -334,7 +350,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         v.addView(topShadow, FrameLayout.LayoutParams(-1, dp(160), Gravity.TOP))
         v.addView(bottomShadow, FrameLayout.LayoutParams(-1, dp(160), Gravity.BOTTOM))
         // Self-view PiP touch target (the renderer is a SurfaceView under this window, NativeCallVideo.placeLocal).
-        pipTouch = View(act).apply { contentDescription = "Self view"; visibility = View.GONE; setOnTouchListener(PipDrag()) }
+        pipTouch = android.widget.ImageView(act).apply { contentDescription = "Self view"; visibility = View.GONE; setOnTouchListener(PipDrag()); scaleType = android.widget.ImageView.ScaleType.CENTER }
         v.addView(pipTouch, FrameLayout.LayoutParams(dp(CallPip.WIDTH), dp(CallPip.HEIGHT), Gravity.TOP or Gravity.START))
         top = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding(dp(24), 0, dp(24), 0) }
         avatar = TextView(act).apply { setTextColor(Color.WHITE); textSize = 30f; gravity = Gravity.CENTER; typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
@@ -363,6 +379,10 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         top.clipChildren = false; v.clipChildren = false
         top.addView(ringBox, LinearLayout.LayoutParams(dp(112), dp(112)).apply { bottomMargin = dp(12) })
         top.addView(name, LinearLayout.LayoutParams(-1, -2)); top.addView(status, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(16) })
+        // web mute badge (their mic off): mic-off glyph in a white/15 circle under their name / status
+        muteBadge = android.widget.ImageView(act).apply { contentDescription = "Muted"; setImageResource(R.drawable.ol_call_mic_off); scaleType = android.widget.ImageView.ScaleType.CENTER_INSIDE
+            setPadding(dp(6), dp(6), dp(6), dp(6)); background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0x26FFFFFF) }; visibility = View.GONE }
+        top.addView(muteBadge, LinearLayout.LayoutParams(dp(28), dp(28)).apply { topMargin = dp(10); gravity = Gravity.CENTER_HORIZONTAL })
         // Centered between the 56dp top bar and the bottom row (SwiftUI CallScreen / IncomingCallScreen).
         // FrameLayout CENTER offsets by (topMargin - bottomMargin), so these put the block in the middle of the space between them.
         v.addView(top, FrameLayout.LayoutParams(-1, -2, Gravity.CENTER).apply { topMargin = 0; bottomMargin = dp(CallChrome.CENTER_LIFT) })
@@ -458,7 +478,24 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         else { pipTouch.translationX = x; pipTouch.translationY = y; syncRenderer() }
     }
     private fun syncRenderer() {
+        selfView(stageOn)
         NativeCallVideo.placeLocal(pipTouch.translationX.toInt(), pipTouch.translationY.toInt(), dp(CallPip.WIDTH), dp(CallPip.HEIGHT), dp(CallPip.RADIUS).toFloat())
+    }
+
+    /**
+     * Self view (web selfPip): camera on = a hole in the stage backdrop onto the local renderer (only needed on the
+     * avatar tile; over their video the backdrop is hidden). Camera off = the camera-off tile, never an empty surface.
+     */
+    private fun selfView(stage: Boolean) {
+        if (view == null) return
+        val p = pipTouch as android.widget.ImageView
+        val off = stage && !camOn
+        p.background = if (off) GradientDrawable().apply { cornerRadius = dp(CallPip.RADIUS).toFloat(); setColor(0xFF27272A.toInt()) } else null
+        p.setImageResource(if (off) R.drawable.ol_call_video_off else 0)
+        p.contentDescription = if (off) "Self view, camera off" else "Self view"
+        val root = view as? StageBackdrop ?: return
+        root.holeRadius = dp(CallPip.RADIUS).toFloat()
+        root.hole = if (stage && camOn && avatarTile) android.graphics.RectF(p.translationX, p.translationY, p.translationX + dp(CallPip.WIDTH), p.translationY + dp(CallPip.HEIGHT)) else null
     }
 
     /** Drag the self-view anywhere; on release snap to the corner Telegram's fling projection picks. */
@@ -561,12 +598,13 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
             c.visibility = if (c === miniBar) View.GONE else View.VISIBLE
         }
         val stage = stageOn
-        bg.visibility = if (stage) View.GONE else View.VISIBLE
+        bg.visibility = if (stage && !avatarTile) View.GONE else View.VISIBLE
         val hide = stage && !showCtl
         topShadow.visibility = if (stage && !hide) View.VISIBLE else View.GONE
         bottomShadow.visibility = topShadow.visibility
         pipTouch.visibility = if (stage) View.VISIBLE else View.GONE
         if (stage) placePip(false)
+        selfView(stage)
         row.visibility = if (hide || failed || endedCard) View.GONE else View.VISIBLE
         minBtn.visibility = if (hide || incomingOrEnded || !live) View.GONE else View.VISIBLE
         closeBtn.visibility = if (failed || endedCard) View.VISIBLE else View.GONE
@@ -574,7 +612,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         failBanner.visibility = if (failed) View.VISIBLE else View.GONE
         top.visibility = if (hide) View.INVISIBLE else View.VISIBLE
         // Pre-answer card is opaque: tiles stay hidden (engine keeps running) until the answered event.
-        if (nativeVideo) { NativeCallVideo.show(stage); if (stage && !remoteOn) NativeCallVideo.showRemote(false) }
+        if (nativeVideo) { NativeCallVideo.show(stage); if (stage && !remoteOn) NativeCallVideo.showRemote(false); if (stage && !camOn) NativeCallVideo.showLocal(false) }
         if (stage && showCtl) {
             ui.removeCallbacks(hideCtl)
             ui.postDelayed(hideCtl, 4000)
@@ -593,9 +631,9 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         v.setBackgroundColor(if (stageOn) Color.TRANSPARENT else 0xFF0B1220.toInt())
         val videoStage = stageOn
         // Meet-style (t6093u): their camera off -> their avatar in the middle of the stage, your camera stays the PiP
-        val avatarTile = videoStage && !remoteOn
+        val avatarTile = this.avatarTile
         avatarBox.visibility = if (videoStage && !avatarTile) View.GONE else View.VISIBLE
-        bg.visibility = if (videoStage) View.GONE else View.VISIBLE
+        bg.visibility = if (videoStage && !avatarTile) View.GONE else View.VISIBLE
         (avatarBox.parent as View).visibility = avatarBox.visibility
         val period = if (failed) 0L else NativeCallFlow.pulseMs(state)
         rings.forEachIndexed { i, rv -> if (period > 0 && rv.tag != period) { rv.tag = period; rv.animate().cancel(); pulse(rv, i * period / 3) } else if (period == 0L) { rv.tag = null; rv.animate().cancel(); rv.alpha = 0f } }
@@ -637,6 +675,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         bVid.box.visibility = if (videoRow) View.VISIBLE else View.GONE
         bVid.set(if (camOn) "Camera" else "Video", if (camOn) R.drawable.ol_call_video else R.drawable.ol_call_video_off, active = camOn)
         bMic.set(if (muted) "Unmute" else "Mute", if (muted) R.drawable.ol_call_mic_off else R.drawable.ol_call_mic, active = muted, enabled = !pre || media)
+        muteBadge.visibility = if (remoteMuted && live && !failed && !endedCard) View.VISIBLE else View.GONE
         applyChrome(v)
     }
 
@@ -700,4 +739,17 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     }
 
     val showing: Boolean get() = view != null && !hidden
+}
+
+/** Call stage backdrop; [hole] is cleared to transparent so the self-view SurfaceView under the window shows there. */
+internal class StageBackdrop(ctx: android.content.Context) : FrameLayout(ctx) {
+    var hole: android.graphics.RectF? = null
+        set(v) { if (field != v) { field = v; invalidate() } }
+    var holeRadius = 0f
+    private val clear = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.CLEAR) }
+    init { setWillNotDraw(false) }
+    override fun dispatchDraw(canvas: android.graphics.Canvas) {
+        super.dispatchDraw(canvas)
+        hole?.let { canvas.drawRoundRect(it, holeRadius, holeRadius, clear) }
+    }
 }

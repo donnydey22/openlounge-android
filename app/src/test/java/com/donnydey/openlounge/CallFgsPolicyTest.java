@@ -17,4 +17,11 @@ public class CallFgsPolicyTest {
     @Test public void runningFgs_background_noRestart() { assertEquals(false, CallFgsPolicy.restart(true, false)); }
     @Test public void runningFgs_visible_restart() { assertEquals(true, CallFgsPolicy.restart(true, true)); }
     @Test public void noFgs_start() { assertEquals(true, CallFgsPolicy.restart(false, false)); assertEquals(true, CallFgsPolicy.restart(false, true)); }
+    // t6107u keep the camera alive: camera type only with the camera on, and on 14+ only from a visible start
+    @Test public void u_cameraOnVisible() { assertEquals(CallFgsPolicy.PHONE_CALL | CallFgsPolicy.MICROPHONE | CallFgsPolicy.CAMERA, CallFgsPolicy.types(34, true, true, true)); }
+    @Test public void u_cameraOnBackground_none() { assertEquals(CallFgsPolicy.PHONE_CALL, CallFgsPolicy.types(34, true, false, true)); }
+    @Test public void cameraOff_noCameraType() { assertEquals(CallFgsPolicy.PHONE_CALL | CallFgsPolicy.MICROPHONE, CallFgsPolicy.types(34, true, true, false)); }
+    @Test public void r_cameraOn() { assertEquals(CallFgsPolicy.PHONE_CALL | CallFgsPolicy.MICROPHONE | CallFgsPolicy.CAMERA, CallFgsPolicy.types(30, true, false, true)); }
+    @Test public void q_noCameraType() { assertEquals(CallFgsPolicy.PHONE_CALL, CallFgsPolicy.types(29, true, true, true)); }
+    @Test public void fallbackDropsCameraFirst() { assertEquals(CallFgsPolicy.PHONE_CALL | CallFgsPolicy.MICROPHONE, CallFgsPolicy.fallback(CallFgsPolicy.PHONE_CALL | CallFgsPolicy.MICROPHONE | CallFgsPolicy.CAMERA)); }
 }

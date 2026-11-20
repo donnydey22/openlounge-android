@@ -183,6 +183,55 @@ class NativeCallScreenRenderTest {
         assertTrue("their camera off: their name/avatar tile again: $t", t.contains("Jordan Ellis"))
     }
 
+    /**
+     * t6106u web parity on the video stage. Their camera off + mine on: their avatar tile on the opaque stage
+     * backdrop (the app under the call screen never shows through), with only the self-view PiP left transparent
+     * onto its renderer. Mine off + theirs on: the camera-off self tile, not an empty / black surface.
+     */
+    @Test fun stageParity() {
+        val act = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val root = FrameLayout(act); act.setContentView(root)
+        root.addView(hallway(act), FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        val s = NativeCallScreen(act, root, object : NativeCallScreen.Actions {
+            override fun pageCall(detailJson: String): Boolean = true
+            override fun speaker(on: Boolean) {}
+            override fun camera(on: Boolean, facing: String, done: (Boolean) -> Unit) { done(true) }
+        })
+        s.onPageCall("call:answering", JSONObject().put("callId", "P1").put("name", "Jordan Ellis").put("video", true).put("photo", fixturePhoto(act)).put("link", true))
+        lc(s, "P1", "connecting", viaPage = false); NativeCallScreen.onNativeMediaFlowing("P1"); lc(s, "P1", "in_room", viaPage = false)
+        s.onNativeVideo(true)
+        val hall = 0xFF0B0B0D.toInt()
+        // S1 their camera off, mine on: avatar tile
+        var b = snap(root, "S1-their-cam-off-my-cam-on")
+        val pip = findDesc(root, "Self view")!!
+        val px = (pip.translationX + pip.width / 2).toInt(); val py = (pip.translationY + pip.height / 2).toInt()
+        assertTrue("S1 stage is the opaque backdrop, not the app under it (centre ${Integer.toHexString(b.getPixel(540, 1170))})", b.getPixel(540, 1170) != hall && Color.alpha(b.getPixel(540, 1170)) == 255)
+        assertTrue("S1 their name/avatar tile shows: ${texts(root)}", texts(root).contains("Jordan Ellis"))
+        assertEquals("S1 self-view PiP is a hole onto the camera renderer", 0, Color.alpha(b.getPixel(px, py)))
+        // S2 both cameras on: their video (stage transparent onto the remote renderer), own PiP
+        NativeCallScreen.onRemoteVideo("P1", true)
+        b = snap(root, "S2-both-cams-on")
+        assertTrue("S2 avatar tile gone over their video: ${texts(root)}", !hasPhoto(ringBoxOf(root) ?: root) || ringBoxOf(root)?.isShown != true)
+        // S3 their camera on, mine off: camera-off self tile
+        findClickable(root, "Camera")!!.performClick()
+        b = snap(root, "S3-their-cam-on-my-cam-off")
+        assertTrue("S3 camera-off self tile", findDesc(root, "Self view, camera off")?.visibility == View.VISIBLE)
+        // S3b their mic off: the web mute badge
+        NativeCallScreen.onRemoteMuted("P1", true)
+        snap(root, "S3b-their-mic-off-badge")
+        assertTrue("mute badge shows", findDesc(root, "Muted")?.let { isShown(it) } == true)
+        NativeCallScreen.onRemoteMuted("P1", false)
+        assertTrue("mute badge clears", findDesc(root, "Muted")?.let { isShown(it) } != true)
+        // S4 both off: the plain avatar screen
+        NativeCallScreen.onRemoteVideo("P1", false)
+        b = snap(root, "S4-both-cams-off")
+        assertTrue("S4 avatar screen: ${texts(root)}", texts(root).contains("Jordan Ellis") && b.getPixel(540, 1170) != hall)
+        // S5 they left (link): alone again = avatar + Waiting for Jordan…
+        lc(s, "P1", "connecting", viaPage = false)
+        snap(root, "S5-they-left-waiting")
+        assertTrue("S5 Waiting for Jordan…: ${texts(root)}", texts(root).contains("Waiting for Jordan…"))
+    }
+
     @Test fun audioCallFlow() {
         val act = Robolectric.buildActivity(Activity::class.java).setup().get()
         val root = FrameLayout(act); act.setContentView(root)

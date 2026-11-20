@@ -31,6 +31,26 @@ public class CallService extends Service {
     static final String EXTRA_USER_VISIBLE = "user_visible";
     /** the call FGS is up (startForeground succeeded and the service is not destroyed) */
     private static volatile boolean up = false;
+    /** this phone's camera is on in the call (CallMediaCoordinator), so the FGS should carry the camera type */
+    private static volatile boolean cameraOn = false;
+    private static volatile String lastId = "", lastName = "";
+    private static volatile boolean lastConnected = false;
+
+    /** an app call surface is in front: the WebView activity or the native call activity */
+    static boolean appVisible() {
+        return MainActivity.isVisible() || CallActivity.Companion.getResumed();
+    }
+
+    /**
+     * The camera turned on / off (t6107u keep the camera alive). While the app is visible the running call FGS is
+     * re-started with the camera type added / dropped; from the background nothing is re-started (cb23513), so a
+     * camera turned on there keeps the current types until the app is in front again.
+     */
+    static void setCamera(Context ctx, boolean on) {
+        if (cameraOn == on) return;
+        cameraOn = on;
+        if (up && appVisible()) start(ctx, lastId, lastName, lastConnected, true);
+    }
 
     static boolean start(Context ctx, String callId, String name, boolean connected) {
         return start(ctx, callId, name, connected, MainActivity.isVisible());
@@ -38,7 +58,8 @@ public class CallService extends Service {
 
     /** userVisible: started from a visible activity or a user tap (Accept), which lets Android 14+ grant the mic type */
     static boolean start(Context ctx, String callId, String name, boolean connected, boolean userVisible) {
-        if (!CallFgsPolicy.restart(up, MainActivity.isVisible())) {
+        lastId = callId == null ? "" : callId; lastName = name == null ? "" : name; lastConnected = connected;
+        if (!CallFgsPolicy.restart(up, appVisible())) {
             // app in the background with the call FGS already up: keep it (and its microphone type) as it is
             try {
                 ctx.getSystemService(NotificationManager.class).notify(NOTIF_ID, build(ctx, callId, name, connected));
@@ -63,6 +84,7 @@ public class CallService extends Service {
     }
 
     static void stop(Context ctx) {
+        cameraOn = false;
         ctx.stopService(new Intent(ctx, CallService.class));
     }
 
@@ -74,7 +96,8 @@ public class CallService extends Service {
         Notification n = build(this, callId, name, connected);
         boolean userVisible = intent != null && intent.getBooleanExtra(EXTRA_USER_VISIBLE, false);
         boolean mic = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
-        int type = CallFgsPolicy.types(Build.VERSION.SDK_INT, mic, userVisible);
+        boolean cam = cameraOn && ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;
+        int type = CallFgsPolicy.types(Build.VERSION.SDK_INT, mic, userVisible, cam);
         while (true) {
             try {
                 ServiceCompat.startForeground(this, NOTIF_ID, n, type);

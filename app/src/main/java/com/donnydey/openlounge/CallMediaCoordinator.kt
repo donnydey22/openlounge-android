@@ -90,6 +90,7 @@ object CallMediaCoordinator {
     private fun camera(on: Boolean, face: String, done: (Boolean, String?, String?) -> Unit) {
         val oc = olcall ?: return done(false, null, "no call")
         oc.camera(on, face)
+        appCtx?.let { CallService.setCamera(it, on) } // t6107u: camera FGS type follows the camera
         if (on && !videoOn) { videoOn = true; host?.nativeCallVideo(true) }
         done(true, "true", null)
     }
@@ -115,6 +116,7 @@ object CallMediaCoordinator {
         main.post {
             val ctx = appCtx ?: return@post done(false, null, "no context")
             if (callId != id) return@post done(false, null, "cancelled")
+            CallService.setCamera(ctx, wantVideo) // t6107u: a call that starts with the camera on claims the camera type
             olcall?.let { it.hangup("replaced"); olcall = null; NativeCallVideo.endOlcall() }
             var answered = false
             val oc = OlcallCall(ctx, id, media, wantVideo, peerId,
@@ -147,7 +149,8 @@ object CallMediaCoordinator {
                         if (!normal) host?.emit(JSONObject().put("state", "failed").put("callId", id).toString())
                         if (!answered) { answered = true; done(false, null, "network:olcall:$reason") }
                     }
-                })
+                },
+                onRemoteMuted = { m -> host?.emit(JSONObject().put("state", "remote-muted").put("callId", id).put("on", m).toString()) })
             olcall = oc
             oc.start()
             if (wantVideo && !videoOn) { videoOn = true; host?.nativeCallVideo(true) }

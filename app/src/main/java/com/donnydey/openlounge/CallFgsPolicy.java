@@ -11,13 +11,25 @@ package com.donnydey.openlounge;
 final class CallFgsPolicy {
     static final int PHONE_CALL = 4;   // ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
     static final int MICROPHONE = 128; // ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+    static final int CAMERA = 64;      // ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
 
     private CallFgsPolicy() {}
 
     static int types(int sdk, boolean micGranted, boolean userVisibleStart) {
+        return types(sdk, micGranted, userVisibleStart, false);
+    }
+
+    /**
+     * cameraOn: this phone's camera is on and CAMERA is granted (t6107u keep the camera alive). Android 11+ needs the
+     * camera type to keep capturing in the background, and 14+ grants it only to a start from a visible app, same
+     * rule as the microphone. Camera off = no camera type.
+     */
+    static int types(int sdk, boolean micGranted, boolean userVisibleStart, boolean cameraOn) {
         if (sdk < 29) return 0;
         int t = PHONE_CALL;
-        if (sdk >= 30 && micGranted && (sdk < 34 || userVisibleStart)) t |= MICROPHONE;
+        boolean whileInUse = sdk < 34 || userVisibleStart;
+        if (sdk >= 30 && micGranted && whileInUse) t |= MICROPHONE;
+        if (sdk >= 30 && cameraOn && whileInUse) t |= CAMERA;
         return t;
     }
 
@@ -32,8 +44,9 @@ final class CallFgsPolicy {
         return !fgsUp || appVisible;
     }
 
-    /** fallback after a failed startForeground: drop microphone, keep phoneCall; 0 = give up */
+    /** fallback after a failed startForeground: drop camera, then microphone, keep phoneCall; 0 = give up */
     static int fallback(int failedTypes) {
+        if ((failedTypes & CAMERA) != 0) return failedTypes & ~CAMERA;
         return (failedTypes & MICROPHONE) != 0 ? (failedTypes & ~MICROPHONE) : 0;
     }
 }
