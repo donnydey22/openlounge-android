@@ -2,6 +2,7 @@ package com.donnydey.openlounge;
 
 import android.Manifest;
 import android.app.Notification;
+import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
@@ -28,6 +29,8 @@ public class CallService extends Service {
     static final String EXTRA_NAME = "name";
     static final String EXTRA_CONNECTED = "connected";
     static final String EXTRA_USER_VISIBLE = "user_visible";
+    /** the call FGS is up (startForeground succeeded and the service is not destroyed) */
+    private static volatile boolean up = false;
 
     static boolean start(Context ctx, String callId, String name, boolean connected) {
         return start(ctx, callId, name, connected, MainActivity.isVisible());
@@ -35,6 +38,15 @@ public class CallService extends Service {
 
     /** userVisible: started from a visible activity or a user tap (Accept), which lets Android 14+ grant the mic type */
     static boolean start(Context ctx, String callId, String name, boolean connected, boolean userVisible) {
+        if (!CallFgsPolicy.restart(up, MainActivity.isVisible())) {
+            // app in the background with the call FGS already up: keep it (and its microphone type) as it is
+            try {
+                ctx.getSystemService(NotificationManager.class).notify(NOTIF_ID, build(ctx, callId, name, connected));
+            } catch (RuntimeException e) {
+                Log.w(TAG, "call notification refresh failed: " + e.getClass().getSimpleName());
+            }
+            return true;
+        }
         Intent i = new Intent(ctx, CallService.class)
                 .putExtra(CallNotifications.EXTRA_CALL_ID, callId == null ? "" : callId)
                 .putExtra(EXTRA_NAME, name == null ? "" : name)
@@ -59,13 +71,14 @@ public class CallService extends Service {
         String callId = intent == null ? "" : intent.getStringExtra(CallNotifications.EXTRA_CALL_ID);
         String name = intent == null ? "" : intent.getStringExtra(EXTRA_NAME);
         boolean connected = intent != null && intent.getBooleanExtra(EXTRA_CONNECTED, true);
-        Notification n = build(callId, name, connected);
+        Notification n = build(this, callId, name, connected);
         boolean userVisible = intent != null && intent.getBooleanExtra(EXTRA_USER_VISIBLE, false);
         boolean mic = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
         int type = CallFgsPolicy.types(Build.VERSION.SDK_INT, mic, userVisible);
         while (true) {
             try {
                 ServiceCompat.startForeground(this, NOTIF_ID, n, type);
+                up = true;
                 Log.i(TAG, "call foreground service up (type " + type + ")");
                 break;
             } catch (RuntimeException e) {
@@ -79,18 +92,18 @@ public class CallService extends Service {
         return START_NOT_STICKY; // never resurrect a call after the process died
     }
 
-    private Notification build(String callId, String name, boolean connected) {
-        CallNotifications.ensureChannels(this);
-        Intent open = new Intent(this, MainActivity.class).setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        PendingIntent openPi = PendingIntent.getActivity(this, 7002, open, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        PendingIntent hangPi = CallActionReceiver.pending(this, CallActionReceiver.ACTION_HANGUP, callId);
-        String who = (name == null || name.trim().isEmpty()) ? getString(R.string.app_name) : name.trim();
+    private static Notification build(Context ctx, String callId, String name, boolean connected) {
+        CallNotifications.ensureChannels(ctx);
+        Intent open = new Intent(ctx, MainActivity.class).setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        PendingIntent openPi = PendingIntent.getActivity(ctx, 7002, open, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        PendingIntent hangPi = CallActionReceiver.pending(ctx, CallActionReceiver.ACTION_HANGUP, callId);
+        String who = (name == null || name.trim().isEmpty()) ? ctx.getString(R.string.app_name) : name.trim();
         Person p = new Person.Builder().setName(who).build();
-        NotificationCompat.Builder b = new NotificationCompat.Builder(this, CallNotifications.CHANNEL_ONGOING)
+        NotificationCompat.Builder b = new NotificationCompat.Builder(ctx, CallNotifications.CHANNEL_ONGOING)
                 .setSmallIcon(R.drawable.ic_stat_notify)
-                .setColor(ContextCompat.getColor(this, R.color.openlounge_accent))
-                .setContentTitle(getString(R.string.call_ongoing_title))
-                .setContentText(getString(connected ? R.string.call_ongoing_text : R.string.call_calling_text))
+                .setColor(ContextCompat.getColor(ctx, R.color.openlounge_accent))
+                .setContentTitle(ctx.getString(R.string.call_ongoing_title))
+                .setContentText(ctx.getString(connected ? R.string.call_ongoing_text : R.string.call_calling_text))
                 .setCategory(NotificationCompat.CATEGORY_CALL)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
@@ -102,8 +115,14 @@ public class CallService extends Service {
             b.setStyle(NotificationCompat.CallStyle.forOngoingCall(p, hangPi));
             return b.build();
         } catch (RuntimeException e) {
-            return b.setStyle(null).addAction(0, getString(R.string.call_hang_up), hangPi).build();
+            return b.setStyle(null).addAction(0, ctx.getString(R.string.call_hang_up), hangPi).build();
         }
+    }
+
+    @Override
+    public void onDestroy() {
+        up = false;
+        super.onDestroy();
     }
 
     @Override

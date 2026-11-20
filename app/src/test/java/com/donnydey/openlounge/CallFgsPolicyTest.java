@@ -13,4 +13,8 @@ public class CallFgsPolicyTest {
     @Test public void u_visibleStartMic() { assertEquals(CallFgsPolicy.PHONE_CALL | CallFgsPolicy.MICROPHONE, CallFgsPolicy.types(35, true, true)); }
     @Test public void fallbackDropsMic() { assertEquals(CallFgsPolicy.PHONE_CALL, CallFgsPolicy.fallback(CallFgsPolicy.PHONE_CALL | CallFgsPolicy.MICROPHONE)); }
     @Test public void fallbackGivesUp() { assertEquals(0, CallFgsPolicy.fallback(CallFgsPolicy.PHONE_CALL)); }
+    // background re-start of the running call FGS (call:connected / link rejoin while away) would drop the mic type
+    @Test public void runningFgs_background_noRestart() { assertEquals(false, CallFgsPolicy.restart(true, false)); }
+    @Test public void runningFgs_visible_restart() { assertEquals(true, CallFgsPolicy.restart(true, true)); }
+    @Test public void noFgs_start() { assertEquals(true, CallFgsPolicy.restart(false, false)); assertEquals(true, CallFgsPolicy.restart(false, true)); }
 }

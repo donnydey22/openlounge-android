@@ -21,6 +21,17 @@ final class CallFgsPolicy {
         return t;
     }
 
+    /**
+     * Re-start the call service (startForegroundService + startForeground) for this request? Not while the call
+     * FGS is already up and the app is in the background: Android 12+ refuses a background FGS start, and on 14+ a
+     * background re-start re-evaluates while-in-use eligibility, so startForeground lost the microphone type the
+     * visible start had granted (call:connected or a link rejoin after a network change while the app was away
+     * silenced the mic). The running FGS keeps its types; only its notification is refreshed.
+     */
+    static boolean restart(boolean fgsUp, boolean appVisible) {
+        return !fgsUp || appVisible;
+    }
+
     /** fallback after a failed startForeground: drop microphone, keep phoneCall; 0 = give up */
     static int fallback(int failedTypes) {
         return (failedTypes & MICROPHONE) != 0 ? (failedTypes & ~MICROPHONE) : 0;
