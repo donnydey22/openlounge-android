@@ -55,20 +55,20 @@ object CallMediaCoordinator {
                 val action = if (wantVideo) OlCallPermissions.Action.START_OR_ACCEPT_VIDEO
                     else OlCallPermissions.Action.START_OR_ACCEPT_AUDIO
                 // mic (audio) or mic+camera in one combined request (video), only at this connect tap; denial is silent
-                ensurePerms(action) { ok ->
-                    if (!ok) { OlCallLogs.failedBeforeStart(id, media?.optString("token"), wantVideo, "permission-denied"); return@ensurePerms done(false, null, "permission-denied") }
-                    if (callId != id) return@ensurePerms done(false, null, "cancelled")
+                ensurePerms(action) { granted -> camOrAudio(id, wantVideo, granted) { ok, wantVideo ->
+                    if (!ok) { OlCallLogs.failedBeforeStart(id, media?.optString("token"), wantVideo, "permission-denied"); return@camOrAudio done(false, null, "permission-denied") }
+                    if (callId != id) return@camOrAudio done(false, null, "cancelled")
                     if (!OlcallRoute.eligible(media, android.os.Build.VERSION.SDK_INT, android.os.Build.SUPPORTED_ABIS.toList())) {
                         CallDiskLog.mark("olcall-unavailable", "sdk=${android.os.Build.VERSION.SDK_INT} provider=${media?.optString("provider") ?: ""}")
                         OlCallLogs.failedBeforeStart(id, media?.optString("token"), wantVideo, "olcall-unavailable")
-                        return@ensurePerms done(false, null, "olcall-unavailable")
+                        return@camOrAudio done(false, null, "olcall-unavailable")
                     }
                     // Link join (Open Lounge Audio link): nothing rang, so no call:outgoing / Accept started the call
                     // foreground service. Start it now, at the user's tap and before Connecting, so Android 14+
                     // grants the microphone type; the server drives Idle -> JoiningUrl -> Connecting on join.
                     if (LinkJoinPolicy.micFgsBeforeConnect(c)) appCtx?.let { CallService.start(it, id, c.optString("name"), false, true) }
                     startOlcall(id, media!!, wantVideo, c.optString("peerId"), done)
-                }
+                } }
             }
             "camera" -> {
                 val on = c.optBoolean("on"); val face = c.optString("facing", "user")
@@ -176,6 +176,16 @@ object CallMediaCoordinator {
             this.callId = callId
         }
         return true
+    }
+
+    /** t6111u: every door opens with the camera on. Camera refused (mic held) = join with audio and the camera-off
+     *  tile (page + call screen told "camera-unavailable"), never a failed call. Mic refused still fails silently. */
+    private fun camOrAudio(id: String, wantVideo: Boolean, granted: Boolean, go: (Boolean, Boolean) -> Unit) {
+        if (granted || !wantVideo) return go(granted, wantVideo)
+        ensurePerms(OlCallPermissions.Action.START_OR_ACCEPT_AUDIO) { mic ->
+            if (mic) host?.emit(JSONObject().put("state", "camera-unavailable").put("callId", id).toString())
+            go(mic, false)
+        }
     }
 
     private fun ensurePerms(action: OlCallPermissions.Action, then: (Boolean) -> Unit) {

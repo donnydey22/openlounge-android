@@ -57,6 +57,8 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
             if (muted) remoteMic.add(id) else remoteMic.remove(id)
             screens.toList().forEach { it.onRemoteMic(id, muted) }
         }
+        /** Main thread. t6111u: the camera was refused at join, so the call went on with audio: self tile = camera off. */
+        @JvmStatic fun onCameraUnavailable(id: String) { if (id.isNotEmpty()) screens.toList().forEach { it.onCamUnavailable(id) } }
         private val remoteCam = mutableSetOf<String>()
         /** Main thread. The other person's camera turned on / off (olcall remote video state). Never moves the state. */
         @JvmStatic fun onRemoteVideo(id: String, on: Boolean) {
@@ -144,6 +146,7 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
     private fun onRemoteMic(id: String, muted: Boolean) { if (view != null && id == callId) { remoteMuted = muted; render() } }
     private var remoteMuted = false
     private lateinit var muteBadge: android.widget.ImageView
+    private fun onCamUnavailable(id: String) { if (view != null && id == callId) { camOn = false; render() } }
     private fun onRemoteCam(id: String, on: Boolean) { if (view != null && id == callId) { remoteOn = on; render() } }
     /** One path (t6093u): a call link (no ring). Alone with this phone's leg up reads "Waiting for <name>…". */
     private var link = false

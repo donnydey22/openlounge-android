@@ -232,6 +232,27 @@ class NativeCallScreenRenderTest {
         assertTrue("S5 Waiting for Jordan…: ${texts(root)}", texts(root).contains("Waiting for Jordan…"))
     }
 
+    /** t6111u: a link opens camera-on; the camera refused at join = the camera-off self tile, call goes on with audio. */
+    @Test fun linkCameraOnRefused() {
+        val act = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val root = FrameLayout(act); act.setContentView(root)
+        root.addView(hallway(act), FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        val s = NativeCallScreen(act, root, object : NativeCallScreen.Actions {
+            override fun pageCall(detailJson: String): Boolean = true
+            override fun speaker(on: Boolean) {}
+            override fun camera(on: Boolean, facing: String, done: (Boolean) -> Unit) { done(true) }
+        })
+        s.onPageCall("call:answering", JSONObject().put("callId", "C1").put("name", "Jordan Ellis").put("video", true).put("photo", fixturePhoto(act)).put("link", true))
+        lc(s, "C1", "connecting", viaPage = false); NativeCallScreen.onNativeMediaFlowing("C1"); lc(s, "C1", "in_room", viaPage = false)
+        NativeCallScreen.onRemoteVideo("C1", true); s.onNativeVideo(true) // their video arrives -> the video stage
+        assertTrue("link opens camera on: Camera + Flip: ${texts(root)}", texts(root).contains("Camera") && texts(root).contains("Flip"))
+        NativeCallScreen.onCameraUnavailable("C1")
+        snap(root, "C2-link-camera-refused")
+        val t = texts(root)
+        assertTrue("camera refused: Video toggle (off), Mute still there: $t", t.contains("Video") && t.contains("Mute") && !t.contains("Flip"))
+        assertTrue("camera refused: camera-off self tile", findDesc(root, "Self view, camera off")?.visibility == View.VISIBLE)
+    }
+
     @Test fun audioCallFlow() {
         val act = Robolectric.buildActivity(Activity::class.java).setup().get()
         val root = FrameLayout(act); act.setContentView(root)

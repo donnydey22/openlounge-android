@@ -1113,6 +1113,7 @@ public class MainActivity extends AppCompatActivity implements SessionBridge.Hos
             if ("connected".equals(st)) handler.post(() -> NativeCallScreen.onNativeMediaFlowing(cid));
             else if ("failed".equals(st) || "ended".equals(st)) handler.post(() -> NativeCallScreen.onNativeMediaEnded(cid));
             else if ("remote-video".equals(st)) { boolean on = d.optBoolean("on", false); handler.post(() -> NativeCallScreen.onRemoteVideo(cid, on)); }
+            else if ("camera-unavailable".equals(st)) handler.post(() -> NativeCallScreen.onCameraUnavailable(cid));
             else if ("remote-muted".equals(st)) { boolean on = d.optBoolean("on", false); handler.post(() -> NativeCallScreen.onRemoteMuted(cid, on)); }
         } catch (Exception ignored) {}
         if (webView == null || !pageLoaded) return;
