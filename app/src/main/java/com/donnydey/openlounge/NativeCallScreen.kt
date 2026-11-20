@@ -624,11 +624,13 @@ class NativeCallScreen(private val act: Activity, private val root: FrameLayout,
         // Audio in-call (Donny's design): Speaker (white when on), Mute, End call. Video row only on the video stage.
         val pre = !live && !failed && !endedCard
         // One path (t6093u): every live call is the same audio + video room, so the camera toggle is always in the row.
-        val videoRow = !pre && !failed && !endedCard
+        // Once this phone's olcall leg is up (media) the camera works too: alone in a link ("Waiting for <name>…") and the
+        // video-ring caller ("Ringing…", already in the live room) get the toggle before the other side is in.
+        val videoRow = (!pre || media) && !failed && !endedCard
         endBtn.label.text = "End call"
         bFirst.box.visibility = View.VISIBLE
         bMic.box.visibility = View.VISIBLE
-        bFlip.box.visibility = if (camOn && !failed && !pre) View.VISIBLE else View.GONE
+        bFlip.box.visibility = if (camOn && videoRow) View.VISIBLE else View.GONE
         // Same lucide glyphs as iOS (Assets.xcassets ol_call_*): speaker without/with second wave, plain hung-up handset.
         bFlip.set("Flip", R.drawable.ol_call_flip)
         bFirst.set("Speaker", if (speakerOn) R.drawable.ol_call_speaker else R.drawable.ol_call_speaker_off, active = speakerOn, enabled = !pre || media)

@@ -153,6 +153,36 @@ class NativeCallScreenRenderTest {
         else NativeCallScreen.onServerLifecycle(com.donnydey.openlounge.olcall.OlCallLifecycle.parse(l)!!)
     }
 
+    /** t6093u/t6094u: a link join opens the same native live room; alone = "Waiting for <first>…", camera toggle always there. */
+    @Test fun linkLiveRoom() {
+        val act = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val root = FrameLayout(act); act.setContentView(root)
+        root.addView(hallway(act), FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        val s = NativeCallScreen(act, root, object : NativeCallScreen.Actions {
+            override fun pageCall(detailJson: String): Boolean = true
+            override fun speaker(on: Boolean) {}
+            override fun camera(on: Boolean, facing: String, done: (Boolean) -> Unit) { done(true) }
+        })
+        s.onPageCall("call:answering", JSONObject().put("callId", "L1").put("name", "Jordan Ellis").put("video", false).put("photo", fixturePhoto(act)).put("link", true))
+        idlePhoto()
+        lc(s, "L1", "connecting", viaPage = false)
+        NativeCallScreen.onNativeMediaFlowing("L1")
+        var t = texts(root); snap(root, "L1-link-waiting")
+        assertTrue("link alone: Waiting for Jordan…, never Connecting…: $t", t.contains("Waiting for Jordan…") && !t.contains("Connecting…"))
+        assertTrue("camera toggle present in the link room: $t", t.contains("Video") || t.contains("Camera"))
+        lc(s, "L1", "in_room", viaPage = false)
+        t = texts(root); snap(root, "L2-link-live-avatar")
+        assertTrue("in_room: timer, no Waiting/Connecting: $t", t.any { Regex("^\\d+:\\d\\d$").matches(it) } && !t.contains("Connecting…") && !t.any { it.startsWith("Waiting for") })
+        assertTrue("controls: Speaker / Video / Mute / End call: $t", t.containsAll(listOf("Speaker", "Mute", "End call")) && t.contains("Video"))
+        findClickable(root, "Video")!!.performClick()
+        s.onNativeVideo(true)
+        t = texts(root); snap(root, "L3-link-camera-on")
+        assertTrue("camera on: Camera + Flip: $t", t.contains("Camera") && t.contains("Flip"))
+        NativeCallScreen.onRemoteVideo("L1", true); snap(root, "L4-link-remote-video-on")
+        NativeCallScreen.onRemoteVideo("L1", false); t = texts(root); snap(root, "L5-link-remote-camera-off")
+        assertTrue("their camera off: their name/avatar tile again: $t", t.contains("Jordan Ellis"))
+    }
+
     @Test fun audioCallFlow() {
         val act = Robolectric.buildActivity(Activity::class.java).setup().get()
         val root = FrameLayout(act); act.setContentView(root)
